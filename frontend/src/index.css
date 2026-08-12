@@ -1,0 +1,519 @@
+:root,
+[data-theme="dark"] {
+  --bg: #0b0f14;
+  --panel: #131922;
+  --border: #232b36;
+  --text: #e6e9ef;
+  --muted: #8b94a3;
+  --green: #16a34a;
+  --red: #dc2626;
+  --amber: #d97706;
+  --accent: #3b82f6;
+}
+
+[data-theme="light"] {
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --border: #dbe1e8;
+  --text: #14181f;
+  --muted: #5a6472;
+  --green: #16a34a;
+  --red: #dc2626;
+  --amber: #b45309;
+  --accent: #2563eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", -apple-system, "Segoe UI", sans-serif;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr 320px;
+  overflow: hidden;
+}
+
+.sidebar,
+.right-panel {
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.right-panel {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.content {
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.panel h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* --- Broker-style card tiles (News/Signals) --- */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+  border-color: var(--accent);
+}
+
+.card-accent-green { border-left: 3px solid var(--green); }
+.card-accent-red { border-left: 3px solid var(--red); }
+.card-accent-muted { border-left: 3px solid var(--muted); }
+
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.badge-green { background: rgba(22, 163, 74, 0.14); color: var(--green); }
+.badge-red { background: rgba(220, 38, 38, 0.14); color: var(--red); }
+.badge-muted { background: rgba(139, 148, 163, 0.14); color: var(--muted); }
+.badge-accent { background: rgba(59, 130, 246, 0.14); color: var(--accent); }
+
+/* --- Positive-signal popup: same fixed-stack/toast mechanics as the
+   JARVIS toasts below, deliberately positioned top-right (JARVIS's own
+   stack is bottom-right) so the two never overlap, and styled more
+   prominent -- this is meant to catch the eye the moment a BUY signal
+   is approved, not blend in as routine chatter. --- */
+.signal-alert-stack {
+  position: fixed;
+  top: 66px;
+  right: 20px;
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.signal-alert-card {
+  pointer-events: auto;
+  width: 300px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--green);
+  border-radius: 10px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  animation: signal-alert-in 0.25s ease-out;
+}
+
+.signal-alert-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.signal-alert-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 0 0 8px;
+}
+
+.signal-alert-levels {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.signal-alert-cta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+@keyframes signal-alert-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* --- Option chain ladder (Angel One-style) --- */
+.chain-flash-up { animation: chain-flash-up 0.6s ease-out; }
+.chain-flash-down { animation: chain-flash-down 0.6s ease-out; }
+@keyframes chain-flash-up {
+  0% { background-color: rgba(22, 163, 74, 0.35); }
+  100% { background-color: transparent; }
+}
+@keyframes chain-flash-down {
+  0% { background-color: rgba(220, 38, 38, 0.35); }
+  100% { background-color: transparent; }
+}
+
+.chain-oi-bar-wrap {
+  position: relative;
+  display: inline-block;
+  min-width: 64px;
+  overflow: hidden; /* keeps the bar clipped to this cell -- without this, its -1px top/bottom inset could paint outside the row (into the sticky header when scrolled to the top) since neither the <td> nor this wrap bounded it */
+}
+.chain-oi-bar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  background: rgba(59, 130, 246, 0.14);
+  border-radius: 3px;
+  z-index: 0;
+}
+.chain-oi-bar-red { background: rgba(220, 38, 38, 0.14); }
+.chain-oi-value {
+  position: relative;
+  z-index: 1;
+}
+
+.chain-row { transition: background-color 0.1s ease; }
+.chain-row:hover { background-color: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chain-th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 2; /* keeps the sticky header reliably above scrolled body rows -- without this, an absolutely-positioned descendant (e.g. .chain-oi-bar) in the topmost visible row could win the paint order and appear to sit "on top of" the header */
+  padding: 6px 8px;
+}
+.chain-td { padding: 6px 8px; }
+
+.kill-switch-banner {
+  background: var(--red);
+  color: white;
+  text-align: center;
+  padding: 6px;
+  font-weight: 600;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.status-dot.ok {
+  background: var(--green);
+}
+.status-dot.bad {
+  background: var(--red);
+}
+.status-dot.warn {
+  background: var(--amber);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.theme-toggle:hover {
+  border-color: var(--accent);
+}
+
+/* --- JARVIS panel (manual Chapter 14) --- */
+.jarvis-fab {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+/* Unread-announcement count on the FAB (manual 14.16) -- visible proof
+   that JARVIS has something to say even before the panel is opened. */
+.jarvis-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--red, #e5484d);
+  color: #fff;
+  border-radius: 999px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Proactive announcement toasts (manual 14.16) -- appear near the FAB
+   regardless of whether the panel is open, and self-dismiss after a
+   few seconds (see jarvisStore.js's connectAnnouncements). Clicking
+   one opens the full panel on that message. */
+.jarvis-toast-stack {
+  position: fixed;
+  bottom: 70px;
+  right: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.jarvis-toast {
+  pointer-events: auto;
+  max-width: 280px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  animation: jarvis-toast-in 0.2s ease-out;
+}
+
+.jarvis-toast-risk_critical,
+.jarvis-toast-risk_warning,
+.jarvis-toast-kill_switch {
+  border-left-color: var(--red, #e5484d);
+}
+
+@keyframes jarvis-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.jarvis-panel {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  width: 340px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.jarvis-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.jarvis-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.jarvis-announcements {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  max-height: 90px;
+  overflow-y: auto;
+}
+
+.jarvis-announce {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 0;
+}
+
+.jarvis-announce-risk_critical,
+.jarvis-announce-kill_switch {
+  color: var(--red);
+}
+
+.jarvis-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 160px;
+}
+
+.jarvis-empty {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-content: flex-start;
+}
+
+.jarvis-suggestion {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.jarvis-suggestion:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.jarvis-msg {
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  max-width: 88%;
+  white-space: pre-wrap;
+}
+
+.jarvis-msg-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+}
+
+.jarvis-msg-jarvis {
+  align-self: flex-start;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.jarvis-thinking {
+  opacity: 0.6;
+}
+
+.jarvis-confirm-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--amber);
+}
+
+.jarvis-input-row {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.jarvis-input-row input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.jarvis-mic {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.jarvis-mic.listening {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.jarvis-input-row button[type="submit"] {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}

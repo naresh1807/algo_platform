@@ -1,0 +1,43 @@
+version: "3.9"
+
+# Only the two stateful services this platform needs locally: MySQL
+# (the system of record, per the manual's tech stack) and Redis (backs
+# both Channels and Celery). Django and the React dev server are run
+# directly on the host (see README) rather than containerized here --
+# that keeps `manage.py runserver`/`npm run dev`'s fast reload working
+# without volume-mount overhead, and is the simplest setup for a
+# personal single-operator platform. Add app containers later if this
+# ever needs to run somewhere other than your own machine.
+
+services:
+  # SECURITY NOTE: this file has real credentials in it (from your own
+  # local setup) rather than placeholders -- fine for a file that stays
+  # on your own machine, but do NOT push this file to a public git repo
+  # as-is. If you ever do use git, either keep this file untracked
+  # (add docker/docker-compose.yml to .gitignore) or swap these back to
+  # placeholder values and pass real ones via a local .env docker-compose
+  # also reads, the same way Django's settings.py does.
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: algo_trading
+      MYSQL_USER: naresh
+      MYSQL_PASSWORD: Thanvika@1816
+      MYSQL_ROOT_PASSWORD: Haindhavi@1816
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mysql_data:
+  redis_data:

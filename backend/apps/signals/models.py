@@ -1,0 +1,122 @@
+from django.db import models
+
+from common.constants import MarketRegime, SignalStatus, SignalType
+
+
+class TradingSignal(models.Model):
+    """
+    manual section 7: trading_signals. This is the central "why did/didn't
+    a trade happen" record the manual's Final Rule (section 22) depends
+    on -- every signal is stored whether or not it was ever executed, and
+    `reason` always explains rejections in plain text so the daily review
+    (apps/learning) has something concrete to read.
+
+    The four score fields (technical_score, sentiment_score, risk_score,
+    options_score) are stored individually rather than only storing
+    `total_score` so that later analysis can answer "was this trade
+    rejected because of a weak technical setup, bad sentiment, options
+    flow disagreeing, or a risk-engine veto?" without needing to
+    recompute anything.
+    """
+
+    symbol = models.CharField(max_length=32, db_index=True)
+    signal_type = models.CharField(max_length=16, choices=SignalType.choices)
+    entry_price = models.DecimalField(max_digits=14, decimal_places=4)
+    stop_loss = models.DecimalField(max_digits=14, decimal_places=4)
+    target_1 = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+    target_2 = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+    position_size = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+
+    total_score = models.FloatField()
+    technical_score = models.FloatField()
+    sentiment_score = models.FloatField()
+    risk_score = models.FloatField()
+    options_score = models.FloatField(
+        default=0.5,
+        help_text="Options-chain confirmation score from "
+                  "apps.options.signals_engine.options_confluence_score() -- "
+                  "0.5 (neutral) when no options data is synced for the symbol yet.",
+    )
+    regime = models.CharField(max_length=32, choices=MarketRegime.choices)
+
+    ml_win_probability = models.FloatField(
+        null=True, blank=True,
+        help_text=(
+            "Win-probability from apps.learning.ml_train's logistic-regression "
+            "model (see that module's docstring), scored at signal-creation "
+            "time via apps.learning.ml_predict. Purely advisory -- for the "
+            "dashboard and daily review to read alongside the four rule-based "
+            "scores above. NULL until a model has been trained (needs "
+            "apps.learning.ml_train.MIN_TRAINING_SAMPLES closed trades) and "
+            "never gates BUY/NO_TRADE on its own; the rule engine above this "
+            "field is still the only thing that decides approved/rejected."
+        ),
+    )
+
+    # Raw indicator snapshot at signal-creation time (apps.market_data.
+    # indicators.compute_indicators' `ind` dict), stored here -- not
+    # recomputed later -- specifically so apps.learning.ml_features can
+    # feed the win-probability model richer inputs than the four
+    # composite scores alone, without training and live inference ever
+    # being able to compute this snapshot two different ways (the exact
+    # risk _create_signal's docstring already flagged when composite
+    # scores were the only features). All nullable: legacy rows created
+    # before this field existed, and the no-historical-data NO_TRADE
+    # branch (which never reaches compute_indicators' return), leave
+    # these unset -- ml_features treats a null the same as "feature not
+    # available for this row," never as a crash.
+    #
+    # Stored pre-normalized (ratios, not raw price-scale numbers) so a
+    # feature column means the same thing across symbols at very
+    # different price levels (NIFTY vs. a low-priced stock): *_pct
+    # fields divide the raw indicator by that candle's close price.
+    # rsi/adx are already 0-100 scales and bb_width/relative_volume are
+    # already unitless ratios, so those are stored as compute_indicators
+    # returns them.
+    ind_rsi = models.FloatField(null=True, blank=True, help_text="RSI (0-100) at signal time.")
+    ind_adx = models.FloatField(null=True, blank=True, help_text="ADX (0-100) at signal time.")
+    ind_bb_width = models.FloatField(
+        null=True, blank=True,
+        help_text="Bollinger band width as a fraction of the middle band (already unitless).",
+    )
+    ind_relative_volume = models.FloatField(
+        null=True, blank=True, help_text="Volume vs. its 20-period average, as a ratio.",
+    )
+    ind_atr_pct = models.FloatField(
+        null=True, blank=True, help_text="ATR divided by close price (scale-free volatility).",
+    )
+    ind_macd_hist_pct = models.FloatField(
+        null=True, blank=True, help_text="MACD histogram divided by close price.",
+    )
+    ind_ema9_slope_pct = models.FloatField(
+        null=True, blank=True, help_text="EMA9 candle-over-candle change divided by close price.",
+    )
+    ind_ema21_slope_pct = models.FloatField(
+        null=True, blank=True, help_text="EMA21 candle-over-candle change divided by close price.",
+    )
+
+
+    status = models.CharField(max_length=16, choices=SignalStatus.choices, default=SignalStatus.PENDING)
+    reason = models.TextField(
+        help_text="Human-readable explanation, especially for rejections -- "
+                  "this is what the daily review reads."
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    # Links to the strategy/model version that produced this signal, so a
+    # later rollback (manual section 14) can find every signal a bad
+    # version produced. Nullable + PROTECT: a signal must never silently
+    # lose its provenance, and a strategy version must never be deletable
+    # while signals still reference it.
+    strategy_version = models.ForeignKey(
+        "learning.StrategyVersion", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="signals",
+    )
+
+    class Meta:
+        db_table = "trading_signals"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["symbol", "-created_at"]), models.Index(fields=["status"])]
+
+    def __str__(self):
+        return f"{self.symbol} {self.signal_type} score={self.total_score:.2f} [{self.status}]"
