@@ -26,6 +26,31 @@ class TradingSignalModelTests(TestCase):
         self.assertIn("NIFTY", str(signal))
         self.assertIn("buy", str(signal))
 
+    def test_option_side_and_strike_price_default_to_null(self):
+        # Every equity/index-engine signal (apps.signals.engine) never
+        # sets these -- only apps.options.index_direction_strategy's
+        # APPROVED signals do -- so the ordinary create-without-them
+        # path (every existing call site, including this test file's
+        # own fixtures) must keep working unchanged.
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.BUY, entry_price=100, stop_loss=95,
+            total_score=0.85, technical_score=0.9, sentiment_score=0.5, risk_score=1.0,
+            regime="trending", status=SignalStatus.APPROVED, reason="test",
+        )
+        self.assertIsNone(signal.option_side)
+        self.assertIsNone(signal.strike_price)
+
+    def test_option_side_and_strike_price_round_trip(self):
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.SELL, entry_price=100, stop_loss=105,
+            total_score=0.85, technical_score=0.9, sentiment_score=0.5, risk_score=1.0,
+            regime="trending", status=SignalStatus.APPROVED, reason="test",
+            option_side="PE", strike_price=Decimal("24400.00"),
+        )
+        signal.refresh_from_db()
+        self.assertEqual(signal.option_side, "PE")
+        self.assertEqual(signal.strike_price, Decimal("24400.00"))
+
 
 class GenerateSignalTests(TestCase):
     def test_no_trade_logged_with_insufficient_data(self):

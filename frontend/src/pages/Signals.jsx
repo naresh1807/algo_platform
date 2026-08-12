@@ -54,7 +54,11 @@ export default function Signals() {
         <div className="card-grid">
           {signals.map((s) => {
             const isBuy = s.signal_type === "buy";
-            const accent = isBuy ? "green" : "muted";
+            const isSell = s.signal_type === "sell";
+            // SELL (apps.options.index_direction_strategy's PE case) is
+            // just as much a real, tradeable signal as BUY -- it must
+            // not read as "muted"/rejected the way NO_TRADE does.
+            const accent = isBuy ? "green" : isSell ? "red" : "muted";
             const statusBadge =
               s.status === "approved" || s.status === "executed" ? "badge-green"
               : s.status === "rejected" ? "badge-red"
@@ -64,7 +68,12 @@ export default function Signals() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 15, fontWeight: 700 }}>{s.symbol}</span>
-                    <span className={`badge ${isBuy ? "badge-green" : "badge-muted"}`}>{s.signal_type}</span>
+                    <span className={`badge ${isBuy ? "badge-green" : isSell ? "badge-red" : "badge-muted"}`}>{s.signal_type}</span>
+                    {s.option_side && (
+                      <span className="badge badge-muted">
+                        {s.strike_price ? `${s.strike_price} ` : ""}{s.option_side}
+                      </span>
+                    )}
                   </div>
                   <span className={`badge ${statusBadge}`}>{s.status}</span>
                 </div>
@@ -75,7 +84,7 @@ export default function Signals() {
                   </div>
                 )}
 
-                <div style={{ marginTop: 10, fontSize: 24, fontWeight: 700, color: isBuy ? "var(--green)" : "var(--text)" }}>
+                <div style={{ marginTop: 10, fontSize: 24, fontWeight: 700, color: isBuy ? "var(--green)" : isSell ? "var(--red)" : "var(--text)" }}>
                   {s.total_score?.toFixed?.(2) ?? "—"}
                 </div>
 

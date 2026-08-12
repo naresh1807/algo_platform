@@ -27,6 +27,33 @@ class TradingSignal(models.Model):
     target_2 = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
     position_size = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
 
+    class OptionSide(models.TextChoices):
+        CALL = "CE", "Call"
+        PUT = "PE", "Put"
+
+    # Only set by apps.options.index_direction_strategy's APPROVED
+    # signals -- the underlying/index engine (apps.signals.engine)
+    # trades the symbol itself, not an option contract, so these stay
+    # null for every signal it produces. Inlined as their own choices
+    # class here (rather than importing apps.options.models.
+    # OptionContract.OptionType) to avoid apps.signals.models depending
+    # on apps.options.models at Django app-registry load time -- the
+    # two enums' values ("CE"/"PE") are already the shared vocabulary
+    # apps.options.models.OptionContract itself uses.
+    option_side = models.CharField(
+        max_length=2, choices=OptionSide.choices, null=True, blank=True,
+        help_text=(
+            "CE or PE -- which option side this signal's suggested contract "
+            "is on (apps.options.strike_selector.suggest_best_strike), "
+            "distinct from signal_type (BUY/SELL), which reflects how the "
+            "underlying position that actually executes is opened."
+        ),
+    )
+    strike_price = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="The suggested option contract's strike, when option_side is set.",
+    )
+
     total_score = models.FloatField()
     technical_score = models.FloatField()
     sentiment_score = models.FloatField()

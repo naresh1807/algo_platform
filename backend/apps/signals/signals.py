@@ -40,6 +40,15 @@ def broadcast_new_signal(sender, instance: TradingSignal, created: bool, **kwarg
                 "regime": instance.regime,
                 "reason": instance.reason,
                 "created_at": instance.created_at.isoformat(),
+                # CE/PE + strike -- only set by apps.options.
+                # index_direction_strategy's APPROVED signals (null for
+                # every equity/index-engine signal, which doesn't trade
+                # an option contract) so the live popup/dashboard can
+                # show "which strike, CE or PE" without parsing `reason`.
+                "option_side": instance.option_side,
+                "strike_price": (
+                    str(instance.strike_price) if instance.strike_price is not None else None
+                ),
                 # Trade levels -- added so a live "positive signal" popup
                 # (frontend/src/components/SignalAlertPopup.jsx) can show
                 # actionable entry/stop/target numbers immediately, without

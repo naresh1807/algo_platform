@@ -241,9 +241,14 @@ export default function Dashboard() {
           {displaySignal ? (
             <p style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={{ fontWeight: 600 }}>{displaySignal.symbol}</span>
-              <span className={`badge ${displaySignal.signal_type === "buy" ? "badge-green" : "badge-muted"}`}>
+              <span className={`badge ${displaySignal.signal_type === "buy" ? "badge-green" : displaySignal.signal_type === "sell" ? "badge-red" : "badge-muted"}`}>
                 {displaySignal.signal_type}
               </span>
+              {displaySignal.option_side && (
+                <span className="badge badge-muted">
+                  {displaySignal.strike_price ? `${displaySignal.strike_price} ` : ""}{displaySignal.option_side}
+                </span>
+              )}
               <span className={`badge ${displaySignal.status === "approved" || displaySignal.status === "executed" ? "badge-green" : displaySignal.status === "rejected" ? "badge-red" : "badge-muted"}`}>
                 {displaySignal.status}
               </span>

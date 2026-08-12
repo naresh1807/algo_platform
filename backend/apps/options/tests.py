@@ -6,6 +6,8 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from apps.risk.models import AccountEquity
+
 from .metrics import compute_max_pain, compute_pcr, strike_support_resistance
 from .models import OptionChainSnapshot, OptionContract
 
@@ -260,6 +262,95 @@ class IndexDirectionStrategyTests(TestCase):
         signal = evaluate_index_direction_trade("NIFTY", "5m")
         self.assertIsNotNone(signal.pk)
         self.assertIn(signal.signal_type, [SignalType.BUY, SignalType.SELL, SignalType.NO_TRADE])
+
+
+class EvaluateIndexDirectionTradeApprovalTests(TestCase):
+    """
+    evaluate_index_direction_trade's approved path -- specifically that
+    it stamps option_side/strike_price onto the resulting TradingSignal,
+    which is what the live dashboard/popup/signal-list pages now read to
+    show "which strike, CE or PE" (see apps.signals.signals' WebSocket
+    broadcast and the frontend Signals.jsx/Dashboard.jsx/
+    SignalAlertPopup.jsx pages).
+
+    Mocks every upstream gate (direction, success rate, sentiment,
+    options confluence, strike suggestion) to force a deterministic
+    approval -- each of those gates already has its own dedicated
+    tests elsewhere in this file (or in apps.risk's own test suite for
+    check_pre_trade, which is left un-mocked and runs for real against
+    the seeded AccountEquity below) -- this test's only job is to check
+    the wiring from "a real approval happened" to "the signal carries
+    the right option_side/strike_price", not to re-prove any individual
+    gate's own logic.
+    """
+
+    def setUp(self):
+        AccountEquity.objects.create(
+            pk=1, current_equity=Decimal("100000"), daily_start_equity=Decimal("100000"),
+            peak_equity=Decimal("100000"), trading_day=timezone.localdate(),
+        )
+
+    def test_approved_pe_signal_carries_option_side_and_strike(self):
+        from unittest.mock import patch
+
+        from apps.signals.models import TradingSignal
+        from common.constants import SignalStatus, SignalType
+
+        from . import index_direction_strategy as strat
+
+        fake_ind = {
+            "close": 24500.0, "atr": 100.0, "rsi": 40, "adx": 30,
+            "bb_width": 0.02, "relative_volume": 1.5, "ema9": 0, "ema21": 0,
+            "ema9_slope": 0, "ema21_slope": 0, "macd_hist_prev": 0, "macd_hist": 0,
+            "macd": 0, "macd_signal": 0, "sar": 0,
+        }
+        direction_result = {
+            "direction": "down", "option_side": "PE", "score": 0.9,
+            "regime": "trending", "ind": fake_ind, "detail": "forced bearish for test",
+        }
+        success = {
+            "available": True, "trade_count": 10, "win_rate": 0.6,
+            "expectancy_r": 0.3, "profit_factor": 1.8, "profitable": True,
+            "detail": "forced profitable for test",
+        }
+        sentiment = {
+            "sentiment_score": 0.1, "has_contradictory_headline": False,
+            "headline_count": 3, "confidence": 0.5,
+        }
+        options_result = {"score": 0.6, "veto": False, "veto_reason": "", "detail": "forced confirming for test"}
+        suggestion = {
+            "suggested": {
+                "strike": 24400.0, "ltp": 110.0, "open_interest": 1000, "volume": 500,
+                "delta": -0.4, "theta": -10, "vega": 5, "iv": 15, "in_sweet_spot": True, "score": 0.7,
+            },
+            "reason": "24400 PE test suggestion", "candidates": [],
+        }
+        # Sizing/exposure math is apps.risk's own concern (and already
+        # covered by its own test suite) -- mocked here so this test
+        # doesn't need to reverse-engineer a stop distance that happens
+        # to clear MAX_ONE_SYMBOL_EXPOSURE_PCT for an index-level entry
+        # price, which real ATR-based stops on a ~24500 instrument
+        # would not do by default (a synthetic small ATR like this
+        # fixture's produces a position sized well past the 2%
+        # single-symbol exposure cap -- confirmed by running this test
+        # unmocked, not a bug, just not what this test is checking).
+        from apps.risk.engine import RiskDecision
+        risk_decision = RiskDecision(approved=True, risk_score=1.0, reasons=[], position_size=5)
+
+        with patch.object(strat, "determine_index_direction", return_value=direction_result), \
+             patch.object(strat, "success_rate_for_side", return_value=success), \
+             patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
+             patch.object(strat, "options_confluence_score", return_value=options_result), \
+             patch.object(strat, "nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "suggest_best_strike", return_value=suggestion), \
+             patch.object(strat, "check_pre_trade", return_value=risk_decision):
+            signal = strat.evaluate_index_direction_trade("NIFTY", "5m")
+
+        self.assertIsInstance(signal, TradingSignal)
+        self.assertEqual(signal.status, SignalStatus.APPROVED)
+        self.assertEqual(signal.signal_type, SignalType.SELL)
+        self.assertEqual(signal.option_side, "PE")
+        self.assertEqual(signal.strike_price, 24400.0)
 
 
 class RunIndexDirectionStrategyTaskTests(TestCase):

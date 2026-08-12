@@ -381,6 +381,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
     options_score = 0.0
     options_detail = ""
     strike_detail = ""
+    suggested_strike_price = None
     if not reasons:
         options_result = options_confluence_score(underlying, direction=option_direction)
         options_score = options_result["score"]
@@ -403,6 +404,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
                 reasons.append(f"No suitable {side} strike to suggest: {suggestion['reason']}")
             else:
                 strike_detail = f"Suggested {side}: {suggestion['reason']}"
+                suggested_strike_price = suggestion["suggested"]["strike"]
 
     if not reasons:
         risk_decision = check_pre_trade(underlying, entry_price, stop_loss)
@@ -484,6 +486,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
         signal_type=SignalType.BUY if direction == "up" else SignalType.SELL,
         entry_price=entry_price, stop_loss=stop_loss,
         target_1=target_1, target_2=target_2, position_size=position_size,
+        option_side=side, strike_price=suggested_strike_price,
         total_score=total_score, technical_score=round(technical_score, 4),
         sentiment_score=sentiment["sentiment_score"], risk_score=risk_score,
         options_score=options_score,
