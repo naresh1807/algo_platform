@@ -68,6 +68,8 @@ def _index_bias() -> dict:
 
         if latest.status == SignalStatus.APPROVED and latest.signal_type == SignalType.BUY:
             bias = "Bullish"
+        elif latest.status == SignalStatus.APPROVED and latest.signal_type == SignalType.SELL:
+            bias = "Bearish"
         elif latest.status == SignalStatus.REJECTED:
             bias = "Neutral"
         else:

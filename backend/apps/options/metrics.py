@@ -24,8 +24,19 @@ def _latest_snapshots(underlying: str, expiry: date):
     call.
     """
     contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry)
+    # OuterRef("contract_id") -- NOT OuterRef("pk") -- since this
+    # subquery is correlated against the OUTER OptionChainSnapshot
+    # query below (via Subquery(...)), "pk" there would resolve to the
+    # outer SNAPSHOT's own id, not the contract it belongs to. That
+    # exact mistake shipped here previously and only ever "worked" in
+    # a test fixture where OptionContract and OptionChainSnapshot's
+    # auto-increment counters happened to start in lockstep (both
+    # fresh tables beginning at 1) -- any real dataset, where many
+    # snapshots accumulate per contract over time, would silently
+    # return zero rows from every caller (compute_pcr, compute_max_pain,
+    # strike_support_resistance).
     latest_ts_per_contract = OptionChainSnapshot.objects.filter(
-        contract=OuterRef("pk"),
+        contract_id=OuterRef("contract_id"),
     ).order_by("-timestamp").values("timestamp")[:1]
 
     return (

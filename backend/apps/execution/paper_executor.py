@@ -28,7 +28,7 @@ from django.utils import timezone
 
 from apps.market_data.indicators import compute_indicators
 from apps.signals.engine import should_exit_position
-from common.constants import PositionSide, SignalStatus
+from common.constants import PositionSide, SignalStatus, SignalType
 
 from .models import OpenPosition
 from apps.risk.models import AccountEquity
@@ -37,27 +37,48 @@ from apps.risk.models import AccountEquity
 def open_position_from_signal(signal) -> OpenPosition:
     """
     signal: an apps.signals.models.TradingSignal with status=APPROVED
-    and signal_type=BUY. Marks the signal EXECUTED in the same
+    and signal_type BUY or SELL. Marks the signal EXECUTED in the same
     transaction as creating the position, so a signal can never end up
     "approved" with an orphaned position, or vice versa.
+
+    side is derived from signal_type (BUY -> LONG, SELL -> SHORT) --
+    e.g. apps.options.index_direction_strategy produces SELL signals
+    for its PE-side case (buying a put is, payoff-wise, a bet that
+    profits as the underlying falls, same direction as going short the
+    underlying -- see that module's docstring for why it trades the
+    underlying itself rather than a real option contract).
     """
     from django.conf import settings
+
+    side = PositionSide.LONG if signal.signal_type == SignalType.BUY else PositionSide.SHORT
 
     trailing_distance = None
     peak_price = None
     if getattr(settings, "TRAILING_STOP_ENABLED", False):
         # Trail by the exact distance the position was originally
-        # sized against (entry - initial stop) -- see
-        # apps.execution.trailing_stop's module docstring.
-        trailing_distance = signal.entry_price - signal.stop_loss
+        # sized against -- abs() since a SHORT's stop sits ABOVE entry
+        # (signal.entry_price - signal.stop_loss would be negative
+        # there), see apps.execution.trailing_stop's module docstring.
+        trailing_distance = abs(signal.entry_price - signal.stop_loss)
         peak_price = signal.entry_price
 
     with transaction.atomic():
         position = OpenPosition.objects.create(
             signal=signal,
             symbol=signal.symbol,
-            side=PositionSide.LONG,  # this scaffold's signal engine only ever produces BUY/long
-            qty=signal.position_size or 0,
+            side=side,
+            # int(): signal.position_size is a DecimalField -- when signal
+            # was loaded from a queryset (the real run_trading_cycle path,
+            # as opposed to this test suite's in-memory .create() objects)
+            # it comes back as a genuine Decimal, and OpenPosition.qty
+            # (PositiveIntegerField) doesn't coerce it on plain assignment.
+            # Left as a raw Decimal, it later broke the "qty" audit-log
+            # JSON write in log_action() below, which -- even though that
+            # failure is caught and swallowed there -- still leaves the
+            # surrounding DB transaction poisoned for the rest of this
+            # request/task (Django marks connection.needs_rollback=True
+            # from the failed internal atomic(savepoint=False) save).
+            qty=int(signal.position_size or 0),
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             target_price=signal.target_1,
@@ -146,17 +167,27 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
         from .trailing_stop import update_trailing_stop
         update_trailing_stop(position, current_price)
 
-        if current_price <= position.stop_loss:
+        # SHORT's stop sits ABOVE entry (price rising is the adverse
+        # move) and target sits BELOW entry -- the opposite of LONG --
+        # so both comparisons flip by side.
+        if position.side == PositionSide.LONG:
+            stop_hit = current_price <= position.stop_loss
+            target_hit = position.target_price is not None and current_price >= position.target_price
+        else:
+            stop_hit = current_price >= position.stop_loss
+            target_hit = position.target_price is not None and current_price <= position.target_price
+
+        if stop_hit:
             close_position(position, position.stop_loss, "Stop-loss hit")
             results.append({"symbol": position.symbol, "closed": True, "reason": "stop_loss"})
             continue
 
-        if position.target_price and current_price >= position.target_price:
+        if target_hit:
             close_position(position, position.target_price, "Target hit")
             results.append({"symbol": position.symbol, "closed": True, "reason": "target"})
             continue
 
-        should_exit, exit_reasons = should_exit_position(position.symbol, timeframe)
+        should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
         if should_exit:
             close_position(position, current_price, f"Technical exit: {', '.join(exit_reasons)}")
             results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})

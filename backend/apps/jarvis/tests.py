@@ -219,6 +219,29 @@ class MarketIntelligenceTests(TestCase):
         result = market_outlook()
         self.assertIsNone(result["stock_idea"])
 
+    def test_index_bias_is_bearish_for_an_approved_sell_signal(self):
+        """
+        apps.options.index_direction_strategy's PE-side case produces
+        APPROVED SELL signals -- _index_bias must read those as
+        "Bearish", not fall through to the generic "Neutral" default
+        every non-BUY status previously did.
+        """
+        from django.test import override_settings
+
+        from apps.signals.models import TradingSignal
+        from common.constants import SignalStatus, SignalType
+
+        from .market_intelligence import _index_bias
+
+        with override_settings(WATCHLIST=["NIFTY"]):
+            TradingSignal.objects.create(
+                symbol="NIFTY", signal_type=SignalType.SELL, entry_price=100, stop_loss=105,
+                total_score=1, technical_score=1, sentiment_score=0, risk_score=1,
+                regime="trending", status=SignalStatus.APPROVED, reason="test",
+            )
+            result = _index_bias()
+        self.assertEqual(result["per_symbol"][0]["bias"], "Bearish")
+
 
 class GenerateMarketOutlookTaskTests(TestCase):
     def test_first_run_creates_a_snapshot_and_does_not_announce(self):

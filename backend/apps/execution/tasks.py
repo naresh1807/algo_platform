@@ -50,7 +50,7 @@ def run_trading_cycle(timeframe: str = "5m"):
     opened = []
     skipped_exposure = []
     pending_signals = TradingSignal.objects.filter(
-        status=SignalStatus.APPROVED, signal_type=SignalType.BUY,
+        status=SignalStatus.APPROVED, signal_type__in=[SignalType.BUY, SignalType.SELL],
     )
     for signal in pending_signals:
         # Re-validate exposure right before opening, not just at

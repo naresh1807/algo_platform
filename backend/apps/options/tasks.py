@@ -24,6 +24,8 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
+from apps.market_data.market_hours import is_market_open
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,3 +186,33 @@ def ingest_option_chain_snapshots():
         saved += 1
 
     return {"contracts_snapshotted": saved}
+
+
+@shared_task
+def run_index_direction_strategy(timeframe: str = "5m"):
+    """
+    Scheduled entry point for apps.options.index_direction_strategy --
+    same shape as apps.signals.tasks.generate_signals_for_watchlist
+    (market-hours gated inside the task, one symbol's failure doesn't
+    stop the others, thin task body with all real logic in the
+    strategy module so it stays testable without Celery running).
+    Loops index_direction_strategy.INDEX_UNDERLYINGS (NIFTY/BANKNIFTY),
+    not settings.WATCHLIST -- this strategy is specifically about those
+    two indices' own direction, not every watchlist symbol.
+    """
+    market_open, reason = is_market_open()
+    if not market_open:
+        logger.info("run_index_direction_strategy skipped: %s", reason)
+        return {"skipped": True, "reason": reason}
+
+    from .index_direction_strategy import INDEX_UNDERLYINGS, evaluate_index_direction_trade
+
+    results = []
+    for underlying in INDEX_UNDERLYINGS:
+        try:
+            signal = evaluate_index_direction_trade(underlying, timeframe)
+            results.append({"symbol": underlying, "status": signal.status, "signal_id": signal.pk})
+        except Exception:
+            logger.exception("evaluate_index_direction_trade failed for %s", underlying)
+            results.append({"symbol": underlying, "status": "error"})
+    return results

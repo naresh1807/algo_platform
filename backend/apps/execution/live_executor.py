@@ -42,9 +42,10 @@ from django.utils import timezone
 
 from apps.market_data.broker_client import BrokerClient, get_broker_client
 from apps.risk.models import AccountEquity
-from common.constants import PositionSide, SignalStatus
+from common.constants import PositionSide, SignalStatus, SignalType
 
 from .models import OpenPosition
+from .paper_executor import _pnl_for
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +89,16 @@ def _wait_for_fill(client: BrokerClient, order_id: str) -> dict:
 
 def open_position_live(signal) -> OpenPosition:
     """
-    Places a real BUY order for an approved signal, waits for
-    confirmation, and only then creates the OpenPosition row (using the
-    ACTUAL average fill price, not the signal's entry_price estimate --
-    real fills slip). If the order fails or doesn't fill, the signal is
-    marked REJECTED with the failure reason rather than EXECUTED --
-    an order that never filled must never silently look like a
-    successful trade in the log.
+    Places a real order for an approved signal (BUY to open a LONG,
+    SELL to open a SHORT -- e.g. apps.options.index_direction_strategy's
+    PE-side case, see paper_executor.open_position_from_signal's
+    docstring for why that's a SELL/short on the underlying rather than
+    a real option order), waits for confirmation, and only then creates
+    the OpenPosition row (using the ACTUAL average fill price, not the
+    signal's entry_price estimate -- real fills slip). If the order
+    fails or doesn't fill, the signal is marked REJECTED with the
+    failure reason rather than EXECUTED -- an order that never filled
+    must never silently look like a successful trade in the log.
     """
     client = get_broker_client()
     qty = signal.position_size or 0
@@ -104,8 +108,11 @@ def open_position_live(signal) -> OpenPosition:
         signal.save(update_fields=["status", "reason"])
         raise ValueError(f"Cannot place a live order for {signal.symbol} with qty=0.")
 
+    side = PositionSide.LONG if signal.signal_type == SignalType.BUY else PositionSide.SHORT
+    order_side = "BUY" if side == PositionSide.LONG else "SELL"
+
     try:
-        order_id = client.place_order(signal.symbol, "BUY", qty, order_type="MARKET")
+        order_id = client.place_order(signal.symbol, order_side, qty, order_type="MARKET")
         filled_order = _wait_for_fill(client, order_id)
     except Exception as exc:
         logger.exception("Live order placement/fill failed for signal %s", signal.pk)
@@ -131,15 +138,16 @@ def open_position_live(signal) -> OpenPosition:
     if getattr(settings, "TRAILING_STOP_ENABLED", False):
         # Same convention as paper_executor.open_position_from_signal --
         # trail by the actual fill's distance to the planned stop, not
-        # the signal's estimated entry_price (real fills slip).
-        trailing_distance = fill_price - signal.stop_loss
+        # the signal's estimated entry_price (real fills slip). abs()
+        # for the same SHORT-stop-sits-above-entry reason as there.
+        trailing_distance = abs(fill_price - signal.stop_loss)
         peak_price = fill_price
 
     with transaction.atomic():
         position = OpenPosition.objects.create(
             signal=signal,
             symbol=signal.symbol,
-            side=PositionSide.LONG,
+            side=side,
             qty=filled_qty,
             entry_price=fill_price,
             stop_loss=signal.stop_loss,
@@ -170,19 +178,22 @@ def open_position_live(signal) -> OpenPosition:
 
 def close_position_live(position: OpenPosition, reason: str) -> None:
     """
-    Places a real SELL order to close an existing long position, waits
-    for the fill, and applies the ACTUAL realized P&L (fill price, not
-    an estimate) to AccountEquity -- same discipline as
-    paper_executor.close_position: this is the only live-mode code path
-    allowed to write to AccountEquity.current_equity.
+    Places a real closing order -- SELL to close a LONG, BUY (buy to
+    cover) to close a SHORT -- waits for the fill, and applies the
+    ACTUAL realized P&L (fill price, not an estimate) to AccountEquity
+    -- same discipline as paper_executor.close_position: this is the
+    only live-mode code path allowed to write to AccountEquity.
+    current_equity. P&L uses paper_executor._pnl_for (not reimplemented
+    here) so paper and live can never compute it two different ways.
     """
     client = get_broker_client()
-    order_id = client.place_order(position.symbol, "SELL", position.qty, order_type="MARKET")
+    closing_side = "SELL" if position.side == PositionSide.LONG else "BUY"
+    order_id = client.place_order(position.symbol, closing_side, position.qty, order_type="MARKET")
     filled_order = _wait_for_fill(client, order_id)
     exit_price = Decimal(str(filled_order.get("averageprice")))
 
     with transaction.atomic():
-        pnl = (exit_price - position.entry_price) * position.qty
+        pnl = _pnl_for(position, exit_price)
 
         position.unrealized_pnl = pnl
         position.closed_at = timezone.now()
@@ -235,18 +246,27 @@ def check_and_close_positions_live(timeframe: str = "5m") -> list[dict]:
         from .trailing_stop import update_trailing_stop
         update_trailing_stop(position, current_price)
 
+        # See paper_executor.check_and_close_positions -- SHORT's
+        # stop/target sit on the opposite sides of entry from LONG's.
+        if position.side == PositionSide.LONG:
+            stop_hit = current_price <= position.stop_loss
+            target_hit = position.target_price is not None and current_price >= position.target_price
+        else:
+            stop_hit = current_price >= position.stop_loss
+            target_hit = position.target_price is not None and current_price <= position.target_price
+
         try:
-            if current_price <= position.stop_loss:
+            if stop_hit:
                 close_position_live(position, "Stop-loss hit")
                 results.append({"symbol": position.symbol, "closed": True, "reason": "stop_loss"})
                 continue
 
-            if position.target_price and current_price >= position.target_price:
+            if target_hit:
                 close_position_live(position, "Target hit")
                 results.append({"symbol": position.symbol, "closed": True, "reason": "target"})
                 continue
 
-            should_exit, exit_reasons = should_exit_position(position.symbol, timeframe)
+            should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
             if should_exit:
                 close_position_live(position, f"Technical exit: {', '.join(exit_reasons)}")
                 results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})

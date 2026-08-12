@@ -4,9 +4,15 @@ from django.test import TestCase
 
 from apps.market_data.models import HistoricalData
 from apps.risk.models import AccountEquity
-from common.constants import SignalStatus, SignalType
+from common.constants import PositionSide, SignalStatus, SignalType
 
-from .engine import generate_signal
+from .engine import (
+    _evaluate_bearish_conditions,
+    _evaluate_buy_conditions,
+    _evaluate_exit_conditions_short,
+    generate_signal,
+    should_exit_position,
+)
 from .models import TradingSignal
 
 
@@ -58,3 +64,65 @@ class GenerateSignalTests(TestCase):
         # specific outcome from arbitrary synthetic data.
         self.assertIsNotNone(signal.pk)
         self.assertIn(signal.signal_type, [SignalType.BUY, SignalType.NO_TRADE])
+
+
+class BearishConditionsTests(TestCase):
+    """_evaluate_bearish_conditions -- mirror of _evaluate_buy_conditions."""
+
+    def test_bearish_conditions_all_true_for_clean_downtrend(self):
+        ind = {
+            "close": 90, "ema9": 95, "ema21": 100,
+            "ema9_slope": -1, "ema21_slope": -0.5,
+            "sar": 105, "macd": -2, "macd_signal": -1,
+            "macd_hist": -0.5, "macd_hist_prev": -0.3,
+            "rsi": 40, "relative_volume": 1.5,
+        }
+        conditions = _evaluate_bearish_conditions(ind)
+        self.assertTrue(all(conditions.values()))
+
+    def test_bearish_conditions_false_for_clean_uptrend_except_shared_volume_condition(self):
+        ind = {
+            "close": 110, "ema9": 105, "ema21": 100,
+            "ema9_slope": 1, "ema21_slope": 0.5,
+            "sar": 95, "macd": 2, "macd_signal": 1,
+            "macd_hist": 0.5, "macd_hist_prev": 0.3,
+            "rsi": 60, "relative_volume": 1.5,
+        }
+        conditions = _evaluate_bearish_conditions(ind)
+        # relative_volume_breakout isn't directional (a volume expansion
+        # can accompany either direction) -- it's the one condition
+        # _evaluate_buy_conditions and _evaluate_bearish_conditions
+        # share verbatim, so it's excluded from the "should all be false
+        # in a clean uptrend" check below.
+        directional = {k: v for k, v in conditions.items() if k != "relative_volume_breakout"}
+        self.assertFalse(any(directional.values()))
+        self.assertTrue(conditions["relative_volume_breakout"])
+        # Sanity: the same ind is a clean bullish setup, confirming
+        # these two functions really are mirror images, not coincidentally
+        # both-false on this input.
+        self.assertTrue(all(_evaluate_buy_conditions(ind).values()))
+
+
+class ShortExitConditionsTests(TestCase):
+    """_evaluate_exit_conditions_short -- bullish-reversal exit signals for a SHORT."""
+
+    def test_short_exit_conditions_fire_on_bullish_reversal(self):
+        ind = {
+            "close_above_ema9_streak": 2, "sar": 95, "close": 110,
+            "macd_hist": 0.5, "macd_hist_prev": 0.3,
+            "rsi": 60, "relative_volume": 0.5,
+        }
+        conditions = _evaluate_exit_conditions_short(ind)
+        self.assertTrue(all(conditions.values()))
+
+
+class ShouldExitPositionSideTests(TestCase):
+    """should_exit_position's side param -- defaults to LONG, accepts SHORT."""
+
+    def test_defaults_to_long_and_no_data_returns_false(self):
+        should_exit, reasons = should_exit_position("NOPE_SYMBOL", "5m")
+        self.assertFalse(should_exit)
+
+    def test_short_side_no_data_returns_false(self):
+        should_exit, reasons = should_exit_position("NOPE_SYMBOL", "5m", PositionSide.SHORT)
+        self.assertFalse(should_exit)

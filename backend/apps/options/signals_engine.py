@@ -151,16 +151,28 @@ def evaluate_options_signals(underlying: str, expiry: date) -> dict:
 
 def nearest_expiry(underlying: str) -> date | None:
     """
-    Earliest (soonest) expiry currently synced for this underlying --
+    Earliest CURRENT-OR-FUTURE expiry synced for this underlying --
     used by apps.signals.engine so the composite signal engine doesn't
     need its own copy of "which expiry does the options confirmation
     apply to" logic. Returns None if apps.options.tasks hasn't synced
-    any contracts yet (fresh install / options sync hasn't run) so
-    callers can treat "no options data yet" the same "not an error,
+    any contracts yet (fresh install / options sync hasn't run), OR if
+    every synced expiry has already passed (sync_watchlist_option_
+    contracts hasn't run since the last one expired -- e.g. BROKER_MODE
+    isn't "live", or Celery beat isn't running) -- either way, callers
+    treat "no usable options data right now" the same "not an error,
     just not there yet" way compute_indicators() does.
+
+    The expiry__gte filter matters: without it, a stale DB whose only
+    synced expiry already passed would silently return that dead
+    expiry as "nearest," and every caller (options_confluence_score
+    below, apps.options.strike_selector, apps.jarvis) would then score/
+    suggest strikes against contracts that can no longer actually be
+    traded -- a real bug this exact shape surfaced in practice (a
+    single 2026-08-11 expiry synced once, still being read as "nearest"
+    a day after it expired).
     """
     return (
-        OptionContract.objects.filter(underlying=underlying)
+        OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
         .order_by("expiry").values_list("expiry", flat=True).first()
     )
 

@@ -14,30 +14,45 @@ Shared by apps.execution.paper_executor and apps.execution.live_executor
 only "how the resulting exit order is placed" differs between them,
 same principle live_executor's own module docstring already states for
 open/close.
+
+SHORT positions trail the mirror-image way: `peak_price` (the field
+name is kept as-is -- no migration for a rename) tracks the LOWEST
+price seen since entry instead of the highest, and stop_loss ratchets
+DOWN toward that trough instead of up toward a peak. Everything else
+(one-directional ratcheting, never giving back a locked-in improvement)
+is identical in spirit for both sides.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
+from common.constants import PositionSide
+
 
 def update_trailing_stop(position, current_price: Decimal) -> bool:
     """
     Updates position.peak_price and, if warranted, ratchets
-    position.stop_loss up -- saves only the fields that changed.
-    Returns True if stop_loss was moved (callers can use this to log
-    or skip re-checking against a stop value they already have stale
-    in memory), False if trailing is off for this position or price
-    hasn't made a new high since the last check.
+    position.stop_loss toward it (up for LONG, down for SHORT) --
+    saves only the fields that changed. Returns True if stop_loss was
+    moved (callers can use this to log or skip re-checking against a
+    stop value they already have stale in memory), False if trailing
+    is off for this position or price hasn't made a new favorable
+    extreme since the last check.
     """
     if position.trailing_stop_distance is None:
         return False
 
-    new_peak = max(position.peak_price or position.entry_price, current_price)
-    peak_changed = new_peak != position.peak_price
-
-    new_stop = new_peak - position.trailing_stop_distance
-    stop_changed = new_stop > position.stop_loss
+    if position.side == PositionSide.LONG:
+        new_peak = max(position.peak_price or position.entry_price, current_price)
+        peak_changed = new_peak != position.peak_price
+        new_stop = new_peak - position.trailing_stop_distance
+        stop_changed = new_stop > position.stop_loss
+    else:
+        new_peak = min(position.peak_price or position.entry_price, current_price)
+        peak_changed = new_peak != position.peak_price
+        new_stop = new_peak + position.trailing_stop_distance
+        stop_changed = new_stop < position.stop_loss
 
     if not peak_changed and not stop_changed:
         return False

@@ -88,6 +88,17 @@ app.conf.beat_schedule = {
         "task": "apps.execution.tasks.run_trading_cycle",
         "schedule": 300.0,
     },
+    # apps.options.index_direction_strategy: NIFTY/BANKNIFTY direction
+    # -> CE/PE side -> that side's backtest success rate -> trade.
+    # Same 5-minute/market-hours-gated-in-task cadence as
+    # generate-signals-every-5-minutes above, and its APPROVED signals
+    # feed the SAME trading-cycle-every-5-minutes execution task (no
+    # separate execution task needed -- run_trading_cycle picks up any
+    # APPROVED BUY/SELL signal regardless of which module created it).
+    "index-direction-strategy-every-5-minutes": {
+        "task": "apps.options.tasks.run_index_direction_strategy",
+        "schedule": 300.0,
+    },
     "daily-review-after-market-close": {
         "task": "apps.learning.tasks.run_daily_review",
         "schedule": crontab(hour=16, minute=0),  # 4:00 PM IST, after NSE close

@@ -1,5 +1,6 @@
 from datetime import date
 
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -28,18 +29,30 @@ class OptionChainSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
 
 class OptionExpiriesView(APIView):
     """
-    Distinct expiries already synced into OptionContract for one
-    underlying (via `python manage.py sync_option_contracts`), nearest
-    first -- backs the frontend's expiry dropdown so it only ever offers
-    a date that actually has contracts to query, instead of a blind
-    date-picker that 404s on a not-yet-synced expiry.
+    Distinct CURRENT-OR-FUTURE expiries already synced into
+    OptionContract for one underlying (via `python manage.py
+    sync_option_contracts`), nearest first -- backs the frontend's
+    expiry dropdown so it only ever offers a date that actually has
+    contracts to query, instead of a blind date-picker that 404s on a
+    not-yet-synced expiry.
+
+    expiry__gte filters out already-expired rows -- without it, a
+    past expiry that's still in the DB (this app deliberately never
+    deletes expired OptionContract rows, so historical
+    OptionChainSnapshot data stays available for backtesting/analytics,
+    see OptionContract's own docstring) would sort first and get
+    offered as a live choice. The frontend (OptionsAnalytics.jsx)
+    auto-selects this list's FIRST entry as the default expiry on load,
+    so an unfiltered list here meant the page defaulted to showing a
+    dead, expired option chain -- same underlying bug apps.options.
+    signals_engine.nearest_expiry() had, fixed there for the same reason.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         underlying = request.query_params.get("underlying", "NIFTY")
         expiries = (
-            OptionContract.objects.filter(underlying=underlying)
+            OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
             .order_by("expiry").values_list("expiry", flat=True).distinct()
         )
         return Response({"underlying": underlying, "expiries": [e.isoformat() for e in expiries]})

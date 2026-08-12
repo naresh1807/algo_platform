@@ -25,7 +25,7 @@ from apps.market_data.regime import classify_regime, regime_size_multiplier
 from apps.news.scoring import aggregate_sentiment
 from apps.options.signals_engine import options_confluence_score
 from apps.risk.engine import check_pre_trade
-from common.constants import MarketRegime, SignalStatus, SignalType
+from common.constants import MarketRegime, PositionSide, SignalStatus, SignalType
 
 from .models import TradingSignal
 
@@ -162,6 +162,30 @@ def _evaluate_buy_conditions(ind: dict) -> dict[str, bool]:
     }
 
 
+def _evaluate_bearish_conditions(ind: dict) -> dict[str, bool]:
+    """
+    Mirror image of _evaluate_buy_conditions -- the same eight manual
+    section 11 conditions, inverted, for a fresh SHORT-style entry
+    (not to be confused with _evaluate_exit_conditions, which is about
+    closing an existing LONG, not opening a new bearish position).
+    Used by apps.options.index_direction_strategy to score NIFTY/
+    BANKNIFTY's downside case (PE side) with the exact same
+    multi-confirmation rigor the upside case already gets, and by that
+    module's backtest bootstrap for the same reason apps.analytics.
+    backtest replays _evaluate_buy_conditions for the upside case.
+    """
+    return {
+        "price_below_ema9_ema21": ind["close"] < ind["ema9"] < ind["ema21"],
+        "ema9_slope_negative": ind["ema9_slope"] < 0,
+        "ema21_slope_flat_or_negative": ind["ema21_slope"] <= 0,
+        "sar_above_price": ind["sar"] > ind["close"],
+        "macd_below_signal": ind["macd"] < ind["macd_signal"],
+        "histogram_falling": ind["macd_hist"] < ind["macd_hist_prev"],
+        "rsi_below_regime_threshold": ind["rsi"] < 50,  # regime-adjusted below by the caller
+        "relative_volume_breakout": ind["relative_volume"] >= 1.2,
+    }
+
+
 def _evaluate_exit_conditions(ind: dict) -> dict[str, bool]:
     """
     manual section 11 "Sell / exit conditions" -- used by
@@ -181,18 +205,43 @@ def _evaluate_exit_conditions(ind: dict) -> dict[str, bool]:
     }
 
 
-def should_exit_position(symbol: str, timeframe: str = "5m") -> tuple[bool, list[str]]:
+def _evaluate_exit_conditions_short(ind: dict) -> dict[str, bool]:
     """
-    Convenience function for apps.execution to call once it exists.
-    Returns (should_exit, matched_reasons) using a simple majority rule
-    over _evaluate_exit_conditions, mirroring the multi-confirmation
-    approach used for entries.
+    Mirror of _evaluate_exit_conditions for a SHORT position -- exits
+    on signs of BULLISH exhaustion/reversal (the market turning MORE
+    bearish is exactly when a short should stay open, not exit, so
+    reusing the LONG version's conditions as-is would be backwards).
+    """
+    return {
+        "close_above_ema9_2_candles": ind["close_above_ema9_streak"] >= 2,
+        "sar_flipped_below_price": ind["sar"] < ind["close"],
+        "macd_histogram_strengthening": ind["macd_hist"] > ind["macd_hist_prev"],
+        "rsi_gaining_momentum": ind["rsi"] > 50,
+        "volume_fading": ind["relative_volume"] < 0.8,
+    }
+
+
+def should_exit_position(
+    symbol: str, timeframe: str = "5m", side: str = PositionSide.LONG,
+) -> tuple[bool, list[str]]:
+    """
+    Convenience function for apps.execution to call for any open
+    position. Returns (should_exit, matched_reasons) using a simple
+    majority rule over _evaluate_exit_conditions (LONG) or
+    _evaluate_exit_conditions_short (SHORT), mirroring the
+    multi-confirmation approach used for entries. `side` defaults to
+    LONG to match every caller before SHORT positions existed
+    (apps.options.index_direction_strategy's PE case is the first thing
+    that opens a SHORT) -- existing call sites keep working unchanged.
     """
     ind = compute_indicators(symbol, timeframe)
     if ind is None:
         return False, ["Not enough historical data to evaluate exit conditions."]
 
-    conditions = _evaluate_exit_conditions(ind)
+    conditions = (
+        _evaluate_exit_conditions(ind) if side == PositionSide.LONG
+        else _evaluate_exit_conditions_short(ind)
+    )
     matched = [name for name, ok in conditions.items() if ok]
     return (len(matched) / len(conditions)) >= 0.5, matched
 

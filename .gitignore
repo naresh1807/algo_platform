@@ -17,6 +17,9 @@ frontend/.vite/
 .idea/
 .DS_Store
 
+# Claude Code local settings (user/machine-specific, not project config)
+.claude/
+
 # Model artifacts -- these are large binary files that belong in
 # object storage or a model registry backend, never in git
 backend/artifacts/

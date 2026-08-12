@@ -264,6 +264,7 @@ def indicator_dict_at(df: pd.DataFrame, i: int) -> dict:
             float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else 1.0
         ),
         "close_below_ema9_streak": _count_close_below_ema9(window),
+        "close_above_ema9_streak": _count_close_above_ema9(window),
     }
 
 
@@ -302,6 +303,7 @@ def compute_indicators(symbol: str, timeframe: str) -> dict | None:
             float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else 1.0
         ),
         "close_below_ema9_streak": _count_close_below_ema9(df),
+        "close_above_ema9_streak": _count_close_above_ema9(df),
     }
 
 
@@ -347,3 +349,14 @@ def _count_close_below_ema9(df: pd.DataFrame, lookback: int = 2) -> int:
     """
     recent = df.tail(lookback)
     return int((recent["close"] < recent["ema9"]).sum())
+
+
+def _count_close_above_ema9(df: pd.DataFrame, lookback: int = 2) -> int:
+    """
+    Mirror of _count_close_below_ema9 -- powers a SHORT position's exit
+    condition (apps.signals.engine._evaluate_exit_conditions_short):
+    "close back above EMA9 for 2 candles" is the bullish-reversal
+    equivalent of the LONG exit's bearish-breakdown signal.
+    """
+    recent = df.tail(lookback)
+    return int((recent["close"] > recent["ema9"]).sum())
