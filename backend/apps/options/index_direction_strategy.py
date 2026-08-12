@@ -361,9 +361,20 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
         )
 
     sentiment = aggregate_sentiment(underlying)
-    if sentiment["has_contradictory_headline"]:
+    # Direction-aware, unlike apps.signals.engine (which only ever
+    # evaluates a bullish case): a strongly NEGATIVE headline
+    # contradicts the up/CE thesis, a strongly POSITIVE one contradicts
+    # the down/PE thesis -- checking has_contradictory_headline
+    # unconditionally for both directions would veto a PE trade on the
+    # exact bearish news that actually confirms it.
+    if direction == "up" and sentiment["has_contradictory_headline"]:
         reasons.append(
-            "A strongly negative, high-confidence headline vetoes this setup "
+            "A strongly negative, high-confidence headline vetoes this CE setup "
+            "(sentiment is a filter, not a standalone trigger -- but it CAN block)."
+        )
+    elif direction == "down" and sentiment["has_strongly_positive_headline"]:
+        reasons.append(
+            "A strongly positive, high-confidence headline vetoes this PE setup "
             "(sentiment is a filter, not a standalone trigger -- but it CAN block)."
         )
 

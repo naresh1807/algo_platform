@@ -315,6 +315,7 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
         }
         sentiment = {
             "sentiment_score": 0.1, "has_contradictory_headline": False,
+            "has_strongly_positive_headline": False,
             "headline_count": 3, "confidence": 0.5,
         }
         options_result = {"score": 0.6, "veto": False, "veto_reason": "", "detail": "forced confirming for test"}
@@ -351,6 +352,87 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
         self.assertEqual(signal.signal_type, SignalType.SELL)
         self.assertEqual(signal.option_side, "PE")
         self.assertEqual(signal.strike_price, 24400.0)
+
+    def _run_with_sentiment(self, direction: str, sentiment_extra: dict):
+        """Shared plumbing for the direction-aware sentiment veto tests below."""
+        from unittest.mock import patch
+
+        from apps.risk.engine import RiskDecision
+
+        from . import index_direction_strategy as strat
+
+        fake_ind = {
+            "close": 24500.0, "atr": 100.0, "rsi": 40, "adx": 30,
+            "bb_width": 0.02, "relative_volume": 1.5, "ema9": 0, "ema21": 0,
+            "ema9_slope": 0, "ema21_slope": 0, "macd_hist_prev": 0, "macd_hist": 0,
+            "macd": 0, "macd_signal": 0, "sar": 0,
+        }
+        option_side = "CE" if direction == "up" else "PE"
+        direction_result = {
+            "direction": direction, "option_side": option_side, "score": 0.9,
+            "regime": "trending", "ind": fake_ind, "detail": "forced for test",
+        }
+        success = {
+            "available": True, "trade_count": 10, "win_rate": 0.6,
+            "expectancy_r": 0.3, "profit_factor": 1.8, "profitable": True,
+            "detail": "forced profitable for test",
+        }
+        sentiment = {
+            "sentiment_score": 0.0, "has_contradictory_headline": False,
+            "has_strongly_positive_headline": False, "headline_count": 3, "confidence": 0.5,
+            **sentiment_extra,
+        }
+        options_result = {"score": 0.6, "veto": False, "veto_reason": "", "detail": "forced for test"}
+        suggestion = {
+            "suggested": {
+                "strike": 24400.0, "ltp": 110.0, "open_interest": 1000, "volume": 500,
+                "delta": -0.4, "theta": -10, "vega": 5, "iv": 15, "in_sweet_spot": True, "score": 0.7,
+            },
+            "reason": "test suggestion", "candidates": [],
+        }
+        risk_decision = RiskDecision(approved=True, risk_score=1.0, reasons=[], position_size=5)
+
+        with patch.object(strat, "determine_index_direction", return_value=direction_result), \
+             patch.object(strat, "success_rate_for_side", return_value=success), \
+             patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
+             patch.object(strat, "options_confluence_score", return_value=options_result), \
+             patch.object(strat, "nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "suggest_best_strike", return_value=suggestion), \
+             patch.object(strat, "check_pre_trade", return_value=risk_decision):
+            return strat.evaluate_index_direction_trade("NIFTY", "5m")
+
+    def test_negative_headline_does_not_block_pe_trade(self):
+        """
+        A negative headline contradicts a BULLISH thesis, not a bearish
+        one -- vetoing a PE trade because of bearish news would be
+        backwards (the news actually confirms the PE thesis).
+        """
+        from common.constants import SignalStatus
+
+        signal = self._run_with_sentiment("down", {"has_contradictory_headline": True})
+        self.assertEqual(signal.status, SignalStatus.APPROVED)
+        self.assertEqual(signal.option_side, "PE")
+
+    def test_positive_headline_blocks_pe_trade(self):
+        from common.constants import SignalStatus
+
+        signal = self._run_with_sentiment("down", {"has_strongly_positive_headline": True})
+        self.assertEqual(signal.status, SignalStatus.REJECTED)
+        self.assertIn("strongly positive", signal.reason)
+
+    def test_positive_headline_does_not_block_ce_trade(self):
+        from common.constants import SignalStatus
+
+        signal = self._run_with_sentiment("up", {"has_strongly_positive_headline": True})
+        self.assertEqual(signal.status, SignalStatus.APPROVED)
+        self.assertEqual(signal.option_side, "CE")
+
+    def test_negative_headline_blocks_ce_trade(self):
+        from common.constants import SignalStatus
+
+        signal = self._run_with_sentiment("up", {"has_contradictory_headline": True})
+        self.assertEqual(signal.status, SignalStatus.REJECTED)
+        self.assertIn("strongly negative", signal.reason)
 
 
 class RunIndexDirectionStrategyTaskTests(TestCase):

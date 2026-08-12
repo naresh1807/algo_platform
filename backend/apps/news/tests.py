@@ -49,6 +49,60 @@ class SentimentAggregationTests(TestCase):
         result = aggregate_sentiment("NIFTY")
         self.assertEqual(result["headline_count"], 0)
 
+    def test_index_irrelevant_headline_does_not_veto_nifty(self):
+        """
+        A single named-stock earnings miss (apps.news.rss_client's
+        GENERAL_MARKET_FEEDS pulls in this kind of headline under
+        symbol="NIFTY" too, not just genuinely index-wide news) must
+        NOT count as a "strong contradictory headline" for NIFTY --
+        this is the exact real-world case that was vetoing ~93% of
+        every NIFTY/BANKNIFTY evaluation before this filter existed.
+        """
+        news = NewsSentiment.objects.create(
+            symbol="NIFTY", headline="PI Industries plunges 10% on weak Q1 results",
+            source="test", published_at=timezone.now(),
+            sentiment_label="negative", sentiment_score=-0.97, confidence=0.97,
+        )
+        analyze_impact(news)  # entities["stocks"] -> trade_relevance=DIRECT, index_impact=""
+
+        result = aggregate_sentiment("NIFTY")
+        self.assertEqual(result["headline_count"], 0)
+        self.assertFalse(result["has_contradictory_headline"])
+
+    def test_genuine_macro_headline_still_vetoes_nifty(self):
+        news = NewsSentiment.objects.create(
+            symbol="NIFTY", headline="US Fed hikes rates sharply, global markets tumble",
+            source="test", published_at=timezone.now(),
+            sentiment_label="negative", sentiment_score=-0.9, confidence=0.9,
+        )
+        analyze_impact(news)  # "macro" sector ("fed hike"/"global markets") -> index_impact="NIFTY_DOWN"
+
+        result = aggregate_sentiment("NIFTY")
+        self.assertEqual(result["headline_count"], 1)
+        self.assertTrue(result["has_contradictory_headline"])
+
+    def test_headline_with_no_impact_analysis_does_not_veto(self):
+        # No analyze_impact() call -- simulates a legacy row or a failed
+        # enrichment step; must not count as relevant for NIFTY/BANKNIFTY.
+        NewsSentiment.objects.create(
+            symbol="NIFTY", headline="Some unenriched headline", source="test",
+            published_at=timezone.now(), sentiment_label="negative",
+            sentiment_score=-0.9, confidence=0.9,
+        )
+        result = aggregate_sentiment("NIFTY")
+        self.assertEqual(result["headline_count"], 0)
+
+    def test_non_index_symbol_keeps_unfiltered_behavior(self):
+        # No index_impact concept applies outside NIFTY/BANKNIFTY --
+        # relevance filtering is a no-op for any other symbol.
+        NewsSentiment.objects.create(
+            symbol="RELIANCE", headline="Some headline", source="test",
+            published_at=timezone.now(), sentiment_label="negative",
+            sentiment_score=-0.9, confidence=0.9,
+        )
+        result = aggregate_sentiment("RELIANCE")
+        self.assertEqual(result["headline_count"], 1)
+
 
 class ImpactEngineTests(TestCase):
     def test_analyze_impact_is_idempotent(self):
