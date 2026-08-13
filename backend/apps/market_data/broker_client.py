@@ -33,6 +33,53 @@ _SMARTAPI_MIN_REQUEST_INTERVAL = 2.0  # seconds between requests across all thre
 _SMARTAPI_RETRY_ATTEMPTS = 5
 _SMARTAPI_RETRY_BACKOFF_FACTOR = 2.0
 
+# Extended-cooldown circuit breaker. AB1021 has been observed in
+# practice (see this project's own incident history) as an ACCOUNT-
+# LEVEL cooldown Angel One imposes for a stretch of minutes, not just
+# momentary pressure -- and every one of _smartapi_request's own
+# per-call retries is ANOTHER real request landing during that same
+# cooldown window, which plausibly extends it rather than waiting it
+# out. Once several DIFFERENT calls in a row each exhaust their own
+# retries and are STILL rate-limited, this trips: every call for the
+# next _SMARTAPI_COOLDOWN_SECONDS fails immediately (no request sent,
+# no per-call retry wait) instead of continuing to hammer an account
+# that's already in timeout. Callers (Celery tasks) already catch
+# broad exceptions per symbol/timeframe and continue (see e.g.
+# apps.market_data.tasks.ingest_watchlist_candles's per-combo
+# try/except), so SmartApiCooldownActive just makes that existing
+# per-item skip happen instantly instead of after a full 2-32s retry
+# ladder -- the whole sweep clears much faster and stops adding load
+# during the cooldown.
+_SMARTAPI_COOLDOWN_TRIP_THRESHOLD = 2  # consecutive retry-exhausted calls before tripping
+_SMARTAPI_COOLDOWN_SECONDS = 300.0  # 5 minutes
+_smartapi_consecutive_rate_limit_exhaustions = 0
+_smartapi_cooldown_until = 0.0
+
+
+class SmartApiCooldownActive(Exception):
+    """Raised instead of attempting a call while the extended-cooldown circuit breaker (above) is open."""
+
+
+def _record_smartapi_rate_limit_exhaustion() -> None:
+    global _smartapi_consecutive_rate_limit_exhaustions, _smartapi_cooldown_until
+    with _SMARTAPI_RATE_LIMIT_LOCK:
+        _smartapi_consecutive_rate_limit_exhaustions += 1
+        if _smartapi_consecutive_rate_limit_exhaustions >= _SMARTAPI_COOLDOWN_TRIP_THRESHOLD:
+            _smartapi_cooldown_until = time.monotonic() + _SMARTAPI_COOLDOWN_SECONDS
+            logger.error(
+                "Angel One: %d consecutive calls exhausted their retries still rate-limited -- "
+                "tripping the circuit breaker for %.0fs (no further SmartAPI calls will even be "
+                "attempted until then) instead of continuing to retry into an active cooldown.",
+                _smartapi_consecutive_rate_limit_exhaustions, _SMARTAPI_COOLDOWN_SECONDS,
+            )
+
+
+def _reset_smartapi_rate_limit_failures() -> None:
+    global _smartapi_consecutive_rate_limit_exhaustions
+    if _smartapi_consecutive_rate_limit_exhaustions:
+        with _SMARTAPI_RATE_LIMIT_LOCK:
+            _smartapi_consecutive_rate_limit_exhaustions = 0
+
 
 def _wait_for_smartapi_slot() -> None:
     global _SMARTAPI_LAST_REQUEST_AT
@@ -208,6 +255,15 @@ class BrokerClient:
         self._feed_token = None
 
     def _smartapi_request(self, func, *args, **kwargs):
+        with _SMARTAPI_RATE_LIMIT_LOCK:
+            remaining_cooldown = _smartapi_cooldown_until - time.monotonic()
+        if remaining_cooldown > 0:
+            raise SmartApiCooldownActive(
+                f"Angel One extended-cooldown circuit breaker is open "
+                f"({remaining_cooldown:.0f}s remaining) -- not attempting this call. "
+                f"See apps.market_data.broker_client's circuit-breaker comment for why."
+            )
+
         attempt = 0
         while True:
             attempt += 1
@@ -229,6 +285,8 @@ class BrokerClient:
                     )
                     time.sleep(backoff)
                     continue
+                if _is_smartapi_rate_limit_error(exc):
+                    _record_smartapi_rate_limit_exhaustion()
                 raise
 
             if attempt < _SMARTAPI_RETRY_ATTEMPTS and _is_smartapi_rate_limit_response(
@@ -246,6 +304,10 @@ class BrokerClient:
                 time.sleep(backoff)
                 continue
 
+            if _is_smartapi_rate_limit_response(response):
+                _record_smartapi_rate_limit_exhaustion()
+            else:
+                _reset_smartapi_rate_limit_failures()
             return response
 
     def _connect(self):
