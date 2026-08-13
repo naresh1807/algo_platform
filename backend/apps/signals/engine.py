@@ -16,6 +16,7 @@ evaluating a symbol.
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 from django.utils import timezone
@@ -78,6 +79,24 @@ OPTIONS_SCORE_THRESHOLD = 0.35
 HIGH_VOLATILITY_SCORE_MARGIN = 0.125
 
 
+def _safe_float(value: float | None) -> float | None:
+    """
+    MySQL's FloatField (and DecimalField) backend rejects NaN outright
+    ("nan can not be used with MySQL") rather than storing it -- so a
+    NaN slipping in from a real gap in the underlying candles (a
+    genuine possibility; pandas rolling indicator calculations
+    propagate NaN through a gap) would crash the INSERT for every
+    ind_* field below, not just the one that was actually NaN. Every
+    ind_* column is already nullable (see TradingSignal's own
+    docstrings), so None is the correct, already-supported way to
+    represent "no valid reading for this bar" -- this just makes sure
+    NaN is normalized to that instead of reaching the database as-is.
+    """
+    if value is None:
+        return None
+    return None if math.isnan(value) else value
+
+
 def _indicator_signal_fields(ind: dict | None) -> dict:
     """
     Builds the ind_* kwargs for _create_signal() from the compute_indicators()
@@ -86,7 +105,10 @@ def _indicator_signal_fields(ind: dict | None) -> dict:
     different price levels -- see TradingSignal's ind_* field docstrings.
     Returns an all-None dict (not a KeyError) when ind is None, matching the
     no-historical-data NO_TRADE branch below, which never reaches a real
-    indicator snapshot.
+    indicator snapshot. Every value is passed through _safe_float so a NaN
+    reading (a real gap in the underlying candles, not just a theoretical
+    case -- see that function's docstring) becomes None instead of a
+    database error.
     """
     if ind is None:
         return {
@@ -97,14 +119,14 @@ def _indicator_signal_fields(ind: dict | None) -> dict:
         }
     close = ind["close"] or 1.0  # guard divide-by-zero; close is never legitimately 0
     return {
-        "ind_rsi": ind["rsi"],
-        "ind_adx": ind["adx"],
-        "ind_bb_width": ind["bb_width"],
-        "ind_relative_volume": ind["relative_volume"],
-        "ind_atr_pct": ind["atr"] / close,
-        "ind_macd_hist_pct": ind["macd_hist"] / close,
-        "ind_ema9_slope_pct": ind["ema9_slope"] / close,
-        "ind_ema21_slope_pct": ind["ema21_slope"] / close,
+        "ind_rsi": _safe_float(ind["rsi"]),
+        "ind_adx": _safe_float(ind["adx"]),
+        "ind_bb_width": _safe_float(ind["bb_width"]),
+        "ind_relative_volume": _safe_float(ind["relative_volume"]),
+        "ind_atr_pct": _safe_float(ind["atr"] / close),
+        "ind_macd_hist_pct": _safe_float(ind["macd_hist"] / close),
+        "ind_ema9_slope_pct": _safe_float(ind["ema9_slope"] / close),
+        "ind_ema21_slope_pct": _safe_float(ind["ema21_slope"] / close),
     }
 
 

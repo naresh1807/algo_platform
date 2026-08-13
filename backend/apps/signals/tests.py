@@ -10,10 +10,55 @@ from .engine import (
     _evaluate_bearish_conditions,
     _evaluate_buy_conditions,
     _evaluate_exit_conditions_short,
+    _indicator_signal_fields,
+    _safe_float,
     generate_signal,
     should_exit_position,
 )
 from .models import TradingSignal
+
+
+class SafeFloatTests(TestCase):
+    """
+    _safe_float / _indicator_signal_fields -- MySQL rejects NaN outright
+    ("nan can not be used with MySQL") for both FloatField and
+    DecimalField, so a NaN indicator reading (a real possibility from a
+    gap in ingested candles, not just theoretical) must become None
+    before it ever reaches a TradingSignal.objects.create() call, for
+    every caller of _indicator_signal_fields -- apps.signals.engine's
+    own generate_signal() AND apps.options.index_direction_strategy.
+    """
+
+    def test_nan_becomes_none(self):
+        self.assertIsNone(_safe_float(float("nan")))
+
+    def test_none_stays_none(self):
+        self.assertIsNone(_safe_float(None))
+
+    def test_ordinary_value_passes_through(self):
+        self.assertEqual(_safe_float(42.5), 42.5)
+
+    def test_indicator_signal_fields_sanitizes_a_nan_reading(self):
+        ind = {
+            "close": 100.0, "rsi": float("nan"), "adx": 25.0, "bb_width": 0.02,
+            "relative_volume": 1.2, "atr": 2.0, "macd_hist": 0.5,
+            "ema9_slope": 0.1, "ema21_slope": 0.05,
+        }
+        fields = _indicator_signal_fields(ind)
+        self.assertIsNone(fields["ind_rsi"])
+        self.assertEqual(fields["ind_adx"], 25.0)  # untouched, non-NaN values pass through normally
+
+    def test_indicator_signal_fields_sanitizes_a_nan_ratio(self):
+        # atr itself is NaN, so the derived ind_atr_pct ratio is NaN too
+        # -- must also come out None, not silently propagate the NaN
+        # through the division.
+        ind = {
+            "close": 100.0, "rsi": 50.0, "adx": 25.0, "bb_width": 0.02,
+            "relative_volume": 1.2, "atr": float("nan"), "macd_hist": 0.5,
+            "ema9_slope": 0.1, "ema21_slope": 0.05,
+        }
+        fields = _indicator_signal_fields(ind)
+        self.assertIsNone(fields["ind_atr_pct"])
 
 
 class TradingSignalModelTests(TestCase):

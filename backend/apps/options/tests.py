@@ -447,6 +447,91 @@ class RunIndexDirectionStrategyTaskTests(TestCase):
         self.assertEqual(result.get("reason"), "market closed")
 
 
+class IndexDirectionStrategyNanSafetyTests(TestCase):
+    """
+    A real gap in ingested candles (plausible on a rate-limited day --
+    see apps.market_data.broker_client's circuit breaker) can leave an
+    indicator like ATR as NaN for some bar. Every comparison against
+    NaN is False in Python, so a guard written as "skip if bad" (e.g.
+    `if x <= 0`) silently lets NaN through unguarded -- these tests
+    pin down that the NaN-safe "proceed only if positive" phrasing
+    (`if not (x > 0)`) actually catches it, at both the level this bug
+    was FOUND at (success_rate_for_side's backtest bootstrap reporting
+    "expectancy +nanR", making `profitable` structurally impossible to
+    ever be True) and the live-signal path.
+    """
+
+    def test_simulate_directional_exit_treats_nan_risk_as_zero_not_nan(self):
+        import pandas as pd
+
+        from .index_direction_strategy import _simulate_directional_exit
+
+        df = pd.DataFrame({"high": [100, 101, 102], "low": [99, 98, 97], "close": [100, 100, 100]})
+        exit_index, r = _simulate_directional_exit(
+            df, entry_index=0, entry_price=100.0, stop=float("nan"), target=105.0,
+            direction="up", max_holding_bars=2,
+        )
+        self.assertEqual(r, 0.0)
+
+    def test_r_multiples_skips_a_nan_atr_bar_instead_of_trading_it(self):
+        from unittest.mock import patch
+
+        import pandas as pd
+
+        from . import index_direction_strategy as strat
+
+        df = pd.DataFrame({"high": [100, 101], "low": [99, 98], "close": [100, 100]})
+        # A clean 8/8 bullish setup EXCEPT atr is NaN -- must not open a
+        # simulated trade at all (not even a degenerate zero-risk one).
+        nan_atr_ind = {
+            "close": 110.0, "ema9": 105.0, "ema21": 99.0,
+            "ema9_slope": 1.0, "ema21_slope": 1.0, "sar": 95.0,
+            "macd": 2.0, "macd_signal": 1.0, "macd_hist": 1.0, "macd_hist_prev": 0.5,
+            "rsi": 60.0, "relative_volume": 2.0, "atr": float("nan"),
+        }
+        with patch.object(strat, "indicator_dict_at", return_value=nan_atr_ind), \
+             patch.object(strat, "classify_regime", return_value="trending"):
+            r_multiples = strat._simulate_directional_r_multiples(df, "up")
+        self.assertEqual(r_multiples, [])
+
+    def test_evaluate_index_direction_trade_no_trades_on_nan_atr_instead_of_crashing(self):
+        from unittest.mock import patch
+
+        from common.constants import SignalStatus, SignalType
+
+        from . import index_direction_strategy as strat
+
+        fake_ind = {
+            "close": 24500.0, "atr": float("nan"), "rsi": 40, "adx": 30,
+            "bb_width": 0.02, "relative_volume": 1.5, "ema9": 0, "ema21": 0,
+            "ema9_slope": 0, "ema21_slope": 0, "macd_hist_prev": 0, "macd_hist": 0,
+            "macd": 0, "macd_signal": 0, "sar": 0,
+        }
+        direction_result = {
+            "direction": "down", "option_side": "PE", "score": 0.9,
+            "regime": "trending", "ind": fake_ind, "detail": "forced for test",
+        }
+        success = {
+            "available": True, "trade_count": 10, "win_rate": 0.6,
+            "expectancy_r": 0.3, "profit_factor": 1.8, "profitable": True,
+            "detail": "forced profitable for test",
+        }
+        sentiment = {
+            "sentiment_score": 0.0, "has_contradictory_headline": False,
+            "has_strongly_positive_headline": False, "headline_count": 0, "confidence": 0.0,
+        }
+
+        with patch.object(strat, "determine_index_direction", return_value=direction_result), \
+             patch.object(strat, "success_rate_for_side", return_value=success), \
+             patch.object(strat, "aggregate_sentiment", return_value=sentiment):
+            signal = strat.evaluate_index_direction_trade("NIFTY", "5m")
+
+        self.assertEqual(signal.status, SignalStatus.REJECTED)
+        self.assertEqual(signal.signal_type, SignalType.NO_TRADE)
+        self.assertIn("ATR is invalid", signal.reason)
+        self.assertEqual(signal.entry_price, signal.stop_loss)
+
+
 class SyncWatchlistOptionContractsTests(TestCase):
     """apps.options.tasks.sync_watchlist_option_contracts -- BROKER_MODE guard only (no real broker call in tests)."""
 

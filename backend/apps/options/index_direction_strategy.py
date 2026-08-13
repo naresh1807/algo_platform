@@ -196,7 +196,16 @@ def _simulate_directional_exit(
 
     exit_price = float(df.iloc[last_index]["close"])
     risk = abs(entry_price - stop)
-    if risk <= 0:
+    # NaN-safe: written as "proceed only if risk is a real positive
+    # number" rather than "skip if risk <= 0" -- every comparison
+    # against NaN (a real possibility from a data gap in the underlying
+    # candles) is False in Python, so `risk <= 0` would silently let a
+    # NaN risk through unguarded, producing a NaN r_multiple that then
+    # poisons sum(r_multiples) in _simulate_directional_r_multiples'
+    # caller (success_rate_for_side's expectancy_r) for the WHOLE
+    # backtest sample, not just this one trade. This exact shape of bug
+    # shipped once already (see that guard's own comment).
+    if not (risk > 0):
         return last_index, 0.0
     r_multiple = (
         (exit_price - entry_price) / risk if direction == "up"
@@ -245,7 +254,12 @@ def _simulate_directional_r_multiples(
 
         entry = ind["close"]
         atr_distance = ind["atr"] * atr_stop_multiplier
-        if atr_distance <= 0:  # degenerate zero/negative-ATR bar -- skip, same guard as run_backtest
+        # NaN-safe (see _simulate_directional_exit's identical-shape
+        # guard above for why "proceed only if positive" instead of
+        # "skip if <= 0" matters here): a NaN ATR bar -- e.g. from a
+        # gap in the underlying candles -- must not silently pass this
+        # guard and go on to poison this bar's r_multiple.
+        if not (atr_distance > 0):
             i += 1
             continue
         stop = entry - atr_distance if direction == "up" else entry + atr_distance
@@ -379,12 +393,28 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
         )
 
     entry_price = Decimal(str(ind["close"]))
-    atr_distance = Decimal(str(ind["atr"] * ATR_STOP_MULTIPLIER))
-    if direction == "up":
+    raw_atr_distance = ind["atr"] * ATR_STOP_MULTIPLIER
+    # NaN-safe, same reasoning as the backtest simulator's identical-
+    # shape guards above: a gap in ingested candles (plausible on a day
+    # with real Angel One rate-limit trouble -- see apps.market_data.
+    # broker_client's circuit breaker) can leave ind["atr"] as NaN for
+    # the latest bar. Decimal(str(nan)) is a valid Python object but not
+    # something MySQL accepts for a DecimalField -- letting it through
+    # would crash this signal's DB write instead of logging a clean
+    # NO_TRADE, the one thing this function must never do.
+    if not (raw_atr_distance > 0):
+        reasons.append(
+            f"ATR is invalid ({ind['atr']!r}) -- cannot size a stop-loss right now "
+            f"(likely a gap in ingested candles)."
+        )
+        stop_loss = entry_price
+    elif direction == "up":
+        atr_distance = Decimal(str(raw_atr_distance))
         stop_loss = entry_price - atr_distance
         target_1 = entry_price + atr_distance
         target_2 = entry_price + atr_distance * 2
     else:
+        atr_distance = Decimal(str(raw_atr_distance))
         stop_loss = entry_price + atr_distance
         target_1 = entry_price - atr_distance
         target_2 = entry_price - atr_distance * 2
