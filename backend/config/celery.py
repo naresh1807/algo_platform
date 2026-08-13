@@ -159,6 +159,22 @@ app.conf.beat_schedule = {
         "task": "apps.learning.tasks.evaluate_strategy_methods",
         "schedule": crontab(hour=16, minute=45),
     },
+    # Scalping comparison group (ema-momentum/rsi-extreme/sar-volume-
+    # burst, apps.learning.strategy_methods.SCALPING_METHOD_FUNCS) --
+    # every 1 minute, matching ingest-watchlist-1m-every-minute's own
+    # cadence and SCALPING_COMPARISON_MAX_HOLDING_BARS's short (12-bar)
+    # holding window: checking a scalp's stop/target only every 5
+    # minutes would defeat the point of scalping. Same market-hours
+    # gate inside the task, same full isolation from real execution/
+    # risk as the swing comparison above.
+    "scalping-strategy-comparison-every-minute": {
+        "task": "apps.learning.tasks.run_scalping_strategy_comparison",
+        "schedule": 60.0,
+    },
+    "evaluate-scalping-strategy-methods-daily": {
+        "task": "apps.learning.tasks.evaluate_scalping_strategy_methods",
+        "schedule": crontab(hour=16, minute=50),  # right after evaluate-strategy-methods-daily
+    },
     # manual 14.16 "JARVIS Announces": Market Open / Market Close. NSE's
     # regular session is 09:15-15:30 IST, Mon-Fri -- day_of_week='1-5'
     # (Celery: 0=Sunday) skips weekends. NSE trading holidays will still

@@ -483,6 +483,12 @@ def retrain_technical_direction_models():
 # market after this many bars rather than living forever, same "every
 # trade must eventually resolve" reasoning.
 STRATEGY_COMPARISON_MAX_HOLDING_BARS = 48
+# Scalping trades are meant to resolve in minutes, not the better part
+# of an hour -- 48 bars at 1m would let a "scalp" sit open for 48
+# minutes, defeating the point. 12 bars (12 minutes) matches the tight
+# ATR/SAR-based stops apps.learning.strategy_methods.SCALPING_METHOD_FUNCS
+# actually uses.
+SCALPING_COMPARISON_MAX_HOLDING_BARS = 12
 STRATEGY_COMPARISON_MIN_TRADES_FOR_EVAL = 10  # same "don't judge off a tiny sample" bar as MIN_TRADES_FOR_DRIFT_CHECK/MIN_TRAINING_SAMPLES elsewhere in this module
 
 _TIMEFRAME_MINUTES = {
@@ -507,41 +513,27 @@ def _hypothetical_r_multiple(trade) -> float | None:
     return float(trade.pnl) / risk_amount
 
 
-@shared_task
-def run_strategy_method_comparison(timeframe: str = "5m"):
+def _run_comparison_cycle(method_funcs: dict, timeframe: str, max_holding_bars: int, task_name: str) -> dict:
     """
-    Runs apps.learning.strategy_methods' three comparison strategies
-    (trend-following, mean-reversion, breakout) continuously alongside
-    the real signal engine (config/celery.py beat_schedule, same
-    300s/5min cadence as generate-signals-every-5-minutes) -- see
-    apps/learning/models.py's HypotheticalTrade docstring for why this
-    is a fully isolated paper-only simulation that never touches
-    apps.execution/apps.risk/real money, regardless of the platform's
-    real EXECUTION_MODE.
-
-    Same market-hours gate as apps.signals.tasks.generate_signals_for_watchlist
-    (there's no real price action to simulate against outside NSE
-    hours), and the same per-item try/except-and-continue pattern as
-    retrain_technical_direction_models so one bad symbol/method combo
-    can't abort the sweep.
+    Shared open/close/timeout cycle for BOTH the 5m swing comparison
+    (run_strategy_method_comparison) and the 1m scalping comparison
+    (run_scalping_strategy_comparison) below -- the logic is identical
+    either way (one open HypotheticalTrade per method+symbol at a time;
+    check stop/target/timeout if one's open, otherwise ask the method
+    for a fresh idea), only the method group, timeframe, and holding-
+    bar cap differ, so it's one implementation instead of two that
+    could quietly drift apart.
     """
     from django.conf import settings
 
-    from apps.market_data.market_hours import is_market_open
     from apps.market_data.models import HistoricalData
 
     from .models import HypotheticalTrade
-    from .strategy_methods import METHOD_FUNCS
-
-    is_open, reason = is_market_open()
-    if not is_open:
-        logger.info("run_strategy_method_comparison: market closed (%s) -- skipping.", reason)
-        return {"skipped": True, "reason": reason}
 
     tf_minutes = _TIMEFRAME_MINUTES.get(timeframe, 5)
     results = {"opened": [], "closed": [], "errors": []}
 
-    for method, generate_idea in METHOD_FUNCS.items():
+    for method, generate_idea in method_funcs.items():
         for symbol in settings.WATCHLIST:
             try:
                 latest = (
@@ -565,7 +557,7 @@ def run_strategy_method_comparison(timeframe: str = "5m"):
                         exit_price, exit_reason = open_trade.target_price, "target"
                     else:
                         bars_held = (timezone.now() - open_trade.opened_at).total_seconds() / 60 / tf_minutes
-                        if bars_held >= STRATEGY_COMPARISON_MAX_HOLDING_BARS:
+                        if bars_held >= max_holding_bars:
                             exit_price, exit_reason = current_price, "timeout"
 
                     if exit_price is not None:
@@ -584,28 +576,85 @@ def run_strategy_method_comparison(timeframe: str = "5m"):
                 trade = HypotheticalTrade.objects.create(method=method, symbol=symbol, timeframe=timeframe, **idea)
                 results["opened"].append({"method": method, "symbol": symbol, "id": trade.pk})
             except Exception:
-                logger.exception("run_strategy_method_comparison: failed for %s/%s", method, symbol)
+                logger.exception("%s: failed for %s/%s", task_name, method, symbol)
                 results["errors"].append(f"{method}/{symbol}")
 
     return results
 
 
 @shared_task
-def evaluate_strategy_methods():
+def run_strategy_method_comparison(timeframe: str = "5m"):
     """
-    The "ML memory" write: once a day (config/celery.py beat_schedule,
-    right after the other learning-loop tasks), aggregates each
-    comparison method's closed HypotheticalTrade rows into win_rate/
-    avg_r_multiple/total_pnl/trade_count and records them via
-    apps.learning.models.ModelRegistry -- reusing that table exactly as
-    designed (a free-form, versioned, champion-flagged registry) rather
-    than inventing a parallel "memory" store. model_name convention:
+    Runs apps.learning.strategy_methods' three SWING comparison
+    strategies (trend-following, mean-reversion, breakout) continuously
+    alongside the real signal engine (config/celery.py beat_schedule,
+    same 300s/5min cadence as generate-signals-every-5-minutes) -- see
+    apps/learning/models.py's HypotheticalTrade docstring for why this
+    is a fully isolated paper-only simulation that never touches
+    apps.execution/apps.risk/real money, regardless of the platform's
+    real EXECUTION_MODE.
+
+    Same market-hours gate as apps.signals.tasks.generate_signals_for_watchlist
+    (there's no real price action to simulate against outside NSE
+    hours), and the same per-item try/except-and-continue pattern as
+    retrain_technical_direction_models so one bad symbol/method combo
+    can't abort the sweep.
+    """
+    from apps.market_data.market_hours import is_market_open
+
+    from .strategy_methods import METHOD_FUNCS
+
+    is_open, reason = is_market_open()
+    if not is_open:
+        logger.info("run_strategy_method_comparison: market closed (%s) -- skipping.", reason)
+        return {"skipped": True, "reason": reason}
+
+    return _run_comparison_cycle(
+        METHOD_FUNCS, timeframe, STRATEGY_COMPARISON_MAX_HOLDING_BARS, "run_strategy_method_comparison",
+    )
+
+
+@shared_task
+def run_scalping_strategy_comparison(timeframe: str = "1m"):
+    """
+    Same isolated paper-only comparison as run_strategy_method_comparison
+    above, but for apps.learning.strategy_methods' three SCALPING
+    methods (ema-momentum, rsi-extreme, sar-volume-burst) on the 1m
+    timeframe -- its own beat schedule entry (every 1 minute, matching
+    ingest-watchlist-1m-every-minute's cadence, since checking a scalp's
+    stop/target only every 5 minutes would defeat the point of scalping)
+    and its own, much shorter SCALPING_COMPARISON_MAX_HOLDING_BARS.
+    """
+    from apps.market_data.market_hours import is_market_open
+
+    from .strategy_methods import SCALPING_METHOD_FUNCS
+
+    is_open, reason = is_market_open()
+    if not is_open:
+        logger.info("run_scalping_strategy_comparison: market closed (%s) -- skipping.", reason)
+        return {"skipped": True, "reason": reason}
+
+    return _run_comparison_cycle(
+        SCALPING_METHOD_FUNCS, timeframe, SCALPING_COMPARISON_MAX_HOLDING_BARS, "run_scalping_strategy_comparison",
+    )
+
+
+def _evaluate_method_group(method_funcs: dict, task_name: str) -> dict:
+    """
+    Shared aggregation for BOTH evaluate_strategy_methods (swing) and
+    evaluate_scalping_strategy_methods (scalping) below: rolls up each
+    method's closed HypotheticalTrade rows into win_rate/avg_r_multiple/
+    total_pnl/trade_count and records them via apps.learning.models.
+    ModelRegistry -- reusing that table exactly as designed (a free-
+    form, versioned, champion-flagged registry) rather than inventing a
+    parallel "memory" store. model_name convention:
     f"strategy_comparison_{method}". active_flag=True marks whichever
-    method currently has the best win_rate -- the same "this is the
-    current champion" meaning active_flag already carries everywhere
-    else in this table, extended here to mean "the best-performing
-    comparison method so far," not a trained model artifact (hence
-    artifact_path="" -- there is no file, this row IS the record).
+    method in THIS group currently has the best win_rate -- deliberately
+    scoped per group (not compared globally across both the 5m swing
+    and 1m scalping methods at once): a scalp's win_rate and a swing
+    trade's win_rate aren't measuring the same kind of bet, so "best
+    scalping method" and "best swing method" are the two questions each
+    group's own page actually wants answered, not one combined ranking.
 
     A method needs >= STRATEGY_COMPARISON_MIN_TRADES_FOR_EVAL closed
     trades before it's even included -- same "don't judge off a tiny,
@@ -617,10 +666,9 @@ def evaluate_strategy_methods():
     from django.db.models import Avg, Sum
 
     from .models import HypotheticalTrade, ModelRegistry
-    from .strategy_methods import METHOD_FUNCS
 
     stats = {}
-    for method in METHOD_FUNCS:
+    for method in method_funcs:
         closed = HypotheticalTrade.objects.filter(method=method, closed_at__isnull=False)
         trade_count = closed.count()
         if trade_count < STRATEGY_COMPARISON_MIN_TRADES_FOR_EVAL:
@@ -637,8 +685,8 @@ def evaluate_strategy_methods():
 
     if not stats:
         logger.info(
-            "evaluate_strategy_methods: no method has >= %d closed trades yet -- nothing to evaluate.",
-            STRATEGY_COMPARISON_MIN_TRADES_FOR_EVAL,
+            "%s: no method has >= %d closed trades yet -- nothing to evaluate.",
+            task_name, STRATEGY_COMPARISON_MIN_TRADES_FOR_EVAL,
         )
         return {"skipped": True, "reason": "insufficient_sample"}
 
@@ -646,7 +694,7 @@ def evaluate_strategy_methods():
     version = timezone.now().strftime("%Y%m%d%H%M%S")
 
     ModelRegistry.objects.filter(
-        model_name__in=[f"strategy_comparison_{m}" for m in METHOD_FUNCS], active_flag=True,
+        model_name__in=[f"strategy_comparison_{m}" for m in method_funcs], active_flag=True,
     ).update(active_flag=False)
 
     for method, metrics in stats.items():
@@ -659,3 +707,19 @@ def evaluate_strategy_methods():
         )
 
     return {"stats": stats, "best_method": best_method}
+
+
+@shared_task
+def evaluate_strategy_methods():
+    """Daily (config/celery.py beat_schedule) evaluation of the 5m swing comparison methods -- see _evaluate_method_group."""
+    from .strategy_methods import METHOD_FUNCS
+
+    return _evaluate_method_group(METHOD_FUNCS, "evaluate_strategy_methods")
+
+
+@shared_task
+def evaluate_scalping_strategy_methods():
+    """Daily (config/celery.py beat_schedule) evaluation of the 1m scalping comparison methods -- see _evaluate_method_group."""
+    from .strategy_methods import SCALPING_METHOD_FUNCS
+
+    return _evaluate_method_group(SCALPING_METHOD_FUNCS, "evaluate_scalping_strategy_methods")

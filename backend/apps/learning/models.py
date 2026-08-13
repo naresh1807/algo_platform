@@ -168,11 +168,12 @@ class TradeReview(models.Model):
 class HypotheticalTrade(models.Model):
     """
     A simulated (never-real-money) paper trade from one of
-    apps.learning.strategy_methods' comparison methods -- trend-
-    following, mean-reversion, breakout run continuously alongside the
-    real strategy so their outcomes can be compared and the best one
-    surfaced via ModelRegistry (see apps.learning.tasks.
-    evaluate_strategy_methods).
+    apps.learning.strategy_methods' comparison methods -- the 5m swing
+    group (trend-following, mean-reversion, breakout) or the 1m
+    scalping group (ema-momentum, rsi-extreme, sar-volume-burst) --
+    run continuously alongside the real strategy so their outcomes can
+    be compared and the best one surfaced via ModelRegistry (see
+    apps.learning.tasks.evaluate_strategy_methods).
 
     DELIBERATELY NOT apps.execution.OpenPosition, and has NO FK to it
     or to TradingSignal: OpenPosition shares a single AccountEquity/
@@ -201,6 +202,12 @@ class HypotheticalTrade(models.Model):
         ("trend_following", "Trend Following"),
         ("mean_reversion", "Mean Reversion"),
         ("breakout", "Breakout"),
+        # Scalping group (apps.learning.strategy_methods.SCALPING_METHOD_FUNCS,
+        # 1m timeframe) -- same table, same isolation guarantees as the
+        # three above, just a faster/tighter style of idea.
+        ("ema_momentum_scalp", "EMA Momentum Scalp"),
+        ("rsi_extreme_scalp", "RSI Extreme Reversal Scalp"),
+        ("sar_volume_burst_scalp", "SAR + Volume Burst Scalp"),
     ]
     EXIT_REASON_CHOICES = [
         ("stop", "Stop Loss"),

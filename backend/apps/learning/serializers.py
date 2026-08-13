@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import DailyReviewNote, DriftEvent, ModelRegistry, StrategyVersion, TradeReview
+from .models import DailyReviewNote, DriftEvent, HypotheticalTrade, ModelRegistry, StrategyVersion, TradeReview
 
 
 class StrategyVersionSerializer(serializers.ModelSerializer):
@@ -32,4 +32,10 @@ class TradeReviewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TradeReview
+        fields = "__all__"
+
+
+class HypotheticalTradeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HypotheticalTrade
         fields = "__all__"

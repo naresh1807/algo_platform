@@ -1,10 +1,19 @@
 """
-Three genuinely different signal-idea generators for
-apps.learning.tasks.run_strategy_method_comparison -- NOT variations on
-apps.signals.engine's own parameters (that's what StrategyVersion.
-params_json already does), but different trading logic entirely, so
-their paper-trade outcomes are a real comparison of approaches rather
-than the same approach with different knobs.
+Six genuinely different signal-idea generators, in two groups -- NOT
+variations on apps.signals.engine's own parameters (that's what
+StrategyVersion.params_json already does), but different trading logic
+entirely, so their paper-trade outcomes are a real comparison of
+approaches rather than the same approach with different knobs:
+
+  METHOD_FUNCS (5m, apps.learning.tasks.run_strategy_method_comparison):
+    trend-following / mean-reversion / breakout -- wider stops/targets,
+    meant to develop over several bars.
+
+  SCALPING_METHOD_FUNCS (1m, apps.learning.tasks.
+  run_scalping_strategy_comparison): ema-momentum / rsi-extreme /
+  sar-volume-burst -- tight stops, quick 1-1.5R targets, a much shorter
+  max holding period. Genuinely faster/tighter setups, not the same
+  three ideas just run on a shorter candle.
 
 Each function is PURE and READ-ONLY: it calls
 apps.market_data.indicators.compute_indicators/load_candle_frame and
@@ -30,6 +39,14 @@ BREAKOUT_VOLUME_RATIO = 1.5
 BREAKOUT_BB_WIDTH_SQUEEZE = 0.03  # tighter than regime.py's own 0.06 high-vol threshold -- this is looking for a QUIET range about to break out, the opposite condition
 
 MEAN_REVERSION_RSI_OVERSOLD = 30.0
+
+# --- Scalping methods (1m timeframe, see SCALPING_METHOD_FUNCS below) ---
+# Deliberately tighter/faster than the three swing methods above: small
+# ATR-based (or SAR-based) stops and quick 1-1.5R targets, matching how
+# scalping is actually traded (many small, fast wins; cut losers
+# immediately) rather than the wider stops/targets a 5m swing idea uses.
+SCALPING_RSI_EXTREME_OVERSOLD = 20.0  # more extreme than MEAN_REVERSION_RSI_OVERSOLD -- scalping wants a sharper snap-back, not just "a bit oversold"
+SCALPING_VOLUME_SPIKE_RATIO = 1.5
 
 
 def generate_trend_following_idea(symbol: str, timeframe: str = "5m") -> dict | None:
@@ -128,8 +145,102 @@ def generate_breakout_idea(symbol: str, timeframe: str = "5m") -> dict | None:
     return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 2.5 * risk}
 
 
+def generate_ema_momentum_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
+    """
+    Fast-timing momentum scalp: EMA9 already above EMA21 (structural
+    uptrend, same check trend_following uses) but entered on the exact
+    bar momentum visibly KICKS IN (MACD histogram just turned positive
+    AND is rising) rather than trend_following's "already confirmed by
+    ADX>=25" bar -- scalping cares about catching the move AS it starts,
+    not waiting for a slower confirmation that would mean entering late
+    on a 1-minute chart. relative_volume confirms real participation,
+    not just noise. 0.6x ATR stop / 1R target -- small and fast.
+    """
+    ind = compute_indicators(symbol, timeframe)
+    if ind is None:
+        return None
+
+    is_uptrend = ind["ema9"] > ind["ema21"]
+    is_momentum_turning = ind["macd_hist"] > 0 and ind["macd_hist"] > ind["macd_hist_prev"]
+    is_volume_confirmed = ind["relative_volume"] >= 1.2
+    if not (is_uptrend and is_momentum_turning and is_volume_confirmed):
+        return None
+
+    entry = ind["close"]
+    stop = entry - 0.6 * ind["atr"]
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.0 * risk}
+
+
+def generate_rsi_extreme_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
+    """
+    Sharper, faster mean-reversion than generate_mean_reversion_idea:
+    RSI<=SCALPING_RSI_EXTREME_OVERSOLD (20, vs. that method's 30) --
+    scalping wants a genuinely stretched, snap-back-prone reading, not
+    just "leaning oversold," since the target is a quick 1.2R bounce,
+    not a sustained reversal. Same HIGH_VOLATILITY skip as
+    generate_mean_reversion_idea and for the same reason (an extreme
+    reading during a volatility shock is more likely to keep falling).
+    """
+    ind = compute_indicators(symbol, timeframe)
+    if ind is None:
+        return None
+    regime = classify_regime(ind)
+    if regime == "high_volatility" or ind["rsi"] > SCALPING_RSI_EXTREME_OVERSOLD:
+        return None
+
+    entry = ind["close"]
+    stop = entry - 0.5 * ind["atr"]
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.2 * risk}
+
+
+def generate_sar_volume_burst_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
+    """
+    Catches a fresh directional burst right as it starts: Parabolic SAR
+    just below price (a bullish flip/continuation) combined with a real
+    volume spike (relative_volume >= 1.5, tighter bar than the other two
+    scalp methods' 1.2 -- a burst needs a genuine spike, not just
+    "slightly above average"). Stop is placed AT the SAR value itself
+    (not an ATR multiple) -- SAR's own point IS the level that
+    invalidates the setup, the tightest, most precise stop of the three
+    scalp methods, matching how SAR is actually used for stop placement
+    in practice.
+    """
+    ind = compute_indicators(symbol, timeframe)
+    if ind is None:
+        return None
+
+    is_sar_bullish = ind["sar"] < ind["close"]
+    is_volume_burst = ind["relative_volume"] >= SCALPING_VOLUME_SPIKE_RATIO
+    if not (is_sar_bullish and is_volume_burst):
+        return None
+
+    entry = ind["close"]
+    stop = ind["sar"]
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.5 * risk}
+
+
 METHOD_FUNCS = {
     "trend_following": generate_trend_following_idea,
     "mean_reversion": generate_mean_reversion_idea,
     "breakout": generate_breakout_idea,
+}
+
+# Run separately from METHOD_FUNCS (apps.learning.tasks.
+# run_scalping_strategy_comparison, its own 1-minute beat schedule
+# entry, its own shorter max-holding-bars) -- these are genuinely
+# faster/tighter setups meant for the 1m timeframe, not just the same
+# three ideas run more often.
+SCALPING_METHOD_FUNCS = {
+    "ema_momentum_scalp": generate_ema_momentum_scalp_idea,
+    "rsi_extreme_scalp": generate_rsi_extreme_scalp_idea,
+    "sar_volume_burst_scalp": generate_sar_volume_burst_scalp_idea,
 }

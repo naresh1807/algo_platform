@@ -13,6 +13,7 @@ import OptionsAnalytics from "./pages/OptionsAnalytics.jsx";
 import StockInvesting from "./pages/StockInvesting.jsx";
 import Positions from "./pages/Positions.jsx";
 import RiskLog from "./pages/RiskLog.jsx";
+import Scalping from "./pages/Scalping.jsx";
 import Signals from "./pages/Signals.jsx";
 import { useLiveStore } from "./store/liveStore.js";
 
@@ -57,6 +58,7 @@ function AppShell() {
             <Route path="/options" element={<OptionsAnalytics />} />
             <Route path="/investing" element={<StockInvesting />} />
             <Route path="/positions" element={<Positions />} />
+            <Route path="/scalping" element={<Scalping />} />
             <Route path="/risk" element={<RiskLog />} />
             <Route path="/learning" element={<Learning />} />
           </Routes>

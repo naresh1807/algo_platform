@@ -27,6 +27,7 @@ backend/ml_artifacts/
 
 # Runtime logs
 backend/logs/
+/*.log
 
 # Celery beat's local schedule DB (runtime state, like db.sqlite3)
 backend/celerybeat-schedule*

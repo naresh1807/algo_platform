@@ -70,6 +70,10 @@ export const endpoints = {
   strategyVersions: () => api.get("/learning/strategy-versions/", { params: { page_size: 500 } }),
   modelRegistry: () => api.get("/learning/model-registry/", { params: { page_size: 500 } }),
   tradeReviews: () => api.get("/learning/trade-reviews/", { params: { page_size: 500 } }),
+  // apps.learning.strategy_methods' isolated paper-comparison trades --
+  // method is optional (omit for both swing + scalping groups; the
+  // Scalping page passes the three scalping method names).
+  hypotheticalTrades: (params) => api.get("/learning/hypothetical-trades/", { params: { page_size: 100, ...params } }),
   // symbol/sentiment_label both optional -- omitting symbol returns
   // every headline (general market feeds + both watchlist symbols'
   // targeted searches, see apps.news.rss_client), not just one.
