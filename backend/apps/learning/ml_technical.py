@@ -204,11 +204,16 @@ def _build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["adx_norm"] = df["adx"] / 100.0
     out["bb_width"] = df["bb_width"]
     out["atr_pct"] = df["atr"] / close
-    # Index symbols (NIFTY/BANKNIFTY) report volume=0 from Angel One --
-    # matches apps.market_data.indicators.compute_indicators/
-    # indicator_dict_at's own "no volume data -> neutral 1.0, not NaN or
-    # a divide-by-zero" fallback exactly, so a 0-volume index doesn't
-    # nuke this feature (and therefore every row, via dropna()) to NaN.
+    # Index symbols (NIFTY/BANKNIFTY) report volume=0 from Angel One,
+    # so vol_avg_20 is always 0 for them -- unlike apps.market_data.
+    # indicators.compute_indicators/indicator_dict_at (which now return
+    # None for relative_volume in that case, so
+    # apps.signals.engine's condition-building functions can drop the
+    # volume-based condition from the score entirely), this is a
+    # continuous ML FEATURE column, not a boolean gate: a constant 1.0
+    # here is a harmless, uninformative-but-safe value for the model to
+    # learn from, whereas NaN would nuke this feature -- and therefore
+    # every row, via dropna() -- for every index-symbol training sample.
     out["relative_volume"] = np.where(
         df["vol_avg_20"] > 0, df["volume"] / df["vol_avg_20"].replace(0, np.nan), 1.0,
     )

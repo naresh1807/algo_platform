@@ -126,7 +126,13 @@ def generate_breakout_idea(symbol: str, timeframe: str = "5m") -> dict | None:
         return None
 
     is_squeeze = ind["bb_width"] <= BREAKOUT_BB_WIDTH_SQUEEZE
-    is_volume_spike = ind["relative_volume"] >= BREAKOUT_VOLUME_RATIO
+    # None (not a number) means no real volume signal exists for this
+    # symbol at all (see apps.market_data.indicators' relative_volume
+    # docstring -- NIFTY/BANKNIFTY report volume=0 on every candle), so
+    # treat it as "can't check, don't block on it" rather than a
+    # structurally-permanent False -- the latter made this method
+    # return None on every single call for these two symbols.
+    is_volume_spike = ind["relative_volume"] is None or ind["relative_volume"] >= BREAKOUT_VOLUME_RATIO
     if not (is_squeeze and is_volume_spike):
         return None
 
@@ -162,7 +168,8 @@ def generate_ema_momentum_scalp_idea(symbol: str, timeframe: str = "1m") -> dict
 
     is_uptrend = ind["ema9"] > ind["ema21"]
     is_momentum_turning = ind["macd_hist"] > 0 and ind["macd_hist"] > ind["macd_hist_prev"]
-    is_volume_confirmed = ind["relative_volume"] >= 1.2
+    # None-means-unavailable-skip: see generate_breakout_idea's note.
+    is_volume_confirmed = ind["relative_volume"] is None or ind["relative_volume"] >= 1.2
     if not (is_uptrend and is_momentum_turning and is_volume_confirmed):
         return None
 
@@ -216,7 +223,8 @@ def generate_sar_volume_burst_scalp_idea(symbol: str, timeframe: str = "1m") -> 
         return None
 
     is_sar_bullish = ind["sar"] < ind["close"]
-    is_volume_burst = ind["relative_volume"] >= SCALPING_VOLUME_SPIKE_RATIO
+    # None-means-unavailable-skip: see generate_breakout_idea's note.
+    is_volume_burst = ind["relative_volume"] is None or ind["relative_volume"] >= SCALPING_VOLUME_SPIKE_RATIO
     if not (is_sar_bullish and is_volume_burst):
         return None
 

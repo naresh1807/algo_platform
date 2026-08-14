@@ -171,8 +171,19 @@ def _evaluate_buy_conditions(ind: dict) -> dict[str, bool]:
     is computable from price/volume alone (sentiment and regime are
     evaluated separately, not folded in here, so this dict's true/false
     count can become a clean technical_score on its own).
+
+    relative_volume_breakout is omitted entirely (not scored as False)
+    when ind["relative_volume"] is None -- that means no real volume
+    signal exists for this symbol at all (see
+    apps.market_data.indicators' relative_volume docstring: spot
+    indices like NIFTY/BANKNIFTY report volume=0 on every candle), not
+    that volume happened to be low. Scoring a structurally-unmeetable
+    ">= 1.2" as a hard False against every other condition permanently
+    capped technical_score below TECHNICAL_SCORE_THRESHOLD for these
+    symbols -- dropping it from the denominator instead means a
+    genuinely strong setup on the other 7 conditions can still pass.
     """
-    return {
+    conditions = {
         "price_above_ema9_ema21": ind["close"] > ind["ema9"] > ind["ema21"],
         "ema9_slope_positive": ind["ema9_slope"] > 0,
         "ema21_slope_flat_or_positive": ind["ema21_slope"] >= 0,
@@ -180,13 +191,15 @@ def _evaluate_buy_conditions(ind: dict) -> dict[str, bool]:
         "macd_above_signal": ind["macd"] > ind["macd_signal"],
         "histogram_rising": ind["macd_hist"] > ind["macd_hist_prev"],
         "rsi_above_regime_threshold": ind["rsi"] > 50,  # regime-adjusted below in generate_signal
-        "relative_volume_breakout": ind["relative_volume"] >= 1.2,
     }
+    if ind["relative_volume"] is not None:
+        conditions["relative_volume_breakout"] = ind["relative_volume"] >= 1.2
+    return conditions
 
 
 def _evaluate_bearish_conditions(ind: dict) -> dict[str, bool]:
     """
-    Mirror image of _evaluate_buy_conditions -- the same eight manual
+    Mirror image of _evaluate_buy_conditions -- the same manual
     section 11 conditions, inverted, for a fresh SHORT-style entry
     (not to be confused with _evaluate_exit_conditions, which is about
     closing an existing LONG, not opening a new bearish position).
@@ -195,8 +208,10 @@ def _evaluate_bearish_conditions(ind: dict) -> dict[str, bool]:
     multi-confirmation rigor the upside case already gets, and by that
     module's backtest bootstrap for the same reason apps.analytics.
     backtest replays _evaluate_buy_conditions for the upside case.
+
+    relative_volume_breakout omission: see _evaluate_buy_conditions.
     """
-    return {
+    conditions = {
         "price_below_ema9_ema21": ind["close"] < ind["ema9"] < ind["ema21"],
         "ema9_slope_negative": ind["ema9_slope"] < 0,
         "ema21_slope_flat_or_negative": ind["ema21_slope"] <= 0,
@@ -204,8 +219,10 @@ def _evaluate_bearish_conditions(ind: dict) -> dict[str, bool]:
         "macd_below_signal": ind["macd"] < ind["macd_signal"],
         "histogram_falling": ind["macd_hist"] < ind["macd_hist_prev"],
         "rsi_below_regime_threshold": ind["rsi"] < 50,  # regime-adjusted below by the caller
-        "relative_volume_breakout": ind["relative_volume"] >= 1.2,
     }
+    if ind["relative_volume"] is not None:
+        conditions["relative_volume_breakout"] = ind["relative_volume"] >= 1.2
+    return conditions
 
 
 def _evaluate_exit_conditions(ind: dict) -> dict[str, bool]:
@@ -217,14 +234,19 @@ def _evaluate_exit_conditions(ind: dict) -> dict[str, bool]:
     time and stop price, not just current indicators; apps.execution
     (not yet written) is where those get checked against a live
     OpenPosition row.
+
+    volume_fading omission: see _evaluate_buy_conditions' note on
+    relative_volume_breakout -- same None-means-no-signal handling.
     """
-    return {
+    conditions = {
         "close_below_ema9_2_candles": ind["close_below_ema9_streak"] >= 2,
         "sar_flipped_above_price": ind["sar"] > ind["close"],
         "macd_histogram_weakening": ind["macd_hist"] < ind["macd_hist_prev"],
         "rsi_losing_momentum": ind["rsi"] < 50,
-        "volume_fading": ind["relative_volume"] < 0.8,
     }
+    if ind["relative_volume"] is not None:
+        conditions["volume_fading"] = ind["relative_volume"] < 0.8
+    return conditions
 
 
 def _evaluate_exit_conditions_short(ind: dict) -> dict[str, bool]:
@@ -234,13 +256,15 @@ def _evaluate_exit_conditions_short(ind: dict) -> dict[str, bool]:
     bearish is exactly when a short should stay open, not exit, so
     reusing the LONG version's conditions as-is would be backwards).
     """
-    return {
+    conditions = {
         "close_above_ema9_2_candles": ind["close_above_ema9_streak"] >= 2,
         "sar_flipped_below_price": ind["sar"] < ind["close"],
         "macd_histogram_strengthening": ind["macd_hist"] > ind["macd_hist_prev"],
         "rsi_gaining_momentum": ind["rsi"] > 50,
-        "volume_fading": ind["relative_volume"] < 0.8,
     }
+    if ind["relative_volume"] is not None:
+        conditions["volume_fading"] = ind["relative_volume"] < 0.8
+    return conditions
 
 
 def should_exit_position(

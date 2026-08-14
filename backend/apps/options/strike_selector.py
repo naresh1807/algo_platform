@@ -50,8 +50,9 @@ def suggest_best_strike(underlying: str, expiry: date, direction: str) -> dict:
     (manual's "AI must explain every decision" principle applied here
     the same way apps.signals.engine explains every signal).
     """
+    from . import metrics
     from .greeks import compute_greeks_for_contract
-    from .models import OptionChainSnapshot, OptionContract
+    from .models import OptionContract
     from .signals_engine import _check_high_decay_zone, _check_iv_crush, _latest_underlying_ltp
 
     option_type = "CE" if direction == "bullish" else "PE"
@@ -70,10 +71,18 @@ def suggest_best_strike(underlying: str, expiry: date, direction: str) -> dict:
     iv_crush = _check_iv_crush(underlying, expiry)
 
     contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry, option_type=option_type)
+    # One query for every contract's latest snapshot (both option_type
+    # sides -- metrics._latest_snapshots doesn't filter by side, but
+    # only `contracts` above are iterated below) instead of a separate
+    # query per contract, which used to make this loop 100+ round trips
+    # for a real index expiry.
+    latest_by_contract = {
+        snap.contract_id: snap for snap in metrics._latest_snapshots(underlying, expiry)
+    }
     candidates = []
 
     for contract in contracts:
-        snapshot = OptionChainSnapshot.objects.filter(contract=contract).order_by("-timestamp").first()
+        snapshot = latest_by_contract.get(contract.pk)
         if snapshot is None or snapshot.ltp is None:
             continue
 

@@ -78,16 +78,18 @@ class OptionChainView(APIView):
         expiry = date.fromisoformat(expiry_str)
 
         contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry)
-        latest_by_contract = {}
-        for snapshot in (
-            OptionChainSnapshot.objects.filter(contract__in=contracts)
-            .select_related("contract").order_by("contract_id", "-timestamp")
-        ):
-            # order_by + first-seen-per-contract-id gives the latest
-            # snapshot per contract without an extra query per contract
-            # (which a naive "for c in contracts: c.snapshots.first()"
-            # loop would do -- N+1 queries for an 80+ contract expiry).
-            latest_by_contract.setdefault(snapshot.contract_id, snapshot)
+        # metrics._latest_snapshots already does exactly this -- one
+        # row per contract, fetched via a window function -- so this
+        # view reuses it instead of its own "order_by + first-seen-per-
+        # contract-id" copy, which although N+1-query-safe, still
+        # pulled EVERY historical snapshot ever recorded for these
+        # contracts over the wire just to keep the first one seen: on
+        # this table's real, ever-growing ingestion history that was
+        # transferring far more rows than needed on every single
+        # request, and only gets slower as more snapshots accumulate.
+        latest_by_contract = {
+            snapshot.contract_id: snapshot for snapshot in metrics._latest_snapshots(underlying, expiry)
+        }
 
         spot = _latest_underlying_ltp(underlying, expiry)
 
@@ -143,12 +145,18 @@ class OptionsAnalyticsView(APIView):
             return Response({"error": "expiry query param (YYYY-MM-DD) is required."}, status=400)
         expiry = date.fromisoformat(expiry_str)
 
+        # Fetched once and reused across the three calls below --
+        # compute_pcr/compute_max_pain/strike_support_resistance each
+        # independently ran this same correlated-subquery fetch before,
+        # tripling it for no reason on every call to this view.
+        snapshots = list(metrics._latest_snapshots(underlying, expiry))
+
         return Response({
             "underlying": underlying,
             "expiry": expiry_str,
-            "pcr": metrics.compute_pcr(underlying, expiry),
-            "max_pain": metrics.compute_max_pain(underlying, expiry),
-            "support_resistance": metrics.strike_support_resistance(underlying, expiry),
+            "pcr": metrics.compute_pcr(underlying, expiry, snapshots=snapshots),
+            "max_pain": metrics.compute_max_pain(underlying, expiry, snapshots=snapshots),
+            "support_resistance": metrics.strike_support_resistance(underlying, expiry, snapshots=snapshots),
             "signals": evaluate_options_signals(underlying, expiry),
         })
 

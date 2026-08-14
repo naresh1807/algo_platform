@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 
 from .metrics import compute_iv_rank, compute_pcr
@@ -38,20 +40,48 @@ EXPIRY_PINNING_PROXIMITY_PCT = 0.5  # underlying within 0.5% of max pain, on exp
 HIGH_DECAY_DAYS_TO_EXPIRY = 1  # last trading day before expiry -- theta decay dominates
 
 
-def _contract_oi_and_price_change(contract: OptionContract) -> dict | None:
+def _recent_snapshots_by_contract(contracts, n: int) -> dict[int, list[OptionChainSnapshot]]:
+    """
+    Bulk-fetches the n most recent OptionChainSnapshot rows per contract
+    in ONE query via a window function, instead of a separate query per
+    contract. A real NIFTY/BANKNIFTY expiry regularly has 200+ live
+    contracts, and _aggregate_side_signal/_check_iv_crush below used to
+    each run 1-2 queries per contract in a Python loop -- 400+
+    individual round trips for a single /api/options/analytics/
+    request, which is what made that endpoint take minutes to respond
+    instead of the sub-second the same math takes as one query.
+    Returns {contract_id: [snapshot, ...]} newest-first per contract.
+    """
+    contract_ids = [c.pk for c in contracts]
+    if not contract_ids:
+        return {}
+    ranked = OptionChainSnapshot.objects.filter(contract_id__in=contract_ids).annotate(
+        _rn=Window(expression=RowNumber(), partition_by=F("contract_id"), order_by=F("timestamp").desc())
+    )
+    rows = (
+        OptionChainSnapshot.objects.filter(pk__in=ranked.filter(_rn__lte=n).values("pk"))
+        .order_by("contract_id", "-timestamp")
+    )
+    by_contract: dict[int, list[OptionChainSnapshot]] = {}
+    for row in rows:
+        by_contract.setdefault(row.contract_id, []).append(row)
+    return by_contract
+
+
+def _oi_and_price_change(recent: list[OptionChainSnapshot]) -> dict | None:
     """
     Returns {"oi_change_pct", "price_change_pct"} comparing the two
-    most recent snapshots for one contract, or None if there aren't
-    at least two snapshots yet (a freshly-added contract with only one
-    reading can't have a "change" computed).
+    most recent snapshots (newest-first, as returned by
+    _recent_snapshots_by_contract) for one contract, or None if there
+    aren't at least two snapshots yet (a freshly-added contract with
+    only one reading can't have a "change" computed). Pure computation,
+    no DB access -- the caller already bulk-fetched every contract's
+    recent snapshots in one query.
     """
-    recent = list(
-        OptionChainSnapshot.objects.filter(contract=contract).order_by("-timestamp")[:2]
-    )
     if len(recent) < 2:
         return None
 
-    latest, previous = recent
+    latest, previous = recent[0], recent[1]
     oi_change_pct = (
         (latest.open_interest - previous.open_interest) / previous.open_interest * 100
         if previous.open_interest else 0.0
@@ -73,17 +103,18 @@ def _aggregate_side_signal(underlying: str, expiry: date, option_type: str) -> s
     the reading, not thinly-traded far-OTM strikes with noisy price
     ticks and negligible OI.
     """
-    contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry, option_type=option_type)
+    contracts = list(OptionContract.objects.filter(underlying=underlying, expiry=expiry, option_type=option_type))
+    recent_by_contract = _recent_snapshots_by_contract(contracts, 2)
     weighted_oi_change = 0.0
     weighted_price_change = 0.0
     total_weight = 0.0
 
     for contract in contracts:
-        change = _contract_oi_and_price_change(contract)
+        recent = recent_by_contract.get(contract.pk, [])
+        change = _oi_and_price_change(recent)
         if change is None:
             continue
-        latest_oi = OptionChainSnapshot.objects.filter(contract=contract).order_by("-timestamp").first().open_interest
-        weight = latest_oi or 1
+        weight = recent[0].open_interest or 1
         weighted_oi_change += change["oi_change_pct"] * weight
         weighted_price_change += change["price_change_pct"] * weight
         total_weight += weight
@@ -336,13 +367,12 @@ def _latest_underlying_ltp(underlying: str, expiry: date) -> float | None:
 
 
 def _check_iv_crush(underlying: str, expiry: date) -> dict:
-    contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry)
+    contracts = list(OptionContract.objects.filter(underlying=underlying, expiry=expiry))
+    recent_by_contract = _recent_snapshots_by_contract(contracts, 20)
     high_iv_rank_contracts = []
 
     for contract in contracts:
-        recent_snapshots = list(
-            OptionChainSnapshot.objects.filter(contract=contract).order_by("-timestamp")[:20]
-        )
+        recent_snapshots = recent_by_contract.get(contract.pk, [])
         if len(recent_snapshots) < 2:
             continue
         current_iv = recent_snapshots[0].iv

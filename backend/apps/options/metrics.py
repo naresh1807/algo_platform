@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from django.db.models import Max, OuterRef, Subquery
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
 
 from .models import OptionChainSnapshot, OptionContract
 
@@ -17,46 +18,52 @@ from .models import OptionChainSnapshot, OptionContract
 def _latest_snapshots(underlying: str, expiry: date):
     """
     One snapshot per contract -- the most recent one at or before "now"
-    for that (underlying, expiry). Uses a correlated subquery (each
-    contract's own latest timestamp) rather than fetching everything
-    and filtering in Python, since a liquid index expiry can have 40+
-    strikes x 2 (CE/PE) = 80+ contracts and this runs on every metrics
-    call.
+    for that (underlying, expiry). Uses a window function (ROW_NUMBER()
+    partitioned per contract, ordered by timestamp desc) to rank every
+    contract's snapshots in ONE query, rather than a correlated
+    subquery re-run once per row of option_chain_snapshots. That
+    correlated-subquery shape used to live here (`WHERE timestamp =
+    (SELECT ... WHERE contract_id = outer.contract_id ORDER BY
+    timestamp DESC LIMIT 1)`) and, once option_chain_snapshots grew
+    into the millions of rows real ongoing ingestion produces, MySQL
+    8.0 took minutes per call to execute it -- multiplied by three
+    (compute_pcr/compute_max_pain/strike_support_resistance each called
+    this independently) plus signals_engine's own per-contract queries,
+    that's what made /api/options/analytics/ take 300+ seconds to
+    respond instead of well under a second.
     """
-    contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry)
-    # OuterRef("contract_id") -- NOT OuterRef("pk") -- since this
-    # subquery is correlated against the OUTER OptionChainSnapshot
-    # query below (via Subquery(...)), "pk" there would resolve to the
-    # outer SNAPSHOT's own id, not the contract it belongs to. That
-    # exact mistake shipped here previously and only ever "worked" in
-    # a test fixture where OptionContract and OptionChainSnapshot's
-    # auto-increment counters happened to start in lockstep (both
-    # fresh tables beginning at 1) -- any real dataset, where many
-    # snapshots accumulate per contract over time, would silently
-    # return zero rows from every caller (compute_pcr, compute_max_pain,
-    # strike_support_resistance).
-    latest_ts_per_contract = OptionChainSnapshot.objects.filter(
-        contract_id=OuterRef("contract_id"),
-    ).order_by("-timestamp").values("timestamp")[:1]
+    contract_ids = list(
+        OptionContract.objects.filter(underlying=underlying, expiry=expiry).values_list("pk", flat=True)
+    )
+    if not contract_ids:
+        return OptionChainSnapshot.objects.none()
 
+    ranked = OptionChainSnapshot.objects.filter(contract_id__in=contract_ids).annotate(
+        _rn=Window(expression=RowNumber(), partition_by=F("contract_id"), order_by=F("timestamp").desc())
+    )
     return (
-        OptionChainSnapshot.objects.filter(
-            contract__in=contracts,
-            timestamp=Subquery(latest_ts_per_contract),
-        )
+        OptionChainSnapshot.objects.filter(pk__in=ranked.filter(_rn=1).values("pk"))
         .select_related("contract")
     )
 
 
-def compute_pcr(underlying: str, expiry: date) -> float | None:
+def compute_pcr(underlying: str, expiry: date, snapshots: list | None = None) -> float | None:
     """
     Put-Call Ratio by open interest: total PE OI / total CE OI. > 1
     conventionally read as bullish (more puts written than calls,
     often by option sellers betting the market won't fall that far),
     < 1 as bearish -- this function only computes the number; reading
     direction into it is signals_engine's job, not this one's.
+
+    snapshots: pass an already-fetched _latest_snapshots() list to skip
+    the correlated-subquery fetch below -- OptionsAnalyticsView calls
+    compute_pcr/compute_max_pain/strike_support_resistance together and
+    previously paid for that identical fetch three times per request.
+    Leave None (the default, and every other caller's usage) to fetch
+    it here as before.
     """
-    snapshots = list(_latest_snapshots(underlying, expiry))
+    if snapshots is None:
+        snapshots = list(_latest_snapshots(underlying, expiry))
     if not snapshots:
         return None
 
@@ -68,7 +75,7 @@ def compute_pcr(underlying: str, expiry: date) -> float | None:
     return round(put_oi / call_oi, 4)
 
 
-def compute_max_pain(underlying: str, expiry: date) -> float | None:
+def compute_max_pain(underlying: str, expiry: date, snapshots: list | None = None) -> float | None:
     """
     The strike at which option WRITERS (not buyers) would collectively
     lose the least money if the underlying settled there at expiry --
@@ -82,8 +89,11 @@ def compute_max_pain(underlying: str, expiry: date) -> float | None:
     price, summed across every strike's OI) rather than any shortcut
     approximation, since max pain is exactly this calculation -- there
     isn't a simpler equivalent formula to fall back on.
+
+    snapshots: see compute_pcr's docstring -- same optional pre-fetch.
     """
-    snapshots = list(_latest_snapshots(underlying, expiry))
+    if snapshots is None:
+        snapshots = list(_latest_snapshots(underlying, expiry))
     if not snapshots:
         return None
 
@@ -127,15 +137,20 @@ def compute_iv_rank(current_iv: float, historical_ivs: list[float]) -> float | N
     return round((current_iv - iv_min) / (iv_max - iv_min) * 100, 2)
 
 
-def strike_support_resistance(underlying: str, expiry: date, top_n: int = 3) -> dict:
+def strike_support_resistance(
+    underlying: str, expiry: date, top_n: int = 3, snapshots: list | None = None,
+) -> dict:
     """
     manual section 9: "strike-wise support/resistance" -- the
     convention is that strikes with the highest PUT OI act as support
     (put writers are betting price stays above there) and strikes with
     the highest CALL OI act as resistance (call writers betting price
     stays below there). Returns the top_n strikes by OI for each side.
+
+    snapshots: see compute_pcr's docstring -- same optional pre-fetch.
     """
-    snapshots = list(_latest_snapshots(underlying, expiry))
+    if snapshots is None:
+        snapshots = list(_latest_snapshots(underlying, expiry))
     if not snapshots:
         return {"support": [], "resistance": []}
 

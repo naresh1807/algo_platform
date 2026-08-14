@@ -320,8 +320,19 @@ def indicator_dict_at(df: pd.DataFrame, i: int) -> dict:
         "atr": float(latest["atr"]),
         "adx": float(latest["adx"]),
         "bb_width": float(latest["bb_width"]),
+        # None (not a fake-neutral 1.0) when vol_avg_20 is 0 -- spot
+        # indices (NIFTY, BANKNIFTY) report volume=0 on every candle
+        # from Angel One (only their derivatives/constituents trade,
+        # not the index itself), so vol_avg_20 is always 0 for them and
+        # this used to silently fall back to a hardcoded "exactly
+        # average volume" reading forever. apps.signals.engine's
+        # condition-building functions treat None here as "no volume
+        # signal available for this symbol" and drop the
+        # relative-volume-based condition from the count entirely,
+        # rather than scoring a permanently-unmeetable ">= 1.2" against
+        # a sentinel that was never real data.
         "relative_volume": (
-            float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else 1.0
+            float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else None
         ),
         "close_below_ema9_streak": _count_close_below_ema9(window),
         "close_above_ema9_streak": _count_close_above_ema9(window),
@@ -360,8 +371,19 @@ def compute_indicators(symbol: str, timeframe: str) -> dict | None:
         "atr": float(latest["atr"]),
         "adx": float(latest["adx"]),
         "bb_width": float(latest["bb_width"]),
+        # None (not a fake-neutral 1.0) when vol_avg_20 is 0 -- spot
+        # indices (NIFTY, BANKNIFTY) report volume=0 on every candle
+        # from Angel One (only their derivatives/constituents trade,
+        # not the index itself), so vol_avg_20 is always 0 for them and
+        # this used to silently fall back to a hardcoded "exactly
+        # average volume" reading forever. apps.signals.engine's
+        # condition-building functions treat None here as "no volume
+        # signal available for this symbol" and drop the
+        # relative-volume-based condition from the count entirely,
+        # rather than scoring a permanently-unmeetable ">= 1.2" against
+        # a sentinel that was never real data.
         "relative_volume": (
-            float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else 1.0
+            float(latest["volume"] / latest["vol_avg_20"]) if latest["vol_avg_20"] else None
         ),
         "close_below_ema9_streak": _count_close_below_ema9(df),
         "close_above_ema9_streak": _count_close_above_ema9(df),
