@@ -16,6 +16,8 @@ handleRiskMessage exactly: {"type": "kill_switch", "is_active": bool}
 or {"type": <anything else>, ...} for a generic alert.
 """
 
+import logging
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.db.models.signals import post_save
@@ -24,14 +26,24 @@ from django.dispatch import receiver
 from common.constants import RiskEventSeverity
 from .models import AccountEquity, KillSwitchState, RiskEvent
 
+logger = logging.getLogger(__name__)
+
 
 def _send(data: dict) -> None:
     channel_layer = get_channel_layer()
     if channel_layer is None:
         return
-    async_to_sync(channel_layer.group_send)(
-        "risk_live", {"type": "risk_alert", "data": data},
-    )
+    # Best-effort push to the live dashboard only -- must never raise
+    # back into the post_save chain. broadcast_kill_switch_state fires
+    # on EVERY KillSwitchState save, so a channel-layer/Redis hiccup
+    # here must not be able to block the kill switch itself from
+    # persisting as active.
+    try:
+        async_to_sync(channel_layer.group_send)(
+            "risk_live", {"type": "risk_alert", "data": data},
+        )
+    except Exception:
+        logger.exception("Failed to broadcast to risk_live -- underlying state was still saved.")
 
 
 @receiver(post_save, sender=KillSwitchState)

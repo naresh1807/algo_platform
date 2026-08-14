@@ -47,8 +47,30 @@ def open_position_from_signal(signal) -> OpenPosition:
     profits as the underlying falls, same direction as going short the
     underlying -- see that module's docstring for why it trades the
     underlying itself rather than a real option contract).
+
+    Raises ValueError (and marks the signal REJECTED instead of
+    EXECUTED) if position_size rounds down to 0 -- reachable in
+    practice, not just in theory: apps.signals.engine.generate_signal
+    truncates risk_decision.position_size (already >= 1, guaranteed by
+    apps.risk.engine.check_pre_trade) by a regime multiplier as low as
+    0.5 and an ML confidence multiplier as low as 0.7, so a qty=1 base
+    size in a sideways/high-volatility regime with a low-confidence
+    model score truncates to 0. apps.execution.live_executor.
+    open_position_live already guards this same case (see its own qty
+    check); paper mode must reject the same way instead of silently
+    opening a phantom qty=0 position that would then block this symbol
+    from trading again (apps.risk.engine._check_exposure allows only
+    one open position per symbol) until someone notices and closes it
+    by hand.
     """
     from django.conf import settings
+
+    qty = int(signal.position_size or 0)
+    if qty <= 0:
+        signal.status = SignalStatus.REJECTED
+        signal.reason += " [paper execution: position_size was 0, no position opened]"
+        signal.save(update_fields=["status", "reason"])
+        raise ValueError(f"Cannot open a paper position for {signal.symbol} with qty=0.")
 
     side = PositionSide.LONG if signal.signal_type == SignalType.BUY else PositionSide.SHORT
 
@@ -67,18 +89,18 @@ def open_position_from_signal(signal) -> OpenPosition:
             signal=signal,
             symbol=signal.symbol,
             side=side,
-            # int(): signal.position_size is a DecimalField -- when signal
-            # was loaded from a queryset (the real run_trading_cycle path,
-            # as opposed to this test suite's in-memory .create() objects)
-            # it comes back as a genuine Decimal, and OpenPosition.qty
-            # (PositiveIntegerField) doesn't coerce it on plain assignment.
-            # Left as a raw Decimal, it later broke the "qty" audit-log
-            # JSON write in log_action() below, which -- even though that
-            # failure is caught and swallowed there -- still leaves the
-            # surrounding DB transaction poisoned for the rest of this
-            # request/task (Django marks connection.needs_rollback=True
-            # from the failed internal atomic(savepoint=False) save).
-            qty=int(signal.position_size or 0),
+            # Already an int (see the qty=0 guard above) -- signal.position_size
+            # itself is a DecimalField, and OpenPosition.qty (PositiveIntegerField)
+            # doesn't coerce a raw Decimal on plain assignment when signal was
+            # loaded from a queryset (the real run_trading_cycle path, as opposed
+            # to this test suite's in-memory .create() objects). Left as a raw
+            # Decimal, it later broke the "qty" audit-log JSON write in
+            # log_action() below, which -- even though that failure is caught
+            # and swallowed there -- still leaves the surrounding DB transaction
+            # poisoned for the rest of this request/task (Django marks
+            # connection.needs_rollback=True from the failed internal
+            # atomic(savepoint=False) save).
+            qty=qty,
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             target_price=signal.target_1,

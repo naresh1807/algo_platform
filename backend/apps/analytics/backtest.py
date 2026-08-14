@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 from apps.market_data.indicators import indicator_dict_at, load_full_indicator_frame
 from apps.market_data.regime import classify_regime
-from apps.signals.engine import _evaluate_buy_conditions
+from apps.signals.engine import HIGH_VOLATILITY_SCORE_MARGIN, _evaluate_buy_conditions
 from common.constants import MarketRegime
 
 # Bars to hold a simulated trade before giving up and closing at market,
@@ -142,12 +142,12 @@ def run_backtest(
     data for every combo -- see that function for the actual walk-forward
     orchestration; call this directly only for a one-off, in-sample check.
 
-    Skips a bar entirely (no signal, no rejection logged -- this is an
-    offline analysis tool, not apps.signals.engine, so there is no
-    TradingSignal row to write for a NO_TRADE) if regime is
-    HIGH_VOLATILITY, mirroring generate_signal()'s own behavior exactly
-    (a high-volatility bar unconditionally adds a rejection reason there
-    -- see that function's regime check).
+    High-volatility bars are not skipped -- mirroring generate_signal()'s
+    own behavior exactly (manual section 12: "stricter filters AND
+    smaller size", not an outright ban), the technical_score_threshold
+    is raised by HIGH_VOLATILITY_SCORE_MARGIN for that bar only, so a
+    genuinely strong setup can still trade there, just held to a higher
+    bar (sizing itself isn't simulated here, see this module's docstring).
     """
     df = load_full_indicator_frame(symbol, timeframe)
     if df.empty:
@@ -166,16 +166,17 @@ def run_backtest(
     while i <= end_index:
         ind = indicator_dict_at(df, i)
         regime = classify_regime(ind)
-        if regime == MarketRegime.HIGH_VOLATILITY:
-            i += 1
-            continue
 
         conditions = _evaluate_buy_conditions(ind)
         if regime == MarketRegime.SIDEWAYS:
             conditions["rsi_above_regime_threshold"] = ind["rsi"] > 60
         technical_score = sum(conditions.values()) / len(conditions)
 
-        if technical_score >= technical_score_threshold:
+        effective_score_threshold = technical_score_threshold
+        if regime == MarketRegime.HIGH_VOLATILITY:
+            effective_score_threshold = min(1.0, technical_score_threshold + HIGH_VOLATILITY_SCORE_MARGIN)
+
+        if technical_score >= effective_score_threshold:
             entry_price = ind["close"]
             stop_loss = entry_price - ind["atr"] * atr_stop_multiplier
             target_1 = entry_price + (entry_price - stop_loss)

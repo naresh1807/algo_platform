@@ -74,6 +74,14 @@ export default function OptionsAnalytics() {
   // next tick, never rendered itself.
   const [flash, setFlash] = useState({});
   const prevLtpRef = useRef({});
+  // Guards fetchBestStrike against out-of-order responses: clicking
+  // Bullish then Bearish before the first request resolves previously
+  // let the slower Bullish response land last and overwrite `bestStrike`
+  // with a CE suggestion while `strikeDirection` (set synchronously on
+  // click) already said "bearish" -- rendering showed the bullish
+  // strike labeled PE. Only the response matching the MOST RECENT
+  // request is ever applied.
+  const bestStrikeRequestRef = useRef(0);
 
   const latestOptionUpdate = useLiveStore((s) => s.latestOptionUpdate);
 
@@ -84,18 +92,29 @@ export default function OptionsAnalytics() {
   // underlying, instead of a blind date-picker the user has to guess
   // a valid value for.
   useEffect(() => {
+    let cancelled = false;
     setExpiry("");
     setChainRows([]);
     setAnalytics(null);
     endpoints.optionExpiries(underlying).then((res) => {
+      // Guards against a slow response for a PREVIOUS underlying landing
+      // after the user has already switched again -- without this, a
+      // stale NIFTY expiries list could overwrite the BANKNIFTY one just
+      // requested, offering expiries that don't belong to what's
+      // actually selected.
+      if (cancelled) return;
       const list = res.data.expiries ?? [];
       setExpiries(list);
       if (list.length > 0) setExpiry(list[0]);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [underlying]);
 
   useEffect(() => {
     if (!expiry) return;
+    let cancelled = false;
     setError(null);
     setChainLoading(true);
 
@@ -103,6 +122,12 @@ export default function OptionsAnalytics() {
       endpoints.optionChain(underlying, expiry),
       endpoints.optionsAnalytics(underlying, expiry),
     ]).then(([chainRes, analyticsRes]) => {
+      // Same race as the expiries effect above: rapidly switching
+      // underlying/expiry can let an older, slower request resolve
+      // AFTER a newer one already populated the chain, silently
+      // replacing the currently-selected underlying's chain/analytics
+      // with a different underlying's stale data.
+      if (cancelled) return;
       setChainLoading(false);
       if (chainRes.status === "fulfilled") {
         setChainRows(chainRes.value.data.rows ?? []);
@@ -115,6 +140,9 @@ export default function OptionsAnalytics() {
       }
       if (analyticsRes.status === "fulfilled") setAnalytics(analyticsRes.value.data);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [underlying, expiry]);
 
   // Merge live snapshot pushes (apps/options/consumers.py) into the
@@ -165,12 +193,17 @@ export default function OptionsAnalytics() {
 
   const fetchBestStrike = (direction) => {
     if (!expiry) return;
+    const requestId = ++bestStrikeRequestRef.current;
     setBestStrikeLoading(true);
     setStrikeDirection(direction);
     endpoints.bestStrike(underlying, expiry, direction).then((res) => {
+      if (requestId !== bestStrikeRequestRef.current) return; // superseded by a later click
       setBestStrike(res.data);
       setBestStrikeLoading(false);
-    }).catch(() => setBestStrikeLoading(false));
+    }).catch(() => {
+      if (requestId !== bestStrikeRequestRef.current) return;
+      setBestStrikeLoading(false);
+    });
   };
 
   useEffect(() => {

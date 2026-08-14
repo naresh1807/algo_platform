@@ -588,7 +588,29 @@ def sharpe_ratio(entities: dict) -> str:
 # -------------------------------------------------------------- strategy
 
 def current_strategy(entities: dict) -> str:
-    return best_strategy(entities)
+    """
+    "current strategy" / "active strategy" -- must report the
+    StrategyVersion actually flagged active_flag=True, NOT the
+    top-ranked one from best_strategy() (a different command, phrase
+    "best strategy", AI category): the best-performing version and the
+    currently active one are frequently different versions, and
+    aliasing this to best_strategy() used to produce answers like
+    "Best: v3 (not currently active)" in response to "what's my
+    active strategy" -- self-contradictory. See strategy_performance()
+    below for the same active_flag lookup with signal-count framing.
+    """
+    from apps.learning.ranking import rank_strategies
+
+    active = StrategyVersion.objects.filter(active_flag=True).first()
+    if not active:
+        return "No active strategy version."
+    stats = next((r for r in rank_strategies() if r["version_name"] == active.version_name), None)
+    if stats is None:
+        return f"Active strategy: {active.version_name} -- no closed trades yet to report win rate/profit factor."
+    return (
+        f"Active strategy: {stats['version_name']} -- win rate {stats['win_rate']:.0%}, "
+        f"profit factor {stats['profit_factor']:.2f}, {stats['trade_count']} trade(s)."
+    )
 
 
 def strategy_performance(entities: dict) -> str:

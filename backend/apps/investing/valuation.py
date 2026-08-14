@@ -56,8 +56,14 @@ def assess_valuation(stock) -> dict | None:
     """
     from .models import FundamentalSnapshot
 
+    # pe_ratio__gte=0 (not just isnull=False) -- a negative P/E (a
+    # loss-making quarter) isn't a "cheap" earnings multiple, it's not
+    # a usable earnings multiple at all, and falls through every
+    # _ABSOLUTE_BANDS threshold below (all >= 0) with no match. Same
+    # "None means unknown" convention as everywhere else: treat a
+    # negative P/E quarter as no usable data, not as a fabricated label.
     snapshots = list(
-        stock.fundamentals.filter(pe_ratio__isnull=False).order_by("-period_end")[:12]
+        stock.fundamentals.filter(pe_ratio__isnull=False, pe_ratio__gte=0).order_by("-period_end")[:12]
     )
     if not snapshots:
         return None

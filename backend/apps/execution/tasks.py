@@ -32,10 +32,20 @@ def run_trading_cycle(timeframe: str = "5m"):
     trip should still not go on to actually open a position once the
     switch is active -- opening positions and approving signals are
     two separate moments in time, and both need the same guard.
+
+    This ONLY blocks opening new positions -- it must never skip
+    checking already-open ones. _check_drawdown's DRAWDOWN_FLATTEN_PCT
+    case (manual section 13: "20% triggers a full flatten-and-halt")
+    trips this same kill switch, and nothing else in this codebase
+    closes positions on its own; if this function returned early
+    instead of still running the closer, a kill-switch trip -- the
+    exact moment risk management matters most -- would leave every
+    open position's stop-loss/target/technical-exit checks unmonitored
+    indefinitely instead of flattened.
     """
-    if is_kill_switch_active():
-        logger.warning("run_trading_cycle skipped: kill switch is active.")
-        return {"skipped": True, "reason": "kill_switch_active"}
+    kill_switch_active = is_kill_switch_active()
+    if kill_switch_active:
+        logger.warning("run_trading_cycle: kill switch is active -- no new positions will be opened.")
 
     if settings.EXECUTION_MODE == "paper":
         from .paper_executor import check_and_close_positions, open_position_from_signal
@@ -49,35 +59,43 @@ def run_trading_cycle(timeframe: str = "5m"):
 
     opened = []
     skipped_exposure = []
-    pending_signals = TradingSignal.objects.filter(
-        status=SignalStatus.APPROVED, signal_type__in=[SignalType.BUY, SignalType.SELL],
-    )
-    for signal in pending_signals:
-        # Re-validate exposure right before opening, not just at
-        # signal-generation time: check_pre_trade() ran this same check
-        # minutes ago, and an earlier signal in THIS batch may have just
-        # opened a position in the same symbol (exposure_check_for_execution
-        # re-queries OpenPosition fresh on every call, so it sees that).
-        exposure_ok, exposure_reason = exposure_check_for_execution(signal.symbol)
-        if not exposure_ok:
-            logger.warning(
-                "Skipping execution of signal %s (%s): %s",
-                signal.pk, signal.symbol, exposure_reason,
-            )
-            skipped_exposure.append({"symbol": signal.symbol, "signal_id": signal.pk, "reason": exposure_reason})
-            continue
-        try:
-            position = opener(signal)
-            opened.append({"symbol": signal.symbol, "position_id": position.pk})
-        except Exception:
-            logger.exception(
-                "Failed to open %s position for signal %s", settings.EXECUTION_MODE, signal.pk,
-            )
+    if kill_switch_active:
+        skipped_exposure.append({"reason": "kill_switch_active"})
+    else:
+        pending_signals = TradingSignal.objects.filter(
+            status=SignalStatus.APPROVED, signal_type__in=[SignalType.BUY, SignalType.SELL],
+        )
+        for signal in pending_signals:
+            # Re-validate exposure right before opening, not just at
+            # signal-generation time: check_pre_trade() ran this same check
+            # minutes ago, and an earlier signal in THIS batch may have just
+            # opened a position in the same symbol (exposure_check_for_execution
+            # re-queries OpenPosition fresh on every call, so it sees that).
+            exposure_ok, exposure_reason = exposure_check_for_execution(signal.symbol)
+            if not exposure_ok:
+                logger.warning(
+                    "Skipping execution of signal %s (%s): %s",
+                    signal.pk, signal.symbol, exposure_reason,
+                )
+                skipped_exposure.append({"symbol": signal.symbol, "signal_id": signal.pk, "reason": exposure_reason})
+                continue
+            try:
+                position = opener(signal)
+                opened.append({"symbol": signal.symbol, "position_id": position.pk})
+            except Exception:
+                logger.exception(
+                    "Failed to open %s position for signal %s", settings.EXECUTION_MODE, signal.pk,
+                )
 
+    # Always run, kill switch or not: existing open positions must keep
+    # being monitored for stop-loss/target/technical exits regardless of
+    # whether new entries are currently allowed -- see this function's
+    # own docstring.
     closed = closer(timeframe)
     return {
         "mode": settings.EXECUTION_MODE, "opened": opened,
         "skipped_exposure": skipped_exposure, "position_updates": closed,
+        "kill_switch_active": kill_switch_active,
     }
 
 

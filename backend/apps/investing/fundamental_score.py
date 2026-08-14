@@ -92,7 +92,13 @@ def _score_growth_consistency(snapshots: list) -> float | None:
     figure can't tell you.
     """
     recent = [s for s in snapshots[:4] if s.profit_growth_yoy is not None]
-    if not recent:
+    # Need at least 2 quarters -- with just 1, this collapses into
+    # "did the one quarter we have grow" (always 0 or 100), which is
+    # exactly the "one good quarter" read this factor exists to be
+    # distinguished FROM, and would let a single quarter's
+    # profit_growth_yoy double as two "independent" factors toward
+    # MIN_FACTORS_REQUIRED (itself, plus this derived from it).
+    if len(recent) < 2:
         return None
     positive = sum(1 for s in recent if s.profit_growth_yoy > 0)
     return positive / len(recent) * 100.0

@@ -99,6 +99,7 @@ def aggregate_sentiment(symbol: str) -> dict:
             "sentiment_score": 0.0,
             "confidence": 0.0,
             "has_contradictory_headline": False,
+            "has_strongly_positive_headline": False,
             "headline_count": 0,
         }
 

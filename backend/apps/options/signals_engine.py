@@ -102,8 +102,19 @@ def _aggregate_side_signal(underlying: str, expiry: date, option_type: str) -> s
     if oi_rising and not price_rising:
         return "buildup_bearish" if option_type == "CE" else "buildup_bullish"
     if not oi_rising and price_rising:
-        return "short_covering"
-    return "long_unwinding"
+        # Same CE/PE flip as the two buildup branches above, and for the
+        # same reason: "OI down + premium up" is short covering (bullish)
+        # on the CALL side (short call holders buying back as the
+        # underlying rallies against them), but on the PUT side that same
+        # OI/premium combination is short PUT covering -- writers buying
+        # back their puts because the underlying is FALLING against them
+        # -- which is bearish, i.e. the call-side's "long_unwinding" case.
+        return "short_covering" if option_type == "CE" else "long_unwinding"
+    # "OI down + premium down": long call unwinding (bearish) on the CALL
+    # side, but long PUT unwinding (bearish-bet holders giving up as the
+    # underlying rises) on the PUT side is bullish -- the call-side's
+    # "short_covering" case.
+    return "long_unwinding" if option_type == "CE" else "short_covering"
 
 
 def evaluate_options_signals(underlying: str, expiry: date) -> dict:

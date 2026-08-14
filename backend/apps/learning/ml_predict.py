@@ -41,11 +41,20 @@ def _load_active_model():
                 _cached_model = joblib.load(row.artifact_path)
                 _cached_feature_columns = row.metrics_json.get("feature_columns")
                 _cached_registry_id = row.pk
-            except FileNotFoundError:
+            except Exception:
+                # Broad on purpose, not just FileNotFoundError -- a
+                # corrupted artifact, a pickle/sklearn-version mismatch,
+                # or a permissions error must all fall back to "no active
+                # model" the same way a missing file does, since this
+                # function is called directly (unguarded) from
+                # predict_win_probability, whose own docstring promises
+                # it never raises -- letting anything but FileNotFoundError
+                # escape here broke that promise for every other joblib
+                # load failure.
                 logger.warning(
-                    "ml_predict: active ModelRegistry row %s points at a missing "
-                    "artifact file (%s) -- treating as no active model.",
-                    row.pk, row.artifact_path,
+                    "ml_predict: active ModelRegistry row %s points at an unusable "
+                    "artifact (%s) -- treating as no active model.",
+                    row.pk, row.artifact_path, exc_info=True,
                 )
                 return None, None
         return _cached_model, _cached_feature_columns

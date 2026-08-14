@@ -163,8 +163,16 @@ CELERY_TIMEZONE = "Asia/Kolkata"
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.SessionAuthentication",
+        # TokenAuthentication first: DRF's APIView.get_authenticate_header()
+        # only consults authenticators[0] to decide 401 vs 403 for an
+        # unauthenticated request. SessionAuthentication.authenticate_header()
+        # returns None (no WWW-Authenticate challenge), so with it listed
+        # first every unauthenticated API call got 403 instead of 401 --
+        # apps.auth_app.tests.test_protected_endpoint_rejects_missing_token
+        # is what this platform actually expects (401), and frontend code
+        # that treats 401 as "redirect to login" silently broke on 403.
         "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",

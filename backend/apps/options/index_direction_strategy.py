@@ -456,8 +456,13 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
         risk_score = 0.0
 
     if reasons:
+        # max(..., 0): consistent with the two other total_score
+        # computations below -- sentiment is a veto-only filter, so a
+        # merely-negative (but non-vetoing) sentiment_score must not
+        # drag total_score down via this average any more here than it
+        # does for a setup rejected further down the pipeline.
         total_score = round(
-            (technical_score + sentiment["sentiment_score"] + risk_score + options_score) / 4, 4,
+            (technical_score + max(sentiment["sentiment_score"], 0) + risk_score + options_score) / 4, 4,
         )
         return _create_signal(
             symbol=underlying, signal_type=SignalType.NO_TRADE,

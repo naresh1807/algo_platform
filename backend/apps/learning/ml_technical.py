@@ -410,8 +410,22 @@ def predict_technical_direction(symbol: str, timeframe: str) -> dict | None:
         return None
 
     import joblib
-    model = joblib.load(registry_row.artifact_path)
-    probability_favorable = float(model.predict_proba(features[TECHNICAL_FEATURES].to_numpy())[0, 1])
+
+    try:
+        model = joblib.load(registry_row.artifact_path)
+        probability_favorable = float(model.predict_proba(features[TECHNICAL_FEATURES].to_numpy())[0, 1])
+    except Exception:
+        # Same "missing/unusable model is a skip, not a crash" convention
+        # as ml_predict._load_active_model -- without this, a deleted or
+        # corrupted artifact file would raise straight through to
+        # TechnicalDirectionView, turning an advisory, non-trading-critical
+        # signal into a 500 instead of the documented "no model yet" None.
+        logger.warning(
+            "predict_technical_direction: %s points at an unusable artifact (%s) "
+            "-- treating as no active model.",
+            model_name, registry_row.artifact_path, exc_info=True,
+        )
+        return None
 
     return {
         "model_version": registry_row.model_version,

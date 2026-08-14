@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
@@ -69,14 +69,23 @@ export default function IndexTickerBar() {
     }
   }, [latestIndexUpdate, openIndex]);
 
+  // Guards against opening index A then quickly switching to index B
+  // before A's constituents request resolves -- without this, A's
+  // slower response could land AFTER B's and overwrite B's already-
+  // displayed constituent list with A's stocks while the panel header
+  // still reads "B".
+  const constituentsRequestRef = useRef(0);
+
   const openCard = (index) => {
     if (openIndex?.id === index.id) {
       setOpenIndex(null);
       return;
     }
+    const requestId = ++constituentsRequestRef.current;
     setOpenIndex(index);
     setConstituentsLoading(true);
     endpoints.indexConstituents(index.id).then((res) => {
+      if (requestId !== constituentsRequestRef.current) return;
       setConstituents(res.data.results ?? []);
       setConstituentsLoading(false);
     });

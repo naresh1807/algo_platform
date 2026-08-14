@@ -388,7 +388,14 @@ def _compute_position_size(
         risk_pct *= 0.5
         notes.append("position size halved -- today is options expiry day for this underlying")
 
-    risk_amount = equity.current_equity * (Decimal(risk_pct) / Decimal(100))
+    # str() before Decimal(): risk_pct is a plain float (from
+    # settings.RISK_HARD_LIMITS times a float drawdown/expiry
+    # multiplier above) -- Decimal(float) reproduces that float's exact
+    # binary representation (e.g. Decimal(0.1) == Decimal('0.1000000
+    # 000000000055511151231257827021181583404541015625')), same trap
+    # apps.signals.engine.generate_signal's entry_price/stop_loss
+    # already route through str() first to avoid.
+    risk_amount = equity.current_equity * (Decimal(str(risk_pct)) / Decimal(100))
     stop_distance = abs(entry_price - stop_loss)
 
     if stop_distance <= 0:

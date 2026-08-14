@@ -25,12 +25,56 @@ pandas-ta dependency either).
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
+from django.utils import timezone as django_timezone
 
 from .models import HistoricalData
 
 MIN_CANDLES_REQUIRED = 60  # enough lookback for EMA21/ADX/BB to be meaningful, not just non-null
+
+# Bar duration per timeframe -- a candle can't have genuinely closed
+# until at least its own duration has elapsed since it opened,
+# regardless of which anchor scheme it was bucketed against. Used by
+# _drop_unclosed_last_bar below.
+_TIMEFRAME_DURATION = {
+    "1m": timedelta(minutes=1),
+    "3m": timedelta(minutes=3),
+    "5m": timedelta(minutes=5),
+    "10m": timedelta(minutes=10),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "1d": timedelta(days=1),
+}
+
+
+def _drop_unclosed_last_bar(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """
+    apps.market_data.tasks._upsert_candles and tick_aggregator.py both
+    deliberately persist the CURRENTLY-FORMING candle too (so live
+    charts move tick-by-tick instead of waiting for the next completed
+    bar) -- so the most recent HistoricalData row for a symbol/timeframe
+    is often still open, not the closed bar this module's own functions
+    promise ("indicators as of the latest closed candle", see module
+    docstring). A signal computed off a still-moving close would
+    flicker with every tick/poll instead of evaluating a stable, final
+    bar, so the signal-facing entry points (compute_indicators,
+    load_full_indicator_frame) call this; compute_indicator_series (the
+    chart) deliberately does NOT -- a live-updating last candle there is
+    the whole point of the tick feed.
+    """
+    if df.empty:
+        return df
+    duration = _TIMEFRAME_DURATION.get(timeframe)
+    if duration is None:
+        return df
+    last_ts = df.index[-1]
+    if django_timezone.now() < last_ts + duration:
+        return df.iloc[:-1]
+    return df
 
 
 def load_candle_frame(symbol: str, timeframe: str, limit: int = 300) -> pd.DataFrame:
@@ -84,7 +128,14 @@ def _rsi(close: pd.Series, length: int = 14) -> pd.Series:
     avg_loss = _wilder_smooth(loss, length)
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(100)  # avg_loss == 0 (all recent candles up) is maximal RSI, not undefined
+    # avg_loss == 0 (all recent candles up) is maximal RSI, not
+    # undefined -- but only once avg_gain/avg_loss are actually defined.
+    # A blanket rsi.fillna(100) would also coerce the first `length`
+    # rows (not enough candles yet for Wilder smoothing to produce a
+    # value at all -- genuinely NaN, not a divide-by-zero) into a fake
+    # RSI=100, which apps.analytics.backtest iterates over from bar 1.
+    zero_loss = (avg_loss == 0) & avg_gain.notna()
+    return rsi.mask(zero_loss, 100.0)
 
 
 def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
@@ -114,7 +165,15 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) ->
     minus_di = 100 * (_wilder_smooth(minus_dm, length) / tr_smoothed)
 
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    return _wilder_smooth(dx.fillna(0), length)
+    # plus_di == minus_di == 0 (a genuinely flat bar, no directional
+    # movement) is DX=0, not undefined -- but only once plus_di/minus_di
+    # are actually defined. A blanket dx.fillna(0) would also coerce the
+    # first `length` rows (not enough candles yet -- genuinely NaN, not
+    # a flat bar) into fake zero-DX readings that then get smoothed
+    # into the ADX average below, understating ADX for many bars
+    # afterward.
+    dx = dx.mask((plus_di == 0) & (minus_di == 0), 0.0)
+    return _wilder_smooth(dx, length)
 
 
 def _bollinger_width(close: pd.Series, length: int = 20, num_std: float = 2.0) -> pd.Series:
@@ -225,6 +284,7 @@ def load_full_indicator_frame(symbol: str, timeframe: str, limit: int = 5000) ->
     history as is actually stored.
     """
     df = load_candle_frame(symbol, timeframe, limit=limit)
+    df = _drop_unclosed_last_bar(df, timeframe)
     if len(df) < MIN_CANDLES_REQUIRED:
         return pd.DataFrame()
     return _with_indicator_columns(df)
@@ -276,6 +336,7 @@ def compute_indicators(symbol: str, timeframe: str) -> dict | None:
     with only a few candles is an expected, ordinary state early on.
     """
     df = load_candle_frame(symbol, timeframe)
+    df = _drop_unclosed_last_bar(df, timeframe)
     if len(df) < MIN_CANDLES_REQUIRED:
         return None
 
