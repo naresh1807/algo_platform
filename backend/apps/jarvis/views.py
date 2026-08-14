@@ -37,13 +37,25 @@ class JarvisCommandView(APIView):
 
 
 class JarvisHistoryListView(generics.ListAPIView):
-    """GET /api/jarvis/history/ -- manual 14.19's Conversation History panel."""
+    """
+    GET /api/jarvis/history/ -- manual 14.19's Conversation History panel.
+    DELETE /api/jarvis/history/ -- clears the requesting user's own
+    JARVIS chat history (and only theirs -- scoped by request.user the
+    same way get_queryset already is, never another user's rows).
+    """
 
     serializer_class = JarvisCommandHistorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         return JarvisCommandHistory.objects.filter(user=self.request.user)[:100]
+
+    def delete(self, request):
+        # Not get_queryset() -- that's sliced to the most recent 100 for
+        # the list view, but "clear my history" should delete every row,
+        # not just the ones the panel currently displays.
+        deleted, _ = JarvisCommandHistory.objects.filter(user=request.user).delete()
+        return Response({"deleted": deleted}, status=status.HTTP_200_OK)
 
 
 class JarvisMemoryView(APIView):

@@ -109,5 +109,6 @@ export const endpoints = {
   jarvisCommand: (text, input_mode = "text", confirm = false) =>
     api.post("/jarvis/command/", { text, input_mode, confirm }),
   jarvisHistory: () => api.get("/jarvis/history/"),
+  deleteJarvisHistory: () => api.delete("/jarvis/history/"),
   jarvisSuggested: (category) => api.get("/jarvis/suggested/", { params: category ? { category } : {} }),
 };

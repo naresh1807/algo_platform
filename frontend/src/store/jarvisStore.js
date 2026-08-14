@@ -80,6 +80,17 @@ export const useJarvisStore = create((set, get) => ({
     }
   },
 
+  // Clears both sides: the backend's JarvisCommandHistory rows (DELETE
+  // /jarvis/history/, this user's only) and the locally-hydrated
+  // `messages` -- clearing just one would leave the chat either
+  // reappearing on the next page load (backend still has it) or
+  // looking cleared here while still showing up wherever else
+  // JarvisCommandHistory is read (e.g. an admin/audit view).
+  clearHistory: async () => {
+    await endpoints.deleteJarvisHistory();
+    set({ messages: [] });
+  },
+
   markAnnouncementsSeen: () => set({ unseenCount: 0 }),
 
   dismissToast: (id) => {

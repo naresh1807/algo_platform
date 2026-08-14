@@ -50,6 +50,7 @@ export default function JarvisPanel() {
   const markAnnouncementsSeen = useJarvisStore((s) => s.markAnnouncementsSeen);
   const dismissToast = useJarvisStore((s) => s.dismissToast);
   const hydrateHistory = useJarvisStore((s) => s.hydrateHistory);
+  const clearHistory = useJarvisStore((s) => s.clearHistory);
   const navigate = useNavigate();
   const scrollRef = useRef(null);
   const recognitionRef = useRef(null);
@@ -152,7 +153,21 @@ export default function JarvisPanel() {
             <span className={`status-dot ${connected ? "ok" : "bad"}`} />
             JARVIS
           </span>
-          <button className="jarvis-close" onClick={() => setOpen(false)}>×</button>
+          <span style={{ display: "flex", gap: 4 }}>
+            <button
+              className="jarvis-clear"
+              disabled={messages.length === 0}
+              onClick={() => {
+                if (window.confirm("Clear your JARVIS chat history? This can't be undone.")) {
+                  clearHistory();
+                }
+              }}
+              title="Clear chat history"
+            >
+              🗑
+            </button>
+            <button className="jarvis-close" onClick={() => setOpen(false)}>×</button>
+          </span>
         </div>
 
         {announcements.length > 0 && (

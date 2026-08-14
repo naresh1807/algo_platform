@@ -399,6 +399,24 @@ body {
   line-height: 1;
 }
 
+.jarvis-clear {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.jarvis-clear:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.jarvis-clear:not(:disabled):hover {
+  color: var(--red);
+}
+
 .jarvis-announcements {
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
