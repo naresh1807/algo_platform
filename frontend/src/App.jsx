@@ -14,6 +14,7 @@ import StockInvesting from "./pages/StockInvesting.jsx";
 import Positions from "./pages/Positions.jsx";
 import RiskLog from "./pages/RiskLog.jsx";
 import Scalping from "./pages/Scalping.jsx";
+import Settings from "./pages/Settings.jsx";
 import Signals from "./pages/Signals.jsx";
 import { useLiveStore } from "./store/liveStore.js";
 
@@ -61,6 +62,7 @@ function AppShell() {
             <Route path="/scalping" element={<Scalping />} />
             <Route path="/risk" element={<RiskLog />} />
             <Route path="/learning" element={<Learning />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
         <aside className="right-panel">

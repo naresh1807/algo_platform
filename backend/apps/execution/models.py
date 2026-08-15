@@ -3,6 +3,63 @@ from django.db import models
 from common.constants import PositionSide
 
 
+class ExecutionModeSetting(models.Model):
+    """
+    Singleton (always exactly one row, same enforced-pk=1 pattern as
+    apps.risk.models.KillSwitchState) holding the operator-controlled
+    override for settings.EXECUTION_MODE. apps.execution.tasks.
+    run_trading_cycle reads this via get_execution_mode() below rather
+    than the static settings.EXECUTION_MODE env var, so a change made
+    from the frontend Settings page (apps.execution.views.
+    ExecutionModeView) takes effect on the very next scheduled trading
+    cycle -- no process restart needed.
+
+    settings.EXECUTION_MODE (.env) is only ever consulted as this row's
+    seed value the FIRST time it's created (see get_execution_mode) --
+    same "paper is the safe default, live is a deliberate opt-in"
+    posture that env var's own docstring in config/settings.py
+    establishes, now made changeable at runtime through a UI that
+    requires typed confirmation before allowing LIVE.
+    """
+
+    class Mode(models.TextChoices):
+        PAPER = "paper", "Paper"
+        LIVE = "live", "Live"
+
+    mode = models.CharField(max_length=8, choices=Mode.choices, default=Mode.PAPER)
+    changed_at = models.DateTimeField(auto_now=True)
+    changed_by = models.CharField(
+        max_length=150, blank=True,
+        help_text="Who last changed this -- switching to LIVE enables real order "
+                  "placement with real money, so this is always attributed to a "
+                  "specific logged-in user, same posture as KillSwitchState.deactivated_by.",
+    )
+
+    class Meta:
+        db_table = "execution_mode_setting"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1  # enforce singleton
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.mode
+
+
+def get_execution_mode() -> str:
+    """
+    The live, DB-backed effective execution mode ("paper" or "live").
+    Callers that decide whether to place real orders (currently only
+    apps.execution.tasks.run_trading_cycle) must call this, never read
+    settings.EXECUTION_MODE directly, or a Settings-page change
+    wouldn't take effect until the next process restart.
+    """
+    from django.conf import settings
+
+    row, _ = ExecutionModeSetting.objects.get_or_create(pk=1, defaults={"mode": settings.EXECUTION_MODE})
+    return row.mode
+
+
 class OpenPosition(models.Model):
     """
     manual section 7: open_positions. `unrealized_pnl` is stored (not

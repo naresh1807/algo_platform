@@ -41,10 +41,26 @@ export default function Sidebar() {
           {link.label}
         </NavLink>
       ))}
+      <NavLink
+        to="/settings"
+        style={({ isActive }) => ({
+          display: "block",
+          marginTop: 16,
+          padding: "8px 10px",
+          borderRadius: 6,
+          marginBottom: 4,
+          color: isActive ? "#fff" : "var(--muted)",
+          background: isActive ? "var(--accent)" : "transparent",
+          textDecoration: "none",
+          fontSize: 14,
+        })}
+      >
+        Settings
+      </NavLink>
       <button
         onClick={handleLogout}
         style={{
-          marginTop: "auto", background: "none", border: "none",
+          background: "none", border: "none",
           color: "var(--red)", textAlign: "left", padding: "8px 10px",
           cursor: "pointer", fontSize: 14,
         }}

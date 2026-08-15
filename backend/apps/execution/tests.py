@@ -237,8 +237,7 @@ class RunTradingCycleShortTests(TestCase):
     """apps.execution.tasks.run_trading_cycle now also picks up APPROVED SELL signals."""
 
     def test_sell_signal_opens_a_short_position(self):
-        from django.test import override_settings
-
+        from .models import ExecutionModeSetting
         from .tasks import run_trading_cycle
 
         AccountEquity.objects.create(
@@ -252,8 +251,13 @@ class RunTradingCycleShortTests(TestCase):
             regime="trending", status=SignalStatus.APPROVED, reason="test",
         )
 
-        with override_settings(EXECUTION_MODE="paper"):
-            run_trading_cycle()
+        # Explicit, not just relying on ExecutionModeSetting's own
+        # "paper" default -- run_trading_cycle now reads this DB row
+        # (apps.execution.models.get_execution_mode), not
+        # settings.EXECUTION_MODE, so override_settings no longer has
+        # any effect on it.
+        ExecutionModeSetting.objects.create(pk=1, mode=ExecutionModeSetting.Mode.PAPER)
+        run_trading_cycle()
 
         signal.refresh_from_db()
         self.assertEqual(signal.status, SignalStatus.EXECUTED)

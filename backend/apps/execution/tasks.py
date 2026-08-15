@@ -2,22 +2,29 @@
 Runs the trading execution cycle: pick up freshly-approved signals and
 open positions for them, then check existing open positions for exits.
 Routes to apps.execution.paper_executor or apps.execution.live_executor
-based on settings.EXECUTION_MODE (NOT settings.BROKER_MODE -- see that
+based on get_execution_mode() (NOT settings.BROKER_MODE -- see that
 setting's own comment in config/settings.py for why these are
 deliberately separate: BROKER_MODE only controls where market DATA
 comes from, EXECUTION_MODE controls whether trades are real) -- this
 task is the ONE place that decision is made; neither executor module
 checks either setting itself.
+
+get_execution_mode() (apps.execution.models), not settings.EXECUTION_MODE
+directly -- the Settings page's Paper/Live toggle (apps.execution.views.
+ExecutionModeView) writes to that same DB-backed row, so a change made
+there takes effect on this task's very next scheduled run rather than
+needing a process restart.
 """
 
 import logging
 
 from celery import shared_task
-from django.conf import settings
 
 from apps.risk.engine import exposure_check_for_execution, is_kill_switch_active
 from apps.signals.models import TradingSignal
 from common.constants import SignalStatus, SignalType
+
+from .models import get_execution_mode
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +54,16 @@ def run_trading_cycle(timeframe: str = "5m"):
     if kill_switch_active:
         logger.warning("run_trading_cycle: kill switch is active -- no new positions will be opened.")
 
-    if settings.EXECUTION_MODE == "paper":
+    execution_mode = get_execution_mode()
+    if execution_mode == "paper":
         from .paper_executor import check_and_close_positions, open_position_from_signal
         opener, closer = open_position_from_signal, check_and_close_positions
-    elif settings.EXECUTION_MODE == "live":
+    elif execution_mode == "live":
         from .live_executor import check_and_close_positions_live, open_position_live
         opener, closer = open_position_live, check_and_close_positions_live
     else:
-        logger.error("run_trading_cycle: unknown EXECUTION_MODE=%s -- skipping.", settings.EXECUTION_MODE)
-        return {"skipped": True, "reason": f"unknown_execution_mode:{settings.EXECUTION_MODE}"}
+        logger.error("run_trading_cycle: unknown EXECUTION_MODE=%s -- skipping.", execution_mode)
+        return {"skipped": True, "reason": f"unknown_execution_mode:{execution_mode}"}
 
     opened = []
     skipped_exposure = []
@@ -84,7 +92,7 @@ def run_trading_cycle(timeframe: str = "5m"):
                 opened.append({"symbol": signal.symbol, "position_id": position.pk})
             except Exception:
                 logger.exception(
-                    "Failed to open %s position for signal %s", settings.EXECUTION_MODE, signal.pk,
+                    "Failed to open %s position for signal %s", execution_mode, signal.pk,
                 )
 
     # Always run, kill switch or not: existing open positions must keep
@@ -93,7 +101,7 @@ def run_trading_cycle(timeframe: str = "5m"):
     # own docstring.
     closed = closer(timeframe)
     return {
-        "mode": settings.EXECUTION_MODE, "opened": opened,
+        "mode": execution_mode, "opened": opened,
         "skipped_exposure": skipped_exposure, "position_updates": closed,
         "kill_switch_active": kill_switch_active,
     }

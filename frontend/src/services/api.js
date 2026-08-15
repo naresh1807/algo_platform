@@ -61,6 +61,13 @@ export const endpoints = {
   // spread after the default, so it wins).
   signals: (params) => api.get("/signals/", { params: { page_size: 500, ...params } }),
   positions: () => api.get("/execution/positions/", { params: { page_size: 500 } }),
+  // apps.execution.views.ExecutionModeView -- the Settings page's
+  // Paper/Live trading toggle. confirmPhrase is only checked
+  // server-side when mode="live" (switching back to paper never
+  // requires it) -- see that view's own docstring for why.
+  executionMode: () => api.get("/execution/mode/"),
+  setExecutionMode: (mode, confirmPhrase) =>
+    api.post("/execution/mode/", { mode, confirm_phrase: confirmPhrase }),
   riskEvents: (params) => api.get("/risk/events/", { params: { page_size: 500, ...params } }),
   killSwitch: () => api.get("/risk/kill-switch/"),
   equity: () => api.get("/risk/equity/"),
