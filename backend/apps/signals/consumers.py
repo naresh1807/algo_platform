@@ -17,7 +17,7 @@ class LiveSignalConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(GROUP_NAME, self.channel_name)
         await self.accept()
 
-    async def disconnect(self, close_code):
+    async def disconnect(self, code):
         await self.channel_layer.group_discard(GROUP_NAME, self.channel_name)
 
     async def signal_update(self, event):

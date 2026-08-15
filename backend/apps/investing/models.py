@@ -210,8 +210,9 @@ class Index(models.Model):
     asked for a broker-app-style dashboard: index ticker cards with
     live price movement, click through to the list of constituent
     companies. `symbol` is the broker-style ticker used for display
-    and for apps.investing.fundamentals_client.get_index_snapshot's
-    NSE API calls (e.g. "NIFTY 50", "NIFTY BANK") -- NSE's own index
+    and `name` is what apps.investing.fundamentals_client.
+    NSEDataClient.get_index_constituents_csv derives its CSV filename
+    slug from (e.g. "NIFTY 50", "NIFTY BANK") -- NSE's own index
     naming, not always the same short form as settings.WATCHLIST's
     "NIFTY"/"BANKNIFTY" (those are the F&O/index-future symbols
     apps.market_data trades intraday; this is the cash index's own
@@ -238,9 +239,10 @@ class IndexConstituent(models.Model):
     """
     Which stocks belong to which index, right now -- populated by
     apps.investing.tasks.sync_index_constituents_and_prices from NSE's
-    real index-snapshot endpoint (one API call returns the WHOLE
-    membership list plus every member's current price in a single
-    response -- see apps.investing.fundamentals_client.get_index_snapshot).
+    static per-index CSV archive (membership only, no price/weight --
+    see apps.investing.fundamentals_client.NSEDataClient.
+    get_index_constituents_csv's own docstring for why this isn't a
+    single all-in-one call the way it used to be).
 
     `last_price`/`change_pct` are a lightweight live-ish cache for the
     dashboard's constituent-list drill-down -- NOT a substitute for

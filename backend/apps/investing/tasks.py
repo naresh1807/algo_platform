@@ -16,12 +16,12 @@ Recurring jobs for apps.investing:
   - sync_ipo_calendar: pulls the current IPO list from the same client.
   - sync_index_constituents_and_prices: the broker-app-style dashboard
     the trader asked for -- NIFTY/BANK NIFTY/etc ticker cards with live
-    price movement, click-through to the constituent stock list. One
-    NSE API call per tracked index returns both the index's own price
-    AND every member's current price (apps.investing.fundamentals_client.
-    get_index_snapshot) -- this ALSO seeds/updates the Stock rows for
-    every member, which is what feeds them into the "tracked" set the
-    fundamentals/price-history jobs above pick up automatically.
+    price movement, click-through to the constituent stock list. Price
+    comes from Angel One; membership comes from a static per-index CSV
+    NSE publishes (apps.investing.fundamentals_client.NSEDataClient.
+    get_index_constituents_csv) -- this ALSO seeds/updates the Stock
+    rows for every member, which is what feeds them into the "tracked"
+    set the fundamentals/price-history jobs above pick up automatically.
 
 Fundamentals and daily price history change at most once a day (most
 of the time, once a quarter) -- these run weekly, not on the 2-5
@@ -409,20 +409,31 @@ def _sync_index_prices_via_angelone(indices) -> dict:
 
 
 def _sync_nse_indices(indices) -> dict:
+    """
+    Membership only (which stocks belong to this index) -- via
+    NSEDataClient.get_index_constituents_csv's static-file source, see
+    that method's own docstring for why (the single-call endpoint that
+    used to also carry live member prices/weights, /api/equity-
+    stockIndices, is confirmed dead as of 2026-08-15). last_price/
+    change_pct/weight_pct are deliberately left untouched here (not
+    zeroed out) -- this sync doesn't have that data at all, and index
+    PRICE already comes from _sync_index_prices_via_angelone; nothing
+    in this codebase currently populates per-constituent price/weight,
+    so there's nothing to preserve today, but a future source for that
+    shouldn't get silently clobbered by this one running every 3
+    minutes.
+    """
     from .fundamentals_client import NSEDataClient
-    from .models import IndexConstituent, IndexPriceSnapshot, Stock
+    from .models import IndexConstituent, Stock
 
     if not indices:
         return {}
-
-    from django.utils import timezone
 
     client = NSEDataClient()
     results = {}
 
     for index in indices:
-        snapshot = client.get_index_snapshot(index.name)
-        rows = (snapshot or {}).get("data", [])
+        rows = client.get_index_constituents_csv(index.name)
         if not rows:
             logger.warning("sync_index_constituents_and_prices: empty/no response for %s.", index.name)
             results[index.name] = {"error": True}
@@ -431,31 +442,12 @@ def _sync_nse_indices(indices) -> dict:
         members_synced = 0
         for row in rows:
             symbol = row.get("symbol")
-            last_price = _to_decimal(row.get("lastPrice"))
-            change_pct = _to_float(row.get("pChange"))
-
-            if symbol == index.name:
-                # This row IS the index's own total, not a member.
-                if last_price is not None:
-                    IndexPriceSnapshot.objects.create(
-                        index=index, timestamp=timezone.now(),
-                        ltp=last_price, change=_to_decimal(row.get("change")), change_pct=change_pct,
-                    )
-                continue
-
             if not symbol:
                 continue
 
-            company_name = (row.get("meta") or {}).get("companyName") or symbol
+            company_name = row.get("company_name") or symbol
             stock, _ = Stock.objects.get_or_create(symbol=symbol, defaults={"name": company_name})
-
-            IndexConstituent.objects.update_or_create(
-                index=index, stock=stock,
-                defaults={
-                    "last_price": last_price, "change_pct": change_pct,
-                    "weight_pct": _to_float((row.get("meta") or {}).get("weightage")),
-                },
-            )
+            IndexConstituent.objects.get_or_create(index=index, stock=stock)
             members_synced += 1
 
         results[index.name] = {"members_synced": members_synced}

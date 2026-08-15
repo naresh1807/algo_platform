@@ -226,33 +226,60 @@ class NSEDataClient:
             )
             return []
 
-    def get_index_snapshot(self, index_name: str) -> dict | None:
+    def get_index_constituents_csv(self, index_name: str) -> list[dict]:
         """
-        NSE's real "equity-stockIndices" endpoint -- one call returns
-        BOTH the index's own current price (as a row where
-        `symbol == index_name`, e.g. "NIFTY 50") AND every current
-        constituent with its own lastPrice/change/pChange, in a single
-        response. This is what makes apps.investing.tasks.
-        sync_index_constituents_and_prices a single API call per index
-        rather than one call for membership + N calls for each
-        member's price.
+        Membership list (symbol + company name only, no price/weight)
+        via NSE's static CSV archive at nsearchives.nseindia.com --
+        confirmed live 2026-08-15 as a real, currently-working
+        replacement for what used to be get_index_snapshot() against
+        `/api/equity-stockIndices`. That endpoint now returns a clean
+        404 "Resource not found" from NSE itself (confirmed by direct
+        request, not a WAF challenge page) -- NSE has deprecated or
+        relocated it. This CSV archive is a DIFFERENT surface (a plain
+        static-file host, not the Akamai-protected www.nseindia.com/api/
+        app routes _bootstrap_session exists for) and needs no cookie
+        bootstrap at all -- confirmed working with a bare, cookie-less
+        GET for every NSE index this platform tracks (NIFTY 50/AUTO/
+        BANK/FMCG/IT/PHARMA).
 
-        index_name: NSE's own index name, e.g. "NIFTY 50", "NIFTY BANK"
-        -- NOT the short F&O ticker (apps.market_data's "NIFTY"/
-        "BANKNIFTY"). Returns None on failure rather than raising, same
+        index_name: NSE's own index name, e.g. "NIFTY 50", "NIFTY BANK".
+        The CSV filename slug is derived by lowercasing and stripping
+        spaces (index_name="NIFTY BANK" -> "ind_niftybanklist.csv") --
+        confirmed against all 6 NSE indices above, not a guess for just
+        one. Returns [] on any failure (network error, unexpected
+        symbol/index name NSE hasn't published a file for, etc.), same
         "missing data isn't a hard error" stance as this client's other
-        methods.
+        methods -- never raises.
 
-        BSE indices (e.g. SENSEX) are NOT covered by this method --
-        this is NSE's own API and has no BSE data. A SENSEX-equivalent
-        would need a separate BSE India API client this codebase
-        doesn't have; see apps/investing/tasks.py's own honest note on
-        this gap rather than silently returning nothing for it.
+        No price data here (that's what get_index_snapshot used to
+        also provide in one call) -- apps.investing.tasks.
+        _sync_index_prices_via_angelone is the platform's actual index
+        PRICE source now (added 2026-08-08, see that function's own
+        docstring), so this method only ever needing to answer "which
+        stocks belong to this index" is not a regression.
+
+        BSE indices (e.g. SENSEX) are NOT covered -- NSE has no BSE
+        data. See apps/investing/bse_client.py for that gap; as of
+        2026-08-15 BSE's own SENSEX-specific endpoints redirect to
+        BSE's own error page (confirmed dead, not just unverified).
         """
+        import csv
+        import io
+
+        slug = index_name.lower().replace(" ", "")
+        url = f"https://nsearchives.nseindia.com/content/indices/ind_{slug}list.csv"
         try:
-            return self._get("/api/equity-stockIndices", params={"index": index_name})
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
         except requests.RequestException:
             logger.exception(
-                "NSEDataClient.get_index_snapshot failed for %s", index_name
+                "NSEDataClient.get_index_constituents_csv failed for %s (%s)", index_name, url,
             )
-            return None
+            return []
+
+        reader = csv.DictReader(io.StringIO(response.text))
+        return [
+            {"symbol": row["Symbol"].strip(), "company_name": (row.get("Company Name") or "").strip()}
+            for row in reader
+            if row.get("Symbol", "").strip()
+        ]

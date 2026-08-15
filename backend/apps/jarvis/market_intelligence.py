@@ -188,11 +188,62 @@ def _options_idea_for_bias(bias: str) -> dict | None:
     if result["suggested"] is None:
         return {"available": False, "reason": result["reason"]}
 
+    reason = result["reason"]
+    veto_note = _recent_engine_veto_note(underlying, direction)
+    if veto_note:
+        reason = f"{reason} {veto_note}"
+
     return {
         "available": True, "underlying": underlying, "direction": direction,
         "expiry": expiry.isoformat(), "strike": result["suggested"]["strike"],
-        "reason": result["reason"],
+        "reason": reason,
     }
+
+
+def _recent_engine_veto_note(underlying: str, direction: str) -> str:
+    """
+    suggest_best_strike's delta/OI/volume/theta scoring has no idea
+    whether apps.options.index_direction_strategy -- the actual
+    automated engine that would place a real order -- already looked
+    at this exact underlying+side and declined to trade it (most often
+    its own historical-success-rate veto: a backtest showing this side
+    isn't currently profitable enough, see that module's success_rate_
+    for_side). Without this cross-check, JARVIS could recommend a
+    strike a trader reasonably expects the platform to also be willing
+    to trade, when the platform already said no to that exact side
+    minutes earlier -- confusing, inconsistent-looking advice from what
+    reads as "the same AI." This keeps market_outlook()'s own promise
+    (see module docstring: every claim here must trace back to another
+    module's own output) by surfacing that verdict instead of staying
+    silent about it.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.signals.models import TradingSignal
+    from common.constants import SignalStatus
+
+    side = "CE" if direction == "bullish" else "PE"
+    since = timezone.now() - timedelta(hours=2)
+    recent = (
+        TradingSignal.objects.filter(
+            symbol=underlying, created_at__gte=since, reason__icontains=f"[{side} side]",
+        )
+        .order_by("-created_at").first()
+    )
+    if recent is None or recent.status != SignalStatus.REJECTED:
+        return ""
+
+    detail = recent.reason
+    prefix = f"[{side} side] "
+    if detail.startswith(prefix):
+        detail = detail[len(prefix):]
+    local_time = timezone.localtime(recent.created_at).strftime("%H:%M")
+    return (
+        f"Note: the automated engine evaluated {underlying} {side} at {local_time} "
+        f"and declined to trade it: {detail}"
+    )
 
 
 def _top_stock_idea() -> dict | None:

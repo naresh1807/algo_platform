@@ -24,7 +24,7 @@ class LiveCandleConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(GROUP_NAME, self.channel_name)
         await self.accept()
 
-    async def disconnect(self, close_code):
+    async def disconnect(self, code):
         await self.channel_layer.group_discard(GROUP_NAME, self.channel_name)
 
     # Called by group_send({"type": "candle_update", ...}) -- Channels

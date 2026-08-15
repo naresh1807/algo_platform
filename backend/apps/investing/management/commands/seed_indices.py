@@ -13,8 +13,9 @@ from django.core.management.base import BaseCommand
 
 from apps.investing.models import Index
 
-# name: NSE/BSE's own index name (what get_index_snapshot's `index`
-# param expects for NSE ones). symbol: broker-style short ticker for
+# name: NSE/BSE's own index name (what NSEDataClient.
+# get_index_constituents_csv derives its CSV filename slug from, for
+# NSE ones). symbol: broker-style short ticker for
 # display. SENSEX is BSE -- included so the dashboard card exists and
 # clearly shows "not synced" rather than being absent entirely (see
 # sync_index_constituents_and_prices's own docstring on why it can't
