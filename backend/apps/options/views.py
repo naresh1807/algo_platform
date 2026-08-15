@@ -21,10 +21,21 @@ class OptionContractViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class OptionChainSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    contract__strike/contract__option_type added alongside the
+    original underlying/expiry filters so the frontend can ask for one
+    exact contract's own snapshot history (?contract__underlying=NIFTY
+    &contract__expiry=2026-08-18&contract__strike=24000&
+    contract__option_type=CE) -- the Options Analytics page's chain-
+    row click-to-chart popup uses exactly this to plot that contract's
+    LTP over time, the option-chain equivalent of clicking a stock to
+    see its price chart. Model's own Meta.ordering (-timestamp) means
+    results already come back newest-first without an extra param.
+    """
     queryset = OptionChainSnapshot.objects.select_related("contract").all()
     serializer_class = OptionChainSnapshotSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ["contract__underlying", "contract__expiry"]
+    filterset_fields = ["contract__underlying", "contract__expiry", "contract__strike", "contract__option_type"]
 
 
 class OptionExpiriesView(APIView):

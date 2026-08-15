@@ -105,6 +105,18 @@ export const endpoints = {
   optionChain: (underlying, expiry) => api.get("/options/chain/", { params: { underlying, expiry } }),
   bestStrike: (underlying, expiry, direction) =>
     api.get("/options/best-strike/", { params: { underlying, expiry, direction } }),
+  // One contract's own LTP/OI/volume/IV history (OptionChainSnapshotViewSet
+  // filtered down to a single strike+side) -- powers the option-chain
+  // "click a strike to see its own price chart" popup, page_size=200 to
+  // cover a full trading day's worth of the ~5-minute ingestion cadence.
+  optionContractHistory: (underlying, expiry, strike, optionType) =>
+    api.get("/options/snapshots/", {
+      params: {
+        contract__underlying: underlying, contract__expiry: expiry,
+        contract__strike: strike, contract__option_type: optionType,
+        page_size: 200,
+      },
+    }),
   marketSummary: (date) => api.get("/news/market-summary/", { params: { date } }),
   jarvisCommand: (text, input_mode = "text", confirm = false) =>
     api.post("/jarvis/command/", { text, input_mode, confirm }),

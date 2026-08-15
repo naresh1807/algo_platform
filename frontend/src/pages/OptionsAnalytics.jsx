@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import OptionContractChartModal from "../components/OptionContractChartModal.jsx";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 
@@ -66,6 +67,9 @@ export default function OptionsAnalytics() {
   const [strikeDirection, setStrikeDirection] = useState("bullish");
   const [bestStrike, setBestStrike] = useState(null);
   const [bestStrikeLoading, setBestStrikeLoading] = useState(false);
+  // {strike, optionType, underlying, expiry} | null -- which contract's
+  // own price-history chart the click-a-strike popup is showing.
+  const [selectedContract, setSelectedContract] = useState(null);
   // Live-flash state: `${strike}-${side}` -> "up"|"down" for ~650ms
   // after a tick changes that cell's LTP -- the single most
   // recognizable "this is really moving" cue on a real broker chain
@@ -359,14 +363,30 @@ export default function OptionsAnalytics() {
                     <td className="chain-td" style={{ textAlign: "right" }}>{row.call?.volume?.toLocaleString() ?? "—"}</td>
                     <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)" }}>{row.call?.bid ?? "—"}</td>
                     <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)" }}>{row.call?.ask ?? "—"}</td>
-                    <td className={`chain-td ${callFlash === "up" ? "chain-flash-up" : callFlash === "down" ? "chain-flash-down" : ""}`} style={{ textAlign: "right", fontWeight: 600 }}>
+                    <td
+                      className={`chain-td ${callFlash === "up" ? "chain-flash-up" : callFlash === "down" ? "chain-flash-down" : ""}`}
+                      style={{ textAlign: "right", fontWeight: 600, cursor: row.call?.ltp != null ? "pointer" : undefined }}
+                      title={row.call?.ltp != null ? "View this contract's price chart" : undefined}
+                      onClick={() => {
+                        if (row.call?.ltp == null) return;
+                        setSelectedContract({ strike: row.strike, optionType: "CE", underlying, expiry });
+                      }}
+                    >
                       {row.call?.ltp ?? "—"}
                     </td>
                     <td className="chain-td" style={{ textAlign: "center" }}>
                       <span style={{ fontWeight: 600, color: isAtm ? "var(--accent)" : undefined }}>{row.strike}</span>
                       {isAtm && <span className="badge badge-accent" style={{ marginLeft: 6 }}>ATM</span>}
                     </td>
-                    <td className={`chain-td ${putFlash === "up" ? "chain-flash-up" : putFlash === "down" ? "chain-flash-down" : ""}`} style={{ fontWeight: 600 }}>
+                    <td
+                      className={`chain-td ${putFlash === "up" ? "chain-flash-up" : putFlash === "down" ? "chain-flash-down" : ""}`}
+                      style={{ fontWeight: 600, cursor: row.put?.ltp != null ? "pointer" : undefined }}
+                      title={row.put?.ltp != null ? "View this contract's price chart" : undefined}
+                      onClick={() => {
+                        if (row.put?.ltp == null) return;
+                        setSelectedContract({ strike: row.strike, optionType: "PE", underlying, expiry });
+                      }}
+                    >
                       {row.put?.ltp ?? "—"}
                     </td>
                     <td className="chain-td" style={{ color: "var(--muted)" }}>{row.put?.bid ?? "—"}</td>
@@ -511,6 +531,8 @@ export default function OptionsAnalytics() {
           </div>
         </>
       )}
+
+      <OptionContractChartModal contract={selectedContract} onClose={() => setSelectedContract(null)} />
     </div>
   );
 }
