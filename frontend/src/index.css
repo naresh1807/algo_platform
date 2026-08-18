@@ -1,43 +1,147 @@
+/* ==========================================================================
+   Design tokens
+   ==========================================================================
+   Semantic CSS custom properties, keyed off [data-theme] the same way
+   themeStore.js already drives (it just sets data-theme on <html> --
+   nothing about that mechanism changes here, only the token values and
+   how many of them there are). --panel is kept as an alias for --card
+   so the dozens of existing `var(--panel)` usages across every page
+   keep working unchanged while pages are migrated to the new classes
+   one phase at a time. */
 :root,
 [data-theme="dark"] {
-  --bg: #0b0f14;
-  --panel: #131922;
-  --border: #232b36;
-  --text: #e6e9ef;
-  --muted: #8b94a3;
-  --green: #16a34a;
-  --red: #dc2626;
-  --amber: #d97706;
+  --bg: #070b14;
+  --sidebar-bg: #0b1120;
+  --card: #101827;
+  --panel: var(--card);
+  --elevated: #151f30;
+  --border: #1f2a3d;
+  --text: #f8fafc;
+  --muted: #94a3b8;
   --accent: #3b82f6;
+  --jarvis: #8b5cf6;
+  --green: #10b981;
+  --red: #f43f5e;
+  --amber: #f59e0b;
+
+  --accent-contrast: #ffffff;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.4);
+  --overlay-scrim: rgba(3, 6, 12, 0.6);
 }
 
 [data-theme="light"] {
-  --bg: #f4f6f9;
-  --panel: #ffffff;
-  --border: #dbe1e8;
-  --text: #14181f;
-  --muted: #5a6472;
-  --green: #16a34a;
-  --red: #dc2626;
-  --amber: #b45309;
+  --bg: #f4f7fb;
+  --sidebar-bg: #ffffff;
+  --card: #ffffff;
+  --panel: var(--card);
+  --elevated: #f8fafc;
+  --border: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
   --accent: #2563eb;
+  --jarvis: #7c3aed;
+  --green: #059669;
+  --red: #dc2626;
+  --amber: #d97706;
+
+  --accent-contrast: #ffffff;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 8px 24px rgba(15, 23, 42, 0.1);
+  --shadow-lg: 0 16px 48px rgba(15, 23, 42, 0.16);
+  --overlay-scrim: rgba(15, 23, 42, 0.35);
+}
+
+:root {
+  /* 8px spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  --font-sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --topbar-height: 60px;
+  --sidebar-width: 232px;
+  --sidebar-width-collapsed: 68px;
+
+  --transition-fast: 0.12s ease;
+  --transition-theme: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  /* Theme-change flash guard: main.jsx applies data-theme before first
+     paint, but this keeps the root background correct even for the
+     first frame of any late-hydrating content. */
+  background: var(--bg);
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "Inter", -apple-system, "Segoe UI", sans-serif;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  transition: var(--transition-theme);
+  -webkit-font-smoothing: antialiased;
 }
 
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
+
+a {
+  color: inherit;
+}
+
+/* Every surface, control, and border transitions together on theme
+   toggle -- deliberately excludes transform/box-shadow so hover
+   affordances stay crisp, only color-ish properties ease. */
+button, input, select, textarea, .panel, .card, .badge, .app-shell * {
+  transition: var(--transition-theme);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ==========================================================================
+   App shell / layout
+   ========================================================================== */
 .app-shell {
   display: grid;
-  grid-template-rows: 56px 1fr;
+  grid-template-rows: var(--topbar-height) 1fr;
   height: 100vh;
 }
 
@@ -45,103 +149,617 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+  background: var(--sidebar-bg);
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.topbar-section {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent), var(--jarvis));
+  color: #fff;
+  flex-shrink: 0;
 }
 
 .main-layout {
   display: grid;
-  grid-template-columns: 220px 1fr 320px;
+  grid-template-columns: var(--sidebar-width) 1fr;
   overflow: hidden;
+  transition: grid-template-columns var(--transition-fast);
 }
 
-.sidebar,
-.right-panel {
-  border-right: 1px solid var(--border);
-  padding: 12px;
+.main-layout.sidebar-collapsed {
+  grid-template-columns: var(--sidebar-width-collapsed) 1fr;
+}
+
+.content {
+  padding: var(--space-4);
   overflow-y: auto;
+  min-width: 0;
 }
 
+/* ==========================================================================
+   Sidebar
+   ========================================================================== */
 .sidebar {
   display: flex;
   flex-direction: column;
   min-height: 100%;
-}
-
-.right-panel {
-  border-right: none;
-  border-left: 1px solid var(--border);
-}
-
-.content {
-  padding: 12px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  padding: var(--space-3) var(--space-2);
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
+.sidebar-toggle {
+  align-self: flex-end;
+  margin-bottom: var(--space-2);
 }
 
-.panel h3 {
-  margin: 0 0 8px;
-  font-size: 13px;
+.sidebar-section {
+  margin-bottom: var(--space-3);
+}
+
+.sidebar-section-label {
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px var(--space-2);
+  border-radius: var(--radius-sm);
+  margin-bottom: 2px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+}
+
+.sidebar-link svg {
+  flex-shrink: 0;
+}
+
+.sidebar-link:hover {
+  background: var(--elevated);
+  color: var(--text);
+}
+
+.sidebar-link.active {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, transparent), color-mix(in srgb, var(--accent) 4%, transparent));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sidebar-link.active::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.sidebar-link-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.main-layout.sidebar-collapsed .sidebar {
+  align-items: center;
+}
+.main-layout.sidebar-collapsed .sidebar-section-label,
+.main-layout.sidebar-collapsed .sidebar-link-label {
+  display: none;
+}
+.main-layout.sidebar-collapsed .sidebar-link {
+  justify-content: center;
+  width: 40px;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.logout-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--red);
+  text-align: left;
+  padding: 8px var(--space-2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.logout-link:hover {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.main-layout.sidebar-collapsed .logout-link {
+  justify-content: center;
+  width: 40px;
+}
+
+/* Simple CSS-only tooltip for the collapsed sidebar (no extra JS/lib
+   needed) -- shows the label on hover when icons alone aren't enough. */
+.main-layout.sidebar-collapsed .sidebar-link,
+.main-layout.sidebar-collapsed .logout-link {
+  position: relative;
+}
+.main-layout.sidebar-collapsed .sidebar-link:hover::after,
+.main-layout.sidebar-collapsed .logout-link:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 8px;
+  background: var(--elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  z-index: 60;
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   Buttons, inputs, form controls
+   ========================================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  border-color: var(--accent);
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--red);
+  color: var(--red);
+}
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+.btn-danger-solid {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+.btn-danger-solid:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--elevated);
+  color: var(--text);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+}
+.icon-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.icon-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.input, select.input, textarea.input {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  min-height: 36px;
+}
+.input:focus, select.input:focus, textarea.input:focus {
+  border-color: var(--accent);
+}
+.input::placeholder {
   color: var(--muted);
 }
 
-/* --- Broker-style card tiles (News/Signals) --- */
+label.field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+/* Bare <select>/<input> elements used throughout the still-unmigrated
+   pages (Dashboard's symbol/timeframe pickers, RiskLog's filters, etc.)
+   -- gives them the same look as .input without requiring every call
+   site to be touched in this phase. */
+select, input[type="text"], input[type="password"], input[type="number"] {
+  font-family: var(--font-sans);
+}
+
+/* ==========================================================================
+   Cards / panels (existing selectors, restyled onto new tokens)
+   ========================================================================== */
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.panel h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 12.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
 }
 
 .card {
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px 14px;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
 }
 .card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
 .card-accent-green { border-left: 3px solid var(--green); }
 .card-accent-red { border-left: 3px solid var(--red); }
 .card-accent-muted { border-left: 3px solid var(--muted); }
 
+/* ==========================================================================
+   Badges / status
+   ========================================================================== */
 .badge {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
-.badge-green { background: rgba(22, 163, 74, 0.14); color: var(--green); }
-.badge-red { background: rgba(220, 38, 38, 0.14); color: var(--red); }
-.badge-muted { background: rgba(139, 148, 163, 0.14); color: var(--muted); }
-.badge-accent { background: rgba(59, 130, 246, 0.14); color: var(--accent); }
+.badge-green { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+.badge-red { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red); }
+.badge-amber { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+.badge-muted { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+.badge-accent { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.badge-jarvis { background: color-mix(in srgb, var(--jarvis) 16%, transparent); color: var(--jarvis); }
 
-/* --- Positive-signal popup: same fixed-stack/toast mechanics as the
-   JARVIS toasts below, deliberately positioned top-right (JARVIS's own
-   stack is bottom-right) so the two never overlap, and styled more
-   prominent -- this is meant to catch the eye the moment a BUY signal
-   is approved, not blend in as routine chatter. --- */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.status-dot.ok { background: var(--green); }
+.status-dot.bad { background: var(--red); }
+.status-dot.warn { background: var(--amber); }
+
+/* ==========================================================================
+   Metric cards (Dashboard summary tiles)
+   ========================================================================== */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.metric-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.metric-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.metric-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metric-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--elevated);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.metric-card-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.metric-card-value.positive { color: var(--green); }
+.metric-card-value.negative { color: var(--red); }
+.metric-card-value.warn { color: var(--amber); }
+
+.metric-card-sub {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ==========================================================================
+   Empty / error / loading states
+   ========================================================================== */
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  color: var(--muted);
+}
+
+.state-block-icon {
+  color: var(--muted);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+.state-block-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.state-block-detail {
+  font-size: 12.5px;
+  color: var(--muted);
+  max-width: 420px;
+}
+
+.state-block.error .state-block-icon {
+  color: var(--red);
+  opacity: 1;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--elevated) 25%, var(--border) 50%, var(--elevated) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.skeleton-line {
+  height: 12px;
+  margin-bottom: 8px;
+}
+.skeleton-line:last-child { margin-bottom: 0; }
+
+.skeleton-block {
+  height: 100%;
+  min-height: 60px;
+}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+.data-table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table thead th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  white-space: nowrap;
+}
+
+.data-table thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.data-table thead th.sortable:hover {
+  color: var(--text);
+}
+
+.data-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+  background: var(--elevated);
+}
+
+.num-positive { color: var(--green); font-variant-numeric: tabular-nums; }
+.num-negative { color: var(--red); font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ==========================================================================
+   Positive-signal popup (top-right; JARVIS's own stack is bottom-right
+   so the two never overlap).
+   ========================================================================== */
 .signal-alert-stack {
   position: fixed;
-  top: 66px;
+  top: calc(var(--topbar-height) + 10px);
   right: 20px;
   z-index: 1001;
   display: flex;
@@ -154,12 +772,12 @@ body {
 .signal-alert-card {
   pointer-events: auto;
   width: 300px;
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--border);
   border-left: 4px solid var(--green);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   padding: 10px 14px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-lg);
   cursor: pointer;
   animation: signal-alert-in 0.25s ease-out;
 }
@@ -202,15 +820,17 @@ body {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* --- Option chain ladder (Angel One-style) --- */
+/* ==========================================================================
+   Option chain ladder (Angel One-style)
+   ========================================================================== */
 .chain-flash-up { animation: chain-flash-up 0.6s ease-out; }
 .chain-flash-down { animation: chain-flash-down 0.6s ease-out; }
 @keyframes chain-flash-up {
-  0% { background-color: rgba(22, 163, 74, 0.35); }
+  0% { background-color: color-mix(in srgb, var(--green) 35%, transparent); }
   100% { background-color: transparent; }
 }
 @keyframes chain-flash-down {
-  0% { background-color: rgba(220, 38, 38, 0.35); }
+  0% { background-color: color-mix(in srgb, var(--red) 35%, transparent); }
   100% { background-color: transparent; }
 }
 
@@ -218,17 +838,17 @@ body {
   position: relative;
   display: inline-block;
   min-width: 64px;
-  overflow: hidden; /* keeps the bar clipped to this cell -- without this, its -1px top/bottom inset could paint outside the row (into the sticky header when scrolled to the top) since neither the <td> nor this wrap bounded it */
+  overflow: hidden;
 }
 .chain-oi-bar {
   position: absolute;
   top: 1px;
   bottom: 1px;
-  background: rgba(59, 130, 246, 0.14);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 3px;
   z-index: 0;
 }
-.chain-oi-bar-red { background: rgba(220, 38, 38, 0.14); }
+.chain-oi-bar-red { background: color-mix(in srgb, var(--red) 14%, transparent); }
 .chain-oi-value {
   position: relative;
   z-index: 1;
@@ -240,44 +860,52 @@ body {
   position: sticky;
   top: 0;
   background: var(--panel);
-  z-index: 2; /* keeps the sticky header reliably above scrolled body rows -- without this, an absolutely-positioned descendant (e.g. .chain-oi-bar) in the topmost visible row could win the paint order and appear to sit "on top of" the header */
+  z-index: 2;
   padding: 6px 8px;
 }
 .chain-td { padding: 6px 8px; }
 
+/* ==========================================================================
+   Kill switch banner + header indicator
+   ========================================================================== */
 .kill-switch-banner {
   background: var(--red);
   color: white;
   text-align: center;
   padding: 6px;
   font-weight: 600;
+  font-size: 13px;
 }
 
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
+.kill-switch-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 280px;
+  background: var(--elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  box-shadow: var(--shadow-lg);
+  z-index: 70;
+  font-size: 12.5px;
+  color: var(--muted);
 }
-.status-dot.ok {
-  background: var(--green);
-}
-.status-dot.bad {
-  background: var(--red);
-}
-.status-dot.warn {
-  background: var(--amber);
+.kill-switch-popover strong {
+  color: var(--text);
 }
 
+/* ==========================================================================
+   Theme toggle
+   ========================================================================== */
 .theme-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px 10px;
   font-size: 13px;
   cursor: pointer;
@@ -286,32 +914,36 @@ body {
   border-color: var(--accent);
 }
 
-/* --- JARVIS panel (manual Chapter 14) --- */
+/* ==========================================================================
+   JARVIS panel (manual Chapter 14)
+   ========================================================================== */
 .jarvis-fab {
   position: fixed;
   bottom: 20px;
   right: 20px;
   z-index: 1000;
-  background: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(135deg, var(--jarvis), color-mix(in srgb, var(--jarvis) 70%, var(--accent)));
   color: #fff;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 10px 18px;
   font-size: 14px;
   font-weight: 600;
+  font-family: var(--font-sans);
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-md);
 }
 
-/* Unread-announcement count on the FAB (manual 14.16) -- visible proof
-   that JARVIS has something to say even before the panel is opened. */
 .jarvis-badge {
   position: absolute;
   top: -6px;
   right: -6px;
-  background: var(--red, #e5484d);
+  background: var(--red);
   color: #fff;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   min-width: 18px;
   height: 18px;
   padding: 0 4px;
@@ -323,10 +955,6 @@ body {
   line-height: 1;
 }
 
-/* Proactive announcement toasts (manual 14.16) -- appear near the FAB
-   regardless of whether the panel is open, and self-dismiss after a
-   few seconds (see jarvisStore.js's connectAnnouncements). Clicking
-   one opens the full panel on that message. */
 .jarvis-toast-stack {
   position: fixed;
   bottom: 70px;
@@ -342,13 +970,13 @@ body {
 .jarvis-toast {
   pointer-events: auto;
   max-width: 280px;
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 8px;
+  border-left: 3px solid var(--jarvis);
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   font-size: 12px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
   cursor: pointer;
   animation: jarvis-toast-in 0.2s ease-out;
 }
@@ -356,7 +984,7 @@ body {
 .jarvis-toast-risk_critical,
 .jarvis-toast-risk_warning,
 .jarvis-toast-kill_switch {
-  border-left-color: var(--red, #e5484d);
+  border-left-color: var(--red);
 }
 
 @keyframes jarvis-toast-in {
@@ -373,10 +1001,10 @@ body {
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
 
@@ -386,8 +1014,9 @@ body {
   justify-content: space-between;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
-  font-weight: 600;
+  font-weight: 700;
   font-size: 13px;
+  background: color-mix(in srgb, var(--jarvis) 8%, transparent);
 }
 
 .jarvis-close {
@@ -456,27 +1085,27 @@ body {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--muted);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 3px 9px;
   font-size: 11px;
   cursor: pointer;
 }
 .jarvis-suggestion:hover {
-  border-color: var(--accent);
+  border-color: var(--jarvis);
   color: var(--text);
 }
 
 .jarvis-msg {
   font-size: 13px;
   padding: 7px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   max-width: 88%;
   white-space: pre-wrap;
 }
 
 .jarvis-msg-user {
   align-self: flex-end;
-  background: var(--accent);
+  background: var(--jarvis);
   color: #fff;
 }
 
@@ -508,7 +1137,7 @@ body {
   flex: 1;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   padding: 6px 8px;
   font-size: 13px;
@@ -517,7 +1146,7 @@ body {
 .jarvis-mic {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 4px 8px;
   cursor: pointer;
 }
@@ -527,36 +1156,132 @@ body {
 }
 
 .jarvis-input-row button[type="submit"] {
-  background: var(--accent);
+  background: var(--jarvis);
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 6px 12px;
   font-size: 13px;
   cursor: pointer;
 }
 
-/* ---------------------------------------------------------------------
-   Responsive breakpoints -- the first ones in this codebase (confirmed
-   zero @media rules existed before). Scoped tightly to .main-layout's
-   fixed 3-column grid (220px sidebar | 1fr content | 320px right-panel,
-   see .main-layout above), which is what actually breaks on a narrower
-   viewport -- everything else (.panel/.card/.badge/etc.) already uses
-   relative sizing and reflows fine on its own. Fixed-position overlays
-   (.signal-alert-stack, .jarvis-fab, .jarvis-toast-stack, .jarvis-panel)
-   are untouched here since they float independently of this grid.
+/* ==========================================================================
+   Trading workspace (JarvisSignalTerminal) layout
+   ========================================================================== */
+.workspace-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr 320px;
+  gap: var(--space-3);
+  align-items: start;
+}
 
-   Tablet (<=1100px): drop the right-panel out of the grid (it's
-   reserve/secondary content, per its own "Quick Notes" placeholder in
-   App.jsx) so content gets the room back, keep the sidebar.
-   Mobile (<=700px): also collapse the sidebar out of the grid, into a
-   horizontal scrollable strip above the content, so a phone-width
-   screen isn't squeezed into a fixed 220px nav column. -------------- */
-@media (max-width: 1100px) {
-  .main-layout {
-    grid-template-columns: 220px 1fr;
+.workspace-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.chart-fullscreen-host:fullscreen {
+  background: var(--card);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+.chart-fullscreen-host:fullscreen .data-table-wrap {
+  max-height: none;
+}
+
+.tabs-bar {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-3);
+  overflow-x: auto;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab-btn:hover {
+  color: var(--text);
+}
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1300px) {
+  .workspace-grid {
+    grid-template-columns: 190px 1fr 280px;
   }
-  .right-panel {
+}
+
+@media (max-width: 1000px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ==========================================================================
+   Responsive breakpoints
+   ==========================================================================
+   Desktop-first per spec: full multi-column workspace by default,
+   collapsing progressively. Tablet keeps the sidebar (now collapsible
+   by the user anyway) but pages that build their own multi-column
+   layout (Trading Workspace, Phase 3) fold to fewer columns. Mobile
+   collapses the sidebar into a horizontal strip so a phone-width
+   screen isn't squeezed into a fixed column. */
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-width: 200px;
+  }
+}
+
+@media (max-width: 860px) {
+  .main-layout {
+    grid-template-columns: var(--sidebar-width-collapsed) 1fr;
+  }
+  .main-layout .sidebar-section-label,
+  .main-layout .sidebar-link-label {
+    display: none;
+  }
+  .main-layout .sidebar-link,
+  .main-layout .logout-link {
+    justify-content: center;
+    width: 40px;
+  }
+  .sidebar-toggle {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .brand-text {
     display: none;
   }
 }
@@ -568,6 +1293,7 @@ body {
   }
   .sidebar {
     flex-direction: row;
+    align-items: center;
     overflow-x: auto;
     overflow-y: hidden;
     min-height: unset;
@@ -575,11 +1301,25 @@ body {
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
-  .sidebar a,
-  .sidebar button {
-    margin-bottom: 0 !important;
+  .sidebar-section {
+    display: flex;
+    margin-bottom: 0;
+  }
+  .sidebar-section-label {
+    display: none;
+  }
+  .sidebar-link, .logout-link {
+    width: auto;
     margin-right: 4px;
     flex-shrink: 0;
+  }
+  .sidebar-footer {
+    margin-top: 0;
+    border-top: none;
+    padding-top: 0;
+  }
+  .metric-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
   .two-col-grid {
     grid-template-columns: 1fr !important;

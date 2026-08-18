@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import {
+  Activity, AlertTriangle, Bot, ListChecks, PieChart, RadioTower, ShieldAlert,
+  ShieldCheck, TrendingDown, TrendingUp, Wallet, Wifi,
+} from "lucide-react";
 
 import MACDPanel from "../charts/MACDPanel.jsx";
 import PriceChart from "../charts/PriceChart.jsx";
@@ -6,10 +10,20 @@ import RSIPanel from "../charts/RSIPanel.jsx";
 import PriceAlertsPanel from "../components/PriceAlertsPanel.jsx";
 import IndexTickerBar from "../components/IndexTickerBar.jsx";
 import MarketOutlookPanel from "../components/MarketOutlookPanel.jsx";
+import MetricCard from "../components/MetricCard.jsx";
+import EmptyState from "../components/EmptyState.jsx";
+import ErrorState from "../components/ErrorState.jsx";
+import LoadingSkeleton from "../components/LoadingSkeleton.jsx";
+import StatusBadge from "../components/StatusBadge.jsx";
 import { DEFAULT_SYMBOL, DEFAULT_TIMEFRAME, SYMBOLS, TIMEFRAMES } from "../constants/market.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 import { useThemeStore } from "../store/themeStore.js";
+
+function formatMoney(value) {
+  if (value === null || value === undefined) return null;
+  return `₹${Number(value).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+}
 
 /**
  * This page's panel list is a direct 1:1 mapping of manual section 18
@@ -20,18 +34,22 @@ import { useThemeStore } from "../store/themeStore.js";
  * Signals page rather than duplicated here, since that list can get
  * long -- this page only shows the most recent one as a teaser.
  *
+ * The summary-card row's "Capital Deployed"/"Exposure" figures are
+ * real, computed from `positions` (sum of entry_price*qty for open
+ * positions) -- there is no broker "margin" concept in this backend
+ * (the platform only ever buys option premium outright, never sells/
+ * writes options, so there's nothing that requires margin beyond the
+ * premium itself); "Used Margin" from the spec is deliberately relabeled
+ * rather than faked. "Active Orders" has no dedicated backend model
+ * either -- signals with status pending/approved (not yet resolved to
+ * executed/rejected) are the closest real equivalent, since approval
+ * auto-executes in this fully-automated platform.
+ *
  * Every panel reads real values from state that starts `null`/`[]` and
  * a loading flag, rather than showing fabricated placeholder numbers --
- * same "don't fake it" principle used throughout BharatHub's home page
- * (see the developer manual precedent: real stats or nothing, no fallback
- * to made-up numbers).
+ * same "don't fake it" principle used throughout this codebase.
  */
 export default function Dashboard() {
-  // The chart's own symbol/timeframe selection -- independent of the
-  // rest of the panels below (signals, positions, etc. still cover
-  // the whole watchlist). Changing either re-fetches candles AND
-  // re-points the live-candle filter (see the [symbol, timeframe]
-  // effect further down) at the newly selected series.
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [timeframe, setTimeframe] = useState(DEFAULT_TIMEFRAME);
   const [candles, setCandles] = useState([]);
@@ -45,17 +63,20 @@ export default function Dashboard() {
   const [strategyVersion, setStrategyVersion] = useState(null);
   const [riskEvents, setRiskEvents] = useState([]);
   const [marketSummary, setMarketSummary] = useState(null);
+  const [equity, setEquity] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
   const latestSignal = useLiveStore((s) => s.latestSignal);
   const latestCandle = useLiveStore((s) => s.latestCandle);
   const killSwitchActive = useLiveStore((s) => s.killSwitchActive);
+  const connected = useLiveStore((s) => s.connected);
+  const feedHealthy = useLiveStore((s) => s.feedHealthy);
   const theme = useThemeStore((s) => s.theme);
 
-  useEffect(() => {
-    // Live sockets are connected once at the AppShell level (App.jsx),
-    // not per-page -- see liveStore.js's module docstring for why.
-
+  const loadAll = () => {
+    setLoading(true);
+    setLoadError(null);
     Promise.allSettled([
       endpoints.signals({}),
       endpoints.positions(),
@@ -65,16 +86,11 @@ export default function Dashboard() {
       endpoints.strategyVersions(),
       endpoints.riskEvents({ severity: "critical" }),
       endpoints.marketSummary(),
+      endpoints.equity(),
     ]).then(
       ([
-        signalsRes,
-        positionsRes,
-        perfRes,
-        reviewRes,
-        driftRes,
-        strategyRes,
-        riskRes,
-        summaryRes,
+        signalsRes, positionsRes, perfRes, reviewRes, driftRes,
+        strategyRes, riskRes, summaryRes, equityRes,
       ]) => {
         if (signalsRes.status === "fulfilled") setSignals(signalsRes.value.data.results ?? []);
         if (positionsRes.status === "fulfilled") setPositions(positionsRes.value.data.results ?? []);
@@ -87,25 +103,21 @@ export default function Dashboard() {
         }
         if (riskRes.status === "fulfilled") setRiskEvents(riskRes.value.data.results ?? []);
         if (summaryRes.status === "fulfilled") setMarketSummary(summaryRes.value.data.summary);
+        if (equityRes.status === "fulfilled") setEquity(equityRes.value.data);
 
-        // If literally every call failed, the backend probably isn't
-        // running yet -- surface one clear message instead of seven
-        // separate silent failures.
         const allFailed = [
-          signalsRes, positionsRes, perfRes, reviewRes, driftRes, strategyRes, riskRes,
+          signalsRes, positionsRes, perfRes, reviewRes, driftRes, strategyRes, riskRes, equityRes,
         ].every((r) => r.status === "rejected");
         if (allFailed) {
           setLoadError("Could not reach the backend API. Is Django running on 127.0.0.1:8000?");
         }
+        setLoading(false);
       }
     );
-  }, []);
+  };
 
-  // Re-fetches whenever the symbol or timeframe dropdown changes --
-  // this is the only network call the selectors trigger; the ingestion
-  // side (which timeframes actually get pulled from Angel One) is
-  // controlled independently by settings.CHART_TIMEFRAMES, not by
-  // what's currently selected here.
+  useEffect(loadAll, []);
+
   useEffect(() => {
     let cancelled = false;
     setCandlesLoading(true);
@@ -121,11 +133,6 @@ export default function Dashboard() {
         if (!cancelled) setCandlesLoading(false);
       });
 
-    // Indicators load independently of candles: a symbol can have
-    // enough candles to draw a chart but fewer than
-    // indicators.MIN_CANDLES_REQUIRED, in which case the endpoint
-    // returns an empty series and the chart should still show candles
-    // with no overlay/panels rather than failing.
     endpoints
       .indicators(symbol, timeframe)
       .then((res) => {
@@ -140,42 +147,95 @@ export default function Dashboard() {
     };
   }, [symbol, timeframe]);
 
-  // Live candle pushes (apps/market_data/signals.py's WebSocket
-  // broadcast, now arriving tick-by-tick from
-  // apps/market_data/tick_aggregator.py rather than once a minute) are
-  // handed straight to PriceChart as `liveCandle` -- it applies them
-  // incrementally via lightweight-charts' own update() API rather than
-  // this component maintaining a merged copy in React state. Only
-  // matters for the symbol/timeframe actually being charted here (the
-  // WebSocket group is shared across the whole watchlist, see
-  // apps/market_data/consumers.py's docstring for why); also withheld
-  // while `candles` is still (re)loading after a symbol/timeframe
-  // switch, so a live message for the newly selected series can't be
-  // applied to the chart before its own history has finished loading.
   const liveCandle =
     !candlesLoading && latestCandle && latestCandle.symbol === symbol && latestCandle.timeframe === timeframe
       ? latestCandle
       : null;
 
   const latestRejected = signals.find((s) => s.status === "rejected");
-
-  // Signal Status/Sentiment Score/Market Regime below previously read
-  // ONLY `latestSignal` (the live WebSocket push) -- correct once a
-  // signal has fired since this tab opened, but blank on every fresh
-  // page load until the next one arrives (signals fire every ~5 min),
-  // even though `signals` (fetched via REST above, ordered -created_at
-  // per the backend) already has the real most recent one. Falls back
-  // to that REST-fetched value; a live push still overrides it the
-  // instant one arrives, same as before.
   const displaySignal = latestSignal ?? signals[0] ?? null;
+
+  const capitalDeployed = positions.reduce(
+    (sum, p) => sum + Number(p.entry_price ?? 0) * Number(p.qty ?? 0), 0,
+  );
+  const exposurePct = equity?.current_equity
+    ? (capitalDeployed / Number(equity.current_equity)) * 100
+    : null;
+  const activeOrders = signals.filter((s) => s.status === "pending" || s.status === "approved").length;
+  const dailyPnlAmount = equity && equity.daily_pnl_pct !== undefined
+    ? Number(equity.current_equity) - Number(equity.daily_start_equity ?? equity.current_equity)
+    : null;
+
+  let riskTone = "ok";
+  let riskLabel = "Normal";
+  if (killSwitchActive) {
+    riskTone = "bad";
+    riskLabel = "Halted";
+  } else if (equity?.drawdown_pct >= 10) {
+    riskTone = "warn";
+    riskLabel = "Elevated";
+  }
 
   return (
     <div>
-      {loadError && (
-        <div className="panel" style={{ borderColor: "var(--red)" }}>
-          ⚠️ {loadError}
-        </div>
-      )}
+      {loadError && <ErrorState title="Couldn't load the dashboard" detail={loadError} onRetry={loadAll} />}
+
+      <div className="metric-grid">
+        <MetricCard
+          title="Available Balance"
+          icon={Wallet}
+          loading={loading}
+          value={formatMoney(equity?.current_equity)}
+        />
+        <MetricCard
+          title="Capital Deployed"
+          icon={PieChart}
+          loading={loading}
+          value={formatMoney(capitalDeployed)}
+          sub={positions.length > 0 ? `across ${positions.length} position${positions.length === 1 ? "" : "s"}` : undefined}
+        />
+        <MetricCard
+          title="Today's P&L"
+          icon={dailyPnlAmount >= 0 ? TrendingUp : TrendingDown}
+          loading={loading}
+          tone={dailyPnlAmount === null ? undefined : dailyPnlAmount >= 0 ? "positive" : "negative"}
+          value={dailyPnlAmount === null ? null : `${dailyPnlAmount >= 0 ? "+" : ""}${formatMoney(dailyPnlAmount)}`}
+          sub={equity?.daily_pnl_pct !== undefined ? `${equity.daily_pnl_pct >= 0 ? "+" : ""}${equity.daily_pnl_pct.toFixed(2)}%` : undefined}
+        />
+        <MetricCard
+          title="Open Positions"
+          icon={Activity}
+          loading={loading}
+          value={positions.length}
+        />
+        <MetricCard
+          title="Active Signals"
+          icon={ListChecks}
+          loading={loading}
+          value={activeOrders}
+          sub="pending or approved, not yet resolved"
+        />
+        <MetricCard
+          title="Exposure"
+          icon={PieChart}
+          loading={loading}
+          value={exposurePct === null ? null : `${exposurePct.toFixed(1)}%`}
+          sub="of available balance"
+        />
+        <MetricCard
+          title="AI Signals Today"
+          icon={Bot}
+          loading={loading}
+          value={signals.length}
+        />
+        <MetricCard
+          title="Risk Status"
+          icon={killSwitchActive ? ShieldAlert : ShieldCheck}
+          loading={loading}
+          tone={riskTone === "ok" ? undefined : riskTone === "warn" ? "warn" : "negative"}
+          value={riskLabel}
+        />
+      </div>
 
       <IndexTickerBar />
 
@@ -187,12 +247,12 @@ export default function Dashboard() {
             Live Chart — {symbol} ({TIMEFRAMES.find((t) => t.value === timeframe)?.label ?? timeframe})
           </h3>
           <div style={{ display: "flex", gap: 8 }}>
-            <select value={symbol} onChange={(e) => setSymbol(e.target.value)}>
+            <select className="input" value={symbol} onChange={(e) => setSymbol(e.target.value)}>
               {SYMBOLS.map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
               ))}
             </select>
-            <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+            <select className="input" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
               {TIMEFRAMES.map((t) => (
                 <option key={t.value} value={t.value}>{t.label}</option>
               ))}
@@ -200,11 +260,12 @@ export default function Dashboard() {
           </div>
         </div>
         {candlesLoading ? (
-          <p style={{ color: "var(--muted)" }}>Loading {symbol} candles…</p>
+          <LoadingSkeleton height={420} />
         ) : candles.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>
-            No {symbol} {timeframe} candles yet -- run the ingestion task (BROKER_MODE=live) or the backfill command.
-          </p>
+          <EmptyState
+            title={`No ${symbol} ${timeframe} candles yet`}
+            detail="Run the ingestion task (BROKER_MODE=live) or the backfill command to populate candle history."
+          />
         ) : (
           <>
             <PriceChart candles={candles} liveCandle={liveCandle} indicators={indicators} theme={theme} />
@@ -230,100 +291,60 @@ export default function Dashboard() {
 
       <div className="panel">
         <h3>AI Market News Summary</h3>
-        <p style={{ color: marketSummary ? "var(--text)" : "var(--muted)" }}>
-          {marketSummary ?? "No market summary available yet -- needs today's news polling to have run."}
-        </p>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-        <div className="panel">
-          <h3>Signal Status</h3>
-          {displaySignal ? (
-            <p style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontWeight: 600 }}>{displaySignal.symbol}</span>
-              <span className={`badge ${displaySignal.signal_type === "buy" ? "badge-green" : displaySignal.signal_type === "sell" ? "badge-red" : "badge-muted"}`}>
-                {displaySignal.signal_type}
-              </span>
-              {displaySignal.option_side && (
-                <span className="badge badge-muted">
-                  {displaySignal.strike_price ? `${displaySignal.strike_price} ` : ""}{displaySignal.option_side}
-                </span>
-              )}
-              <span className={`badge ${displaySignal.status === "approved" || displaySignal.status === "executed" ? "badge-green" : displaySignal.status === "rejected" ? "badge-red" : "badge-muted"}`}>
-                {displaySignal.status}
-              </span>
-              <span style={{ color: "var(--muted)" }}>score {displaySignal.total_score?.toFixed?.(2)}</span>
-            </p>
-          ) : (
-            <p style={{ color: "var(--muted)" }}>No signal yet.</p>
-          )}
-        </div>
-
-        <div className="panel">
-          <h3>Sentiment Score</h3>
-          <p style={{ color: "var(--muted)" }}>
-            {displaySignal ? displaySignal.sentiment_score?.toFixed?.(2) : "—"}
-          </p>
-        </div>
-
-        <div className="panel">
-          <h3>Market Regime</h3>
-          <p style={{ color: "var(--muted)" }}>{displaySignal?.regime ?? "—"}</p>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h3>Open Positions ({positions.length})</h3>
-        {positions.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No open positions.</p>
+        {marketSummary ? (
+          <p style={{ margin: 0 }}>{marketSummary}</p>
         ) : (
-          <table style={{ width: "100%", fontSize: 13 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "var(--muted)" }}>
-                <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized P&L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {positions.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.symbol}</td>
-                  <td>{p.side}</td>
-                  <td>{p.qty}</td>
-                  <td>{p.entry_price}</td>
-                  <td style={{ color: Number(p.unrealized_pnl) >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {p.unrealized_pnl}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <EmptyState title="No market summary yet" detail="Populated once today's news polling has run." />
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }} className="two-col-grid">
         <div className="panel">
-          <h3>Performance / Drawdown</h3>
-          {performance ? (
-            <ul style={{ margin: 0, paddingLeft: 18 }}>
-              <li>Win rate: {performance.win_rate ?? "—"}</li>
-              <li>Profit factor: {performance.profit_factor ?? "—"}</li>
-              <li>Max drawdown: {performance.max_drawdown ?? "—"}%</li>
-              <li>Expectancy (avg R): {performance.expectancy ?? "—"}</li>
-            </ul>
+          <h3>Latest Signal</h3>
+          {displaySignal ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontWeight: 700 }}>{displaySignal.symbol}</span>
+                <StatusBadge tone={displaySignal.signal_type === "buy" ? "ok" : displaySignal.signal_type === "sell" ? "bad" : "muted"}>
+                  {displaySignal.signal_type}
+                </StatusBadge>
+                {displaySignal.option_side && (
+                  <StatusBadge tone="muted">
+                    {displaySignal.strike_price ? `${displaySignal.strike_price} ` : ""}{displaySignal.option_side}
+                  </StatusBadge>
+                )}
+                <StatusBadge tone={displaySignal.status === "approved" || displaySignal.status === "executed" ? "ok" : displaySignal.status === "rejected" ? "bad" : "muted"}>
+                  {displaySignal.status}
+                </StatusBadge>
+              </div>
+              <span style={{ color: "var(--muted)", fontSize: 12.5 }}>
+                Score {displaySignal.total_score?.toFixed?.(2)} · Sentiment {displaySignal.sentiment_score?.toFixed?.(2) ?? "—"} · {displaySignal.regime ?? "—"}
+              </span>
+            </div>
           ) : (
-            <p style={{ color: "var(--muted)" }}>No performance data yet (populated after the first daily review).</p>
+            <EmptyState title="No signal yet" />
           )}
+        </div>
+
+        <div className="panel">
+          <h3>System Health</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span><StatusBadge tone={connected ? "ok" : "warn"} icon={Wifi}>{connected ? "WebSocket Live" : "Reconnecting"}</StatusBadge></span>
+            <span><StatusBadge tone={feedHealthy ? "ok" : "bad"} icon={RadioTower}>Broker feed {feedHealthy ? "healthy" : "degraded"}</StatusBadge></span>
+            <span><StatusBadge tone={loadError ? "bad" : "ok"}>API {loadError ? "unreachable" : "reachable"}</StatusBadge></span>
+          </div>
         </div>
 
         <div className="panel">
           <h3>Kill Switch / Risk State</h3>
-          <p>
-            <span className={`status-dot ${killSwitchActive ? "bad" : "ok"}`} />
-            {killSwitchActive ? "ACTIVE — entries halted" : "Inactive — normal operation"}
+          <p style={{ marginTop: 0 }}>
+            <StatusBadge tone={killSwitchActive ? "bad" : "ok"} icon={killSwitchActive ? ShieldAlert : ShieldCheck}>
+              {killSwitchActive ? "ACTIVE — entries halted" : "Inactive — normal operation"}
+            </StatusBadge>
           </p>
           {riskEvents.length > 0 && (
             <>
-              <p style={{ color: "var(--muted)", marginBottom: 4 }}>Recent critical risk events:</p>
+              <p style={{ color: "var(--muted)", marginBottom: 4, fontSize: 12.5 }}>Recent critical risk events:</p>
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
                 {riskEvents.slice(0, 5).map((e) => (
                   <li key={e.id}>{e.event_type}: {e.message}</li>
@@ -334,42 +355,86 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div className="panel">
+        <h3>Open Positions ({positions.length})</h3>
+        {positions.length === 0 ? (
+          <EmptyState title="No open positions" detail="Approved signals open real (or paper) positions automatically." />
+        ) : (
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p) => (
+                  <tr key={p.id}>
+                    <td>{p.symbol}</td>
+                    <td>{p.side}</td>
+                    <td className="num">{p.qty}</td>
+                    <td className="num">{p.entry_price}</td>
+                    <td className={Number(p.unrealized_pnl) >= 0 ? "num-positive" : "num-negative"}>
+                      {p.unrealized_pnl}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }} className="two-col-grid">
+        <div className="panel">
+          <h3>Performance / Drawdown</h3>
+          {performance ? (
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              <li>Win rate: {performance.win_rate ?? "—"}</li>
+              <li>Profit factor: {performance.profit_factor ?? "—"}</li>
+              <li>Max drawdown: {performance.max_drawdown ?? "—"}%</li>
+              <li>Expectancy (avg R): {performance.expectancy ?? "—"}</li>
+            </ul>
+          ) : (
+            <EmptyState title="No performance data yet" detail="Populated after the first daily review." />
+          )}
+        </div>
+
         <div className="panel">
           <h3>Daily Review Summary</h3>
           {dailyReview ? (
             <>
-              <p>{dailyReview.summary}</p>
-              <p style={{ fontSize: 12, color: "var(--muted)" }}>
-                {dailyReview.approved_flag ? "✅ Approved" : "⏳ Pending human approval"}
-              </p>
+              <p style={{ marginTop: 0 }}>{dailyReview.summary}</p>
+              <StatusBadge tone={dailyReview.approved_flag ? "ok" : "muted"}>
+                {dailyReview.approved_flag ? "Approved" : "Pending human approval"}
+              </StatusBadge>
             </>
           ) : (
-            <p style={{ color: "var(--muted)" }}>No review yet -- runs automatically after market close.</p>
-          )}
-        </div>
-
-        <div className="panel">
-          <h3>Drift Alerts / Strategy Version</h3>
-          <p style={{ fontSize: 13 }}>
-            Active strategy: <strong>{strategyVersion?.version_name ?? "none set"}</strong>
-          </p>
-          {driftEvents.length === 0 ? (
-            <p style={{ color: "var(--muted)" }}>No drift detected.</p>
-          ) : (
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-              {driftEvents.slice(0, 5).map((d) => (
-                <li key={d.id}>{d.drift_type} on {d.metric_name} [{d.severity}]</li>
-              ))}
-            </ul>
+            <EmptyState title="No review yet" detail="Runs automatically after market close." />
           )}
         </div>
       </div>
 
+      <div className="panel">
+        <h3>Drift Alerts / Strategy Version</h3>
+        <p style={{ fontSize: 13 }}>
+          Active strategy: <strong>{strategyVersion?.version_name ?? "none set"}</strong>
+        </p>
+        {driftEvents.length === 0 ? (
+          <p style={{ color: "var(--muted)", margin: 0 }}>No drift detected.</p>
+        ) : (
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+            {driftEvents.slice(0, 5).map((d) => (
+              <li key={d.id}>{d.drift_type} on {d.metric_name} [{d.severity}]</li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       {latestRejected && (
         <div className="panel">
-          <h3>Most Recent Rejected Trade</h3>
-          <p>
+          <h3><AlertTriangle size={13} style={{ verticalAlign: -2, marginRight: 4 }} />Most Recent Rejected Trade</h3>
+          <p style={{ margin: 0 }}>
             {latestRejected.symbol} {latestRejected.signal_type} — {latestRejected.reason}
           </p>
         </div>

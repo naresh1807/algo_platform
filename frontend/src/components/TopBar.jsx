@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { AlertOctagon, LineChart, Menu } from "lucide-react";
 
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
-import { useThemeStore } from "../store/themeStore.js";
+import { useUiStore } from "../store/uiStore.js";
+import ConnectionStatus from "./ConnectionStatus.jsx";
+import KillSwitchButton from "./KillSwitchButton.jsx";
+import MarketStatus from "./MarketStatus.jsx";
+import NotificationBell from "./NotificationBell.jsx";
+import ThemeToggle from "./ThemeToggle.jsx";
+import TradingModeSwitch from "./TradingModeSwitch.jsx";
+import UserMenu from "./UserMenu.jsx";
 
 /**
  * India VIX in the header, live -- apps.investing.Index/IndexPriceSnapshot
@@ -40,8 +48,8 @@ function IndiaVixBadge() {
   if (!vix) return null;
   const up = vix.change_pct != null && vix.change_pct >= 0;
   return (
-    <span>
-      India VIX <strong>{Number(vix.ltp).toFixed(2)}</strong>
+    <span style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+      VIX <strong style={{ color: "var(--text)" }}>{Number(vix.ltp).toFixed(2)}</strong>
       {vix.change_pct != null && (
         <span style={{ color: up ? "var(--green)" : "var(--red)", marginLeft: 4 }}>
           ({up ? "+" : ""}
@@ -53,50 +61,89 @@ function IndiaVixBadge() {
 }
 
 /**
- * The kill-switch banner here is the single most important UI element
- * in the whole app per the manual ("the dashboard should show both
- * opportunity and safety state very clearly") -- it renders at the very
- * top, above everything else, full-width, so it can never be scrolled
- * past or missed.
+ * Today's P&L -- real data from apps.risk.AccountEquity (same endpoint
+ * RiskLog.jsx already reads), refreshed on an interval rather than a
+ * live push since liveStore's risk_live socket only carries kill-switch
+ * flips/feed-health/risk-alert events, not a per-tick P&L stream.
+ */
+function TodaysPnlBadge() {
+  const [equity, setEquity] = useState(null);
+
+  useEffect(() => {
+    const load = () => endpoints.equity().then((res) => setEquity(res.data)).catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!equity || equity.daily_pnl_pct === undefined) return null;
+  const pct = equity.daily_pnl_pct;
+  const positive = pct >= 0;
+
+  return (
+    <span title="Today's P&L (% of day's starting equity)" style={{ fontSize: 12.5, whiteSpace: "nowrap" }}>
+      <span style={{ color: "var(--muted)" }}>Today </span>
+      <strong style={{ color: positive ? "var(--green)" : "var(--red)" }}>
+        {positive ? "+" : ""}
+        {pct.toFixed(2)}%
+      </strong>
+    </span>
+  );
+}
+
+/**
+ * The kill-switch banner renders at the very top, above everything
+ * else, full-width, so it can never be scrolled past or missed --
+ * per the manual, this is the single most important UI element in the
+ * whole app.
  */
 export default function TopBar() {
   const killSwitchActive = useLiveStore((s) => s.killSwitchActive);
-  const connected = useLiveStore((s) => s.connected);
-  const feedHealthy = useLiveStore((s) => s.feedHealthy);
-  const theme = useThemeStore((s) => s.theme);
-  const toggleTheme = useThemeStore((s) => s.toggleTheme);
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
 
   return (
     <>
       {killSwitchActive && (
         <div className="kill-switch-banner">
-          🛑 KILL SWITCH ACTIVE — all entries halted. Re-arming requires a
-          manual action on the backend.
+          <AlertOctagon size={14} style={{ verticalAlign: -2, marginRight: 6 }} />
+          KILL SWITCH ACTIVE — all entries halted. Re-arming requires a manual backend action.
         </div>
       )}
-      <div className="topbar">
-        <strong>Algo Trading Platform</strong>
-        <div style={{ display: "flex", alignItems: "center", gap: 16, fontSize: 13 }}>
-          <IndiaVixBadge />
-          <span>
-            <span className={`status-dot ${connected ? "ok" : "bad"}`} />
-            {connected ? "Live feed connected" : "Live feed disconnected"}
-          </span>
-          <span>
-            <span className={`status-dot ${feedHealthy ? "ok" : "warn"}`} />
-            Broker feed {feedHealthy ? "healthy" : "degraded"}
-          </span>
+      <header className="topbar">
+        <div className="topbar-section">
           <button
             type="button"
-            className="theme-toggle"
-            onClick={toggleTheme}
-            aria-label="Toggle dark/light mode"
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            className="icon-btn"
+            onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
-            {theme === "dark" ? "🌙 Dark" : "☀️ Light"}
+            <Menu size={16} />
           </button>
+          <span className="brand">
+            <span className="brand-mark">
+              <LineChart size={16} />
+            </span>
+            <span className="brand-text">Algo Trading Platform</span>
+          </span>
+          <div className="topbar-divider" />
+          <MarketStatus />
+          <IndiaVixBadge />
         </div>
-      </div>
+
+        <div className="topbar-section">
+          <ConnectionStatus />
+          <div className="topbar-divider" />
+          <TradingModeSwitch />
+          <TodaysPnlBadge />
+          <div className="topbar-divider" />
+          <NotificationBell />
+          <ThemeToggle />
+          <KillSwitchButton />
+          <UserMenu />
+        </div>
+      </header>
     </>
   );
 }

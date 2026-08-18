@@ -19,6 +19,7 @@ import Scalping from "./pages/Scalping.jsx";
 import Settings from "./pages/Settings.jsx";
 import Signals from "./pages/Signals.jsx";
 import { useLiveStore } from "./store/liveStore.js";
+import { useUiStore } from "./store/uiStore.js";
 
 /**
  * Wraps every route except /login -- redirects to /login if there's no
@@ -48,10 +49,12 @@ function AppShell() {
     useLiveStore.getState().connect();
   }, []);
 
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+
   return (
     <div className="app-shell">
       <TopBar />
-      <div className="main-layout">
+      <div className={`main-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <Sidebar />
         <main className="content">
           <Routes>
@@ -69,17 +72,6 @@ function AppShell() {
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
-        <aside className="right-panel">
-          <div className="panel">
-            <h3>Quick Notes</h3>
-            <p style={{ fontSize: 12, color: "var(--muted)" }}>
-              This right panel is reserved for whatever ends up being most
-              useful to glance at constantly once real data is flowing --
-              e.g. a compact watchlist or the day's P&amp;L ticker. Left
-              empty for now rather than filled with placeholder content.
-            </p>
-          </div>
-        </aside>
       </div>
       <SignalAlertPopup />
       <JarvisPanel />

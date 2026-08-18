@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Bot, Mic, Trash2, X } from "lucide-react";
 
 import { endpoints } from "../services/api.js";
 import { useJarvisStore } from "../store/jarvisStore.js";
@@ -72,6 +73,18 @@ export default function JarvisPanel() {
   }, [connectAnnouncements, hydrateHistory]);
 
   useEffect(() => {
+    // NotificationBell (TopBar) dispatches this instead of holding its
+    // own "is the panel open" flag -- keeps that single piece of state
+    // owned here, where the panel's own FAB/close button already live.
+    const handler = () => {
+      setOpen(true);
+      markAnnouncementsSeen();
+    };
+    window.addEventListener("jarvis:open", handler);
+    return () => window.removeEventListener("jarvis:open", handler);
+  }, [markAnnouncementsSeen]);
+
+  useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
@@ -137,7 +150,7 @@ export default function JarvisPanel() {
           }}
           title="Open JARVIS"
         >
-          🤖 JARVIS
+          <Bot size={16} /> JARVIS
           {unseenCount > 0 && <span className="jarvis-badge">{unseenCount > 9 ? "9+" : unseenCount}</span>}
         </button>
       </>
@@ -149,7 +162,8 @@ export default function JarvisPanel() {
       {toastStack}
       <div className="jarvis-panel">
         <div className="jarvis-header">
-          <span>
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Bot size={15} />
             <span className={`status-dot ${connected ? "ok" : "bad"}`} />
             JARVIS
           </span>
@@ -164,9 +178,11 @@ export default function JarvisPanel() {
               }}
               title="Clear chat history"
             >
-              🗑
+              <Trash2 size={13} />
             </button>
-            <button className="jarvis-close" onClick={() => setOpen(false)}>×</button>
+            <button className="jarvis-close" onClick={() => setOpen(false)} aria-label="Close JARVIS panel">
+              <X size={16} />
+            </button>
           </span>
         </div>
 
@@ -208,6 +224,7 @@ export default function JarvisPanel() {
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder={pendingConfirmText ? `Confirm: ${pendingConfirmText}` : "Ask JARVIS…"}
+            aria-label="Message JARVIS"
           />
           {SPEECH_RECOGNITION && (
             <button
@@ -215,8 +232,9 @@ export default function JarvisPanel() {
               className={`jarvis-mic ${listening ? "listening" : ""}`}
               onClick={toggleMic}
               title="Voice command"
+              aria-label="Voice command"
             >
-              🎙
+              <Mic size={14} />
             </button>
           )}
           <button type="submit" disabled={sending}>Send</button>

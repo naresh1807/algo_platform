@@ -1,74 +1,44 @@
 import { NavLink, useNavigate } from "react-router-dom";
+import { LogOut } from "lucide-react";
 
-const LINKS = [
-  { to: "/", label: "Dashboard", end: true },
-  { to: "/jarvis-signals", label: "JARVIS Signal Terminal" },
-  { to: "/signals", label: "Signals" },
-  { to: "/news", label: "News" },
-  { to: "/options", label: "Options Analytics" },
-  { to: "/investing", label: "Stock Investing" },
-  { to: "/positions", label: "Positions" },
-  { to: "/scalping", label: "Scalping Strategies" },
-  { to: "/reports", label: "Performance" },
-  { to: "/risk", label: "Risk Log" },
-  { to: "/learning", label: "Learning / Review" },
-];
+import { NAV_SECTIONS, SETTINGS_ITEM } from "../constants/navigation.js";
+import { useUiStore } from "../store/uiStore.js";
 
 export default function Sidebar() {
   const navigate = useNavigate();
+  const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
 
   const handleLogout = () => {
     localStorage.removeItem("authToken");
     navigate("/login");
   };
 
+  const linkClass = ({ isActive }) => `sidebar-link${isActive ? " active" : ""}`;
+
   return (
-    <nav className="sidebar">
-      {LINKS.map((link) => (
-        <NavLink
-          key={link.to}
-          to={link.to}
-          end={link.end}
-          style={({ isActive }) => ({
-            display: "block",
-            padding: "8px 10px",
-            borderRadius: 6,
-            marginBottom: 4,
-            color: isActive ? "#fff" : "var(--muted)",
-            background: isActive ? "var(--accent)" : "transparent",
-            textDecoration: "none",
-            fontSize: 14,
-          })}
-        >
-          {link.label}
-        </NavLink>
+    <nav className="sidebar" aria-label="Main navigation">
+      {NAV_SECTIONS.map((section) => (
+        <div className="sidebar-section" key={section.label}>
+          {!sidebarCollapsed && <div className="sidebar-section-label">{section.label}</div>}
+          {section.items.map(({ to, label, icon: Icon, end }) => (
+            <NavLink key={to} to={to} end={end} className={linkClass} data-tooltip={label}>
+              <Icon size={17} />
+              <span className="sidebar-link-label">{label}</span>
+            </NavLink>
+          ))}
+        </div>
       ))}
-      <NavLink
-        to="/settings"
-        style={({ isActive }) => ({
-          display: "block",
-          marginTop: 16,
-          padding: "8px 10px",
-          borderRadius: 6,
-          marginBottom: 4,
-          color: isActive ? "#fff" : "var(--muted)",
-          background: isActive ? "var(--accent)" : "transparent",
-          textDecoration: "none",
-          fontSize: 14,
-        })}
-      >
-        Settings
-      </NavLink>
-      <button
-        onClick={handleLogout}
-        style={{
-          background: "none", border: "none",
-          color: "var(--red)", textAlign: "left", padding: "8px 10px",
-          cursor: "pointer", fontSize: 14,
-        }}
-      >
-        Log out
-      </button>
+
+      <div className="sidebar-footer">
+        <NavLink to={SETTINGS_ITEM.to} className={linkClass} data-tooltip={SETTINGS_ITEM.label}>
+          <SETTINGS_ITEM.icon size={17} />
+          <span className="sidebar-link-label">{SETTINGS_ITEM.label}</span>
+        </NavLink>
+        <button type="button" className="logout-link" onClick={handleLogout} data-tooltip="Log out">
+          <LogOut size={17} />
+          <span className="sidebar-link-label">Log out</span>
+        </button>
+      </div>
     </nav>
   );
 }

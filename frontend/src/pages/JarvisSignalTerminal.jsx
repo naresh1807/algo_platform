@@ -1,14 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Maximize2, Minimize2, RefreshCw } from "lucide-react";
 
+import MACDPanel from "../charts/MACDPanel.jsx";
+import PriceChart from "../charts/PriceChart.jsx";
+import RSIPanel from "../charts/RSIPanel.jsx";
 import DecisionFactors from "../components/DecisionFactors.jsx";
+import EmptyState from "../components/EmptyState.jsx";
+import LoadingSkeleton from "../components/LoadingSkeleton.jsx";
 import OptionChainTable from "../components/OptionChainTable.jsx";
 import OptionContractChartModal from "../components/OptionContractChartModal.jsx";
 import SignalCard from "../components/SignalCard.jsx";
+import StatusBadge from "../components/StatusBadge.jsx";
+import TimeframeSelector from "../components/TimeframeSelector.jsx";
+import Watchlist from "../components/Watchlist.jsx";
+import { DEFAULT_TIMEFRAME, TIMEFRAMES } from "../constants/market.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
+import { useThemeStore } from "../store/themeStore.js";
+import { isMarketOpenNow } from "../utils/marketHours.js";
+
+// Only NIFTY/BANKNIFTY are actually evaluated for an options signal
+// (apps.options.index_direction_strategy) -- the workspace's watchlist
+// is deliberately scoped to those two, not the full chart-only SYMBOLS
+// list constants/market.js exports for the Dashboard's chart picker.
+const WORKSPACE_SYMBOLS = ["NIFTY", "BANKNIFTY"];
+// Spec's recommended timeframe set for the trading workspace (1m/5m/
+// 15m/1H/1D) -- a curated subset of the full TIMEFRAMES list, not a
+// second definition of what a timeframe is.
+const WORKSPACE_TIMEFRAME_VALUES = ["1m", "5m", "15m", "1h", "1d"];
+const WORKSPACE_TIMEFRAMES = TIMEFRAMES.filter((t) => WORKSPACE_TIMEFRAME_VALUES.includes(t.value));
+const TIMEFRAME_MINUTES = { "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60, "1d": 1440 };
 
 const selectStyle = {
-  background: "var(--panel)", color: "var(--text)",
+  background: "var(--card)", color: "var(--text)",
   border: "1px solid var(--border)", borderRadius: 6, padding: 6,
 };
 
@@ -17,24 +41,14 @@ const selectStyle = {
  * the redesign asked for: underlying analysis -> option chain -> exact
  * resolved contract -> risk-validated JARVIS signal, all in one place,
  * instead of a bare "NIFTY -> BUY" line. Deliberately built by
- * REUSING the pieces that already exist rather than duplicating them:
- *   - Option chain rendering: components/OptionChainTable.jsx (the same
- *     component OptionsAnalytics.jsx now uses, extracted from there)
- *   - Live chain updates: useLiveStore's latestOptionUpdate, same
- *     REST-loads-history / WebSocket-keeps-it-fresh pattern
- *     OptionsAnalytics.jsx already established
- *   - Live signal push: useLiveStore's latestSignal (apps.signals.
- *     signals.py's broadcast, now carrying option_contract_id/
- *     ml_win_probability/options_score/rejection_stage too)
- *   - Signal rendering: components/SignalCard.jsx + DecisionFactors.jsx
- *   - Positions/execution-mode: the same REST endpoints Positions.jsx
- *     and Settings.jsx already call
+ * REUSING the pieces that already exist rather than duplicating them.
  *
- * The pipeline itself (apps.options.index_direction_strategy) already
- * runs on the existing 5-minute Celery beat schedule -- this page reads
- * its output (REST + live push) and offers a manual "Re-analyze Now"
- * button (apps.options.views.EvaluateNowView) rather than re-running
- * any trading logic client-side.
+ * There is no manual "place order" endpoint anywhere in this backend
+ * (apps.execution only exposes reading positions + the paper/live mode
+ * toggle) -- trading is fully automated, signal -> risk engine -> auto
+ * execution. The right-hand panel below is therefore an honest "Trade
+ * Preview" of the latest real signal (SignalCard + DecisionFactors),
+ * never a fake order form that would post nowhere.
  */
 export default function JarvisSignalTerminal() {
   const [underlying, setUnderlying] = useState("NIFTY");
@@ -57,11 +71,21 @@ export default function JarvisSignalTerminal() {
   const [executionMode, setExecutionModeState] = useState(null);
   const [strategySettings, setStrategySettings] = useState(null);
 
+  const [timeframe, setTimeframe] = useState(DEFAULT_TIMEFRAME);
+  const [candles, setCandles] = useState([]);
+  const [candlesLoading, setCandlesLoading] = useState(true);
+  const [indicators, setIndicators] = useState([]);
+  const [activeTab, setActiveTab] = useState("positions");
+  const [fullscreen, setFullscreen] = useState(false);
+  const chartHostRef = useRef(null);
+  const lastTickAtRef = useRef(null);
+  const [tickTock, setTickTock] = useState(0); // forces the staleness badge to re-evaluate on an interval
+
   const latestSignal = useLiveStore((s) => s.latestSignal);
   const latestOptionUpdate = useLiveStore((s) => s.latestOptionUpdate);
-
-  // Live sockets are connected once at the AppShell level (App.jsx) --
-  // see liveStore.js's module docstring.
+  const latestCandle = useLiveStore((s) => s.latestCandle);
+  const riskAlerts = useLiveStore((s) => s.riskAlerts);
+  const theme = useThemeStore((s) => s.theme);
 
   const fetchLatestSignal = () => {
     endpoints.signals({ symbol: underlying, page_size: 1 }).then((res) => {
@@ -77,11 +101,6 @@ export default function JarvisSignalTerminal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying]);
 
-  // A newly-pushed signal for THIS underlying triggers a fresh REST
-  // fetch (for the fuller object, incl. option_contract_detail, that
-  // the deliberately-lean WebSocket payload doesn't carry -- see
-  // apps.signals.signals.py's broadcast docstring) instead of just
-  // merging the live push in directly.
   const lastSeenSignalIdRef = useRef(null);
   useEffect(() => {
     if (!latestSignal || latestSignal.symbol !== underlying) return;
@@ -97,9 +116,6 @@ export default function JarvisSignalTerminal() {
     endpoints.optionsStrategySettings().then((res) => setStrategySettings(res.data));
   }, []);
 
-  // Option chain: same load-expiries -> load-chain pattern as
-  // OptionsAnalytics.jsx (see that page for the race-condition-guard
-  // reasoning behind the `cancelled` flags below).
   useEffect(() => {
     let cancelled = false;
     setExpiry("");
@@ -166,6 +182,69 @@ export default function JarvisSignalTerminal() {
     });
   }, [latestOptionUpdate, underlying, expiry]);
 
+  // Candlestick chart -- same load pattern Dashboard.jsx uses.
+  useEffect(() => {
+    let cancelled = false;
+    setCandlesLoading(true);
+    endpoints.candles(underlying, timeframe).then((res) => {
+      if (!cancelled) setCandles(res.data.results ?? []);
+    }).catch(() => {
+      if (!cancelled) setCandles([]);
+    }).finally(() => {
+      if (!cancelled) setCandlesLoading(false);
+    });
+    endpoints.indicators(underlying, timeframe).then((res) => {
+      if (!cancelled) setIndicators(res.data.results ?? []);
+    }).catch(() => {
+      if (!cancelled) setIndicators([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [underlying, timeframe]);
+
+  const liveCandle =
+    !candlesLoading && latestCandle && latestCandle.symbol === underlying && latestCandle.timeframe === timeframe
+      ? latestCandle
+      : null;
+
+  useEffect(() => {
+    if (liveCandle) lastTickAtRef.current = Date.now();
+  }, [liveCandle]);
+
+  // Data-status badge for the chart: real, timestamp-based staleness
+  // (no live tick for 3x the selected timeframe's own interval, floored
+  // at 2 minutes) rather than a fixed guess -- gated on real market
+  // hours so it reads "Market Closed" instead of a false "Stale"
+  // outside the 09:15-15:30 IST session, when no ticks are expected at
+  // all.
+  useEffect(() => {
+    const id = setInterval(() => setTickTock((t) => t + 1), 15000);
+    return () => clearInterval(id);
+  }, []);
+  const dataStatus = useMemo(() => {
+    void tickTock;
+    if (!isMarketOpenNow()) return { tone: "muted", label: "Market Closed" };
+    if (!lastTickAtRef.current) return { tone: "warn", label: "Awaiting live tick" };
+    const thresholdMs = Math.max(2, (TIMEFRAME_MINUTES[timeframe] ?? 5) * 3) * 60000;
+    const stale = Date.now() - lastTickAtRef.current > thresholdMs;
+    return stale ? { tone: "warn", label: "Stale" } : { tone: "ok", label: "Live" };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickTock, timeframe]);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      chartHostRef.current?.requestFullscreen?.();
+    } else {
+      document.exitFullscreen?.();
+    }
+  };
+  useEffect(() => {
+    const onChange = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
   const atmStrike = useMemo(() => {
     if (spot == null || chainRows.length === 0) return null;
     return chainRows.reduce(
@@ -200,138 +279,245 @@ export default function JarvisSignalTerminal() {
     endpoints.setOptionsStrategySettings({ [field]: value }).then((res) => setStrategySettings(res.data));
   };
 
+  const TABS = [
+    { key: "positions", label: `Positions (${underlyingPositions.length})` },
+    { key: "signals", label: `Signal History (${signalHistory.length})` },
+    { key: "risk", label: `Risk Alerts (${riskAlerts.length})` },
+  ];
+
   return (
     <div>
-      <div className="panel">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>
-            Market Overview — {underlying}
-            {spot != null && (
-              <span style={{ fontSize: 13, fontWeight: 400, color: "var(--muted)", marginLeft: 10 }}>
-                Spot {spot.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                {atmStrike != null && ` · ATM ${atmStrike}`}
-              </span>
+      <div className="workspace-grid">
+        <div className="workspace-col">
+          <div className="panel" style={{ height: "100%" }}>
+            <h3>Watchlist</h3>
+            <Watchlist symbols={WORKSPACE_SYMBOLS} selected={underlying} onSelect={setUnderlying} />
+          </div>
+        </div>
+
+        <div className="workspace-col">
+          <div className="panel chart-fullscreen-host" ref={chartHostRef}>
+            <div className="chart-toolbar">
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                <h3 style={{ margin: 0 }}>
+                  {underlying}
+                  {spot != null && (
+                    <span style={{ fontSize: 13, fontWeight: 400, color: "var(--muted)", marginLeft: 8 }}>
+                      Spot {spot.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      {atmStrike != null && ` · ATM ${atmStrike}`}
+                    </span>
+                  )}
+                </h3>
+                <StatusBadge tone={dataStatus.tone}>{dataStatus.label}</StatusBadge>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <TimeframeSelector options={WORKSPACE_TIMEFRAMES} value={timeframe} onChange={setTimeframe} />
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={toggleFullscreen}
+                  title={fullscreen ? "Exit fullscreen" : "Fullscreen chart"}
+                  aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen chart"}
+                >
+                  {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                </button>
+              </div>
+            </div>
+
+            {candlesLoading ? (
+              <LoadingSkeleton height={360} />
+            ) : candles.length === 0 ? (
+              <EmptyState title={`No ${underlying} ${timeframe} candles yet`} detail="Run the ingestion task or backfill command to populate candle history." />
+            ) : (
+              <>
+                <PriceChart candles={candles} liveCandle={liveCandle} indicators={indicators} theme={theme} />
+                {indicators.length > 0 && (
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <RSIPanel indicators={indicators} theme={theme} />
+                    <MACDPanel indicators={indicators} theme={theme} />
+                  </div>
+                )}
+              </>
             )}
-          </h3>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <select value={underlying} onChange={(e) => setUnderlying(e.target.value)} style={selectStyle}>
-              <option value="NIFTY">NIFTY</option>
-              <option value="BANKNIFTY">BANKNIFTY</option>
-            </select>
+          </div>
+
+          <div className="panel">
+            <h3>Option Chain — {underlying} {expiry && `· ${expiry}`}</h3>
+            {expiries.length === 0 ? (
+              <EmptyState title={`No expiries synced yet for ${underlying}`} />
+            ) : (
+              <OptionChainTable
+                rows={chainRows}
+                spot={spot}
+                atmStrike={atmStrike}
+                flash={flash}
+                aiSelectedStrike={signalStrike}
+                aiSelectedSide={signal?.option_side}
+                selectedContractStrike={signal?.status === "approved" || signal?.status === "executed" ? signalStrike : null}
+                selectedContractSide={signal?.status === "approved" || signal?.status === "executed" ? signal?.option_side : null}
+                containerRef={chainContainerRef}
+                atmRowRef={atmRowRef}
+                onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType, underlying, expiry })}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="workspace-col">
+          <div className="panel">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <h3 style={{ margin: 0 }}>Trade Preview</h3>
+              {executionMode && (
+                <span className={`badge ${executionMode.mode === "live" ? "badge-red" : "badge-green"}`}>
+                  {executionMode.mode === "live" ? "LIVE" : "PAPER"}
+                </span>
+              )}
+            </div>
             <button
+              type="button"
+              className="btn btn-sm"
               onClick={handleEvaluateNow}
               disabled={evaluating}
-              style={{
-                padding: "6px 12px", borderRadius: 6, cursor: evaluating ? "default" : "pointer",
-                border: "1px solid var(--accent)", background: "transparent", color: "var(--accent)",
-              }}
+              style={{ width: "100%", marginBottom: 8, borderColor: "var(--accent)", color: "var(--accent)" }}
             >
+              <RefreshCw size={13} className={evaluating ? "spin" : undefined} />
               {evaluating ? "Analyzing…" : "Re-analyze Now"}
             </button>
-            {executionMode && (
-              <span className={`badge ${executionMode.mode === "live" ? "badge-red" : "badge-green"}`}>
-                {executionMode.mode === "live" ? "LIVE" : "PAPER"} TRADING
-              </span>
+            {evaluateError && <p style={{ color: "var(--red)", fontSize: 12, margin: "0 0 8px" }}>{evaluateError}</p>}
+
+            {strategySettings && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10, fontSize: 12, color: "var(--muted)" }}>
+                <label>
+                  Expiry mode:{" "}
+                  <select
+                    value={strategySettings.expiry_mode}
+                    onChange={(e) => handleStrategySettingChange("expiry_mode", e.target.value)}
+                    style={{ ...selectStyle, padding: 3, fontSize: 12 }}
+                  >
+                    <option value="current_week">Current Week</option>
+                    <option value="next_week">Next Week</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  Strike mode:{" "}
+                  <select
+                    value={strategySettings.strike_mode}
+                    onChange={(e) => handleStrategySettingChange("strike_mode", e.target.value)}
+                    style={{ ...selectStyle, padding: 3, fontSize: 12 }}
+                  >
+                    <option value="atm">ATM</option>
+                    <option value="itm">ITM</option>
+                    <option value="otm">OTM</option>
+                    <option value="ai">AI Selected</option>
+                  </select>
+                </label>
+              </div>
             )}
+
+            <p style={{ fontSize: 11.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 }}>
+              This platform trades automatically from approved signals under the current Paper/Live mode
+              (manage it in Settings) — there is no manual order entry in Phase 1.
+            </p>
+
+            <SignalCard signal={signal} />
+          </div>
+          <div className="panel">
+            <DecisionFactors signal={signal} chainRow={matchingChainRow} />
           </div>
         </div>
-        {evaluateError && <p style={{ color: "var(--red)", fontSize: 12, marginTop: 8 }}>{evaluateError}</p>}
-
-        {strategySettings && (
-          <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
-            <label>
-              Expiry mode:{" "}
-              <select
-                value={strategySettings.expiry_mode}
-                onChange={(e) => handleStrategySettingChange("expiry_mode", e.target.value)}
-                style={{ ...selectStyle, padding: 3, fontSize: 12 }}
-              >
-                <option value="current_week">Current Week</option>
-                <option value="next_week">Next Week</option>
-                <option value="monthly">Monthly</option>
-                <option value="custom">Custom</option>
-              </select>
-            </label>
-            <label>
-              Strike mode:{" "}
-              <select
-                value={strategySettings.strike_mode}
-                onChange={(e) => handleStrategySettingChange("strike_mode", e.target.value)}
-                style={{ ...selectStyle, padding: 3, fontSize: 12 }}
-              >
-                <option value="atm">ATM</option>
-                <option value="itm">ITM</option>
-                <option value="otm">OTM</option>
-                <option value="ai">AI Selected</option>
-              </select>
-            </label>
-          </div>
-        )}
-      </div>
-
-      <div className="two-col-grid" style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 12 }}>
-        <SignalCard signal={signal} />
-        <DecisionFactors signal={signal} chainRow={matchingChainRow} />
       </div>
 
       <div className="panel">
-        <h3>Option Chain — {underlying} {expiry && `· ${expiry}`}</h3>
-        {expiries.length === 0 ? (
-          <p style={{ color: "var(--muted)" }}>No expiries synced yet for {underlying}.</p>
-        ) : (
-          <OptionChainTable
-            rows={chainRows}
-            spot={spot}
-            atmStrike={atmStrike}
-            flash={flash}
-            aiSelectedStrike={signalStrike}
-            aiSelectedSide={signal?.option_side}
-            selectedContractStrike={signal?.status === "approved" || signal?.status === "executed" ? signalStrike : null}
-            selectedContractSide={signal?.status === "approved" || signal?.status === "executed" ? signal?.option_side : null}
-            containerRef={chainContainerRef}
-            atmRowRef={atmRowRef}
-            onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType, underlying, expiry })}
-          />
+        <div className="tabs-bar">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              className={`tab-btn${activeTab === t.key ? " active" : ""}`}
+              onClick={() => setActiveTab(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "positions" && (
+          underlyingPositions.length === 0 ? (
+            <EmptyState title="No open positions" detail={`No open ${underlying} positions right now.`} />
+          ) : (
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Unrealized P&amp;L</th></tr>
+                </thead>
+                <tbody>
+                  {underlyingPositions.map((p) => (
+                    <tr key={p.id}>
+                      <td>{p.symbol}</td>
+                      <td>{p.side.toUpperCase()}</td>
+                      <td className="num">{p.qty}</td>
+                      <td className="num">{p.entry_price}</td>
+                      <td className={Number(p.unrealized_pnl) >= 0 ? "num-positive" : "num-negative"}>{p.unrealized_pnl}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
         )}
-      </div>
 
-      <div className="two-col-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <div className="panel">
-          <h3>Active Positions — {underlying}</h3>
-          {underlyingPositions.length === 0 ? (
-            <p style={{ color: "var(--muted)" }}>No open positions.</p>
+        {activeTab === "signals" && (
+          signalHistory.length === 0 ? (
+            <EmptyState title="No signals yet" />
           ) : (
-            underlyingPositions.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderTop: "1px solid var(--border)", fontSize: 13 }}>
-                <span>{p.symbol} · {p.side.toUpperCase()} x{p.qty}</span>
-                <span style={{ color: Number(p.unrealized_pnl) >= 0 ? "var(--green)" : "var(--red)" }}>
-                  {p.unrealized_pnl}
-                </span>
-              </div>
-            ))
-          )}
-        </div>
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr><th>Status</th><th>Contract</th><th>Score</th><th>When</th></tr>
+                </thead>
+                <tbody>
+                  {signalHistory.map((s) => (
+                    <tr key={s.id} onClick={() => setSignal(s)} style={{ cursor: "pointer" }}>
+                      <td>
+                        <StatusBadge tone={s.status === "approved" || s.status === "executed" ? "ok" : s.status === "rejected" ? "bad" : "muted"}>
+                          {s.status}
+                        </StatusBadge>
+                      </td>
+                      <td>{s.strike_price != null ? `${Number(s.strike_price)} ${s.option_side}` : "—"}</td>
+                      <td className="num">{s.total_score?.toFixed?.(2) ?? "—"}</td>
+                      <td style={{ color: "var(--muted)" }}>{new Date(s.created_at).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
 
-        <div className="panel">
-          <h3>Signal History — {underlying}</h3>
-          {signalHistory.length === 0 ? (
-            <p style={{ color: "var(--muted)" }}>No signals yet.</p>
+        {activeTab === "risk" && (
+          riskAlerts.length === 0 ? (
+            <EmptyState title="No risk alerts" detail="Live risk events pushed since this page loaded will appear here." />
           ) : (
-            signalHistory.map((s) => (
-              <div
-                key={s.id}
-                onClick={() => setSignal(s)}
-                style={{ cursor: "pointer", padding: "6px 0", borderTop: "1px solid var(--border)", fontSize: 12 }}
-              >
-                <span style={{ color: s.status === "approved" || s.status === "executed" ? "var(--green)" : "var(--muted)" }}>
-                  {s.status.toUpperCase()}
-                </span>{" "}
-                {s.strike_price != null && `${Number(s.strike_price)} ${s.option_side} `}
-                <span style={{ color: "var(--muted)" }}>{new Date(s.created_at).toLocaleString()}</span>
-              </div>
-            ))
-          )}
-        </div>
+            <div className="data-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr><th>Severity</th><th>Event</th><th>Message</th></tr>
+                </thead>
+                <tbody>
+                  {riskAlerts.map((a, i) => (
+                    <tr key={i}>
+                      <td><StatusBadge tone={a.severity === "critical" ? "bad" : a.severity === "warning" ? "warn" : "muted"}>{a.severity}</StatusBadge></td>
+                      <td>{a.event_type}</td>
+                      <td>{a.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
       </div>
 
       <OptionContractChartModal contract={selectedContract} onClose={() => setSelectedContract(null)} />

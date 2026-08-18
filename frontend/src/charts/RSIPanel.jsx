@@ -1,7 +1,7 @@
 import { createChart } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
-import { chartLayoutOptions } from "../constants/chartTheme.js";
+import { chartLayoutOptions, semanticColors } from "../constants/chartTheme.js";
 import { istLocalizationOptions, istTimeScaleOptions } from "../constants/chartTime.js";
 
 const toChartTime = (timestamp) => Math.floor(new Date(timestamp).getTime() / 1000);
@@ -21,6 +21,8 @@ export default function RSIPanel({ indicators = [], theme = "dark" }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const rsiRef = useRef(null);
+  const overboughtLineRef = useRef(null);
+  const oversoldLineRef = useRef(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -32,9 +34,10 @@ export default function RSIPanel({ indicators = [], theme = "dark" }) {
       rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 } },
       height: 140,
     });
+    const initialColors = semanticColors(theme);
     const rsi = chart.addLineSeries({ color: "#38bdf8", lineWidth: 1, title: "RSI 14" });
-    rsi.createPriceLine({ price: 70, color: "#dc2626", lineStyle: 2, lineWidth: 1, title: "70" });
-    rsi.createPriceLine({ price: 30, color: "#16a34a", lineStyle: 2, lineWidth: 1, title: "30" });
+    overboughtLineRef.current = rsi.createPriceLine({ price: 70, color: initialColors.red, lineStyle: 2, lineWidth: 1, title: "70" });
+    oversoldLineRef.current = rsi.createPriceLine({ price: 30, color: initialColors.green, lineStyle: 2, lineWidth: 1, title: "30" });
 
     chartRef.current = chart;
     rsiRef.current = rsi;
@@ -53,6 +56,9 @@ export default function RSIPanel({ indicators = [], theme = "dark" }) {
   useEffect(() => {
     if (!chartRef.current) return;
     chartRef.current.applyOptions(chartLayoutOptions(theme));
+    const c = semanticColors(theme);
+    overboughtLineRef.current?.applyOptions({ color: c.red });
+    oversoldLineRef.current?.applyOptions({ color: c.green });
   }, [theme]);
 
   useEffect(() => {

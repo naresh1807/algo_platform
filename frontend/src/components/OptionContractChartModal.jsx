@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 
 import OptionPriceChart from "../charts/OptionPriceChart.jsx";
 import { endpoints } from "../services/api.js";
@@ -41,35 +42,45 @@ export default function OptionContractChartModal({ contract, onClose }) {
     };
   }, [contract]);
 
+  useEffect(() => {
+    if (!contract) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [contract, onClose]);
+
   if (!contract) return null;
 
   const latest = snapshots[0]; // API returns newest-first
+  const titleId = "option-contract-modal-title";
 
   return (
     <div
       style={{
-        position: "fixed", inset: 0, background: "rgba(0, 0, 0, 0.55)",
+        position: "fixed", inset: 0, background: "var(--overlay-scrim)",
         display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
       }}
       onClick={onClose}
     >
       <div
         className="panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         style={{ width: "min(720px, 92vw)", margin: 0 }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h3 style={{ margin: 0 }}>
+          <h3 id={titleId} style={{ margin: 0 }}>
             {contract.underlying} {contract.strike} {contract.optionType}
             <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)", marginLeft: 8 }}>
               exp {contract.expiry}
             </span>
           </h3>
-          <button
-            onClick={onClose}
-            style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 18, cursor: "pointer", lineHeight: 1 }}
-          >
-            ×
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+            <X size={16} />
           </button>
         </div>
 

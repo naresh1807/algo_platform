@@ -1,3 +1,9 @@
+import { Bot } from "lucide-react";
+import { Link } from "react-router-dom";
+
+import ConfidenceIndicator from "./ConfidenceIndicator.jsx";
+import StatusBadge from "./StatusBadge.jsx";
+
 const REJECTION_STAGE_LABELS = {
   direction: "Underlying Direction",
   success_rate: "Historical Success Rate",
@@ -51,7 +57,9 @@ export default function SignalCard({ signal }) {
   if (!signal) {
     return (
       <div className="panel">
-        <h3>JARVIS AI Signal</h3>
+        <h3 style={{ color: "var(--jarvis)", display: "flex", alignItems: "center", gap: 6 }}>
+          <Bot size={14} /> JARVIS AI Signal
+        </h3>
         <p style={{ color: "var(--muted)", fontSize: 13 }}>No signal generated yet for this underlying.</p>
       </div>
     );
@@ -84,12 +92,19 @@ export default function SignalCard({ signal }) {
   const isBlocked = isNoTrade && (isDataUnavailable || reasonUpper.includes("TRADE BLOCKED") || signal.rejection_stage);
 
   return (
-    <div className="panel">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-        <h3 style={{ margin: 0 }}>JARVIS AI Signal</h3>
-        {confidencePct != null && (
-          <span className="badge badge-accent">{confidencePct.toFixed(0)}% confidence</span>
-        )}
+    <div className="panel" style={{ borderTop: "2px solid var(--jarvis)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+        <h3 style={{ margin: 0, color: "var(--jarvis)", display: "flex", alignItems: "center", gap: 6 }}>
+          <Bot size={14} /> JARVIS AI Signal
+        </h3>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {signal.risk_score != null && (
+            <StatusBadge tone={signal.risk_score >= 0.8 ? "ok" : signal.risk_score > 0 ? "warn" : "bad"}>
+              Risk check {signal.risk_score >= 0.8 ? "passed" : signal.risk_score > 0 ? "partial" : "failed"}
+            </StatusBadge>
+          )}
+          {confidencePct != null && <ConfidenceIndicator value={confidencePct} />}
+        </div>
       </div>
 
       <div style={{ marginTop: 6 }}>
@@ -135,15 +150,28 @@ export default function SignalCard({ signal }) {
         </div>
       )}
 
+      {isApproved && signal.stop_loss != null && (
+        <p style={{ fontSize: 11.5, color: "var(--amber)", marginTop: 10, marginBottom: 0 }}>
+          Invalidates if price hits the stop-loss level above before target.
+        </p>
+      )}
+
       {signal.reason && (
         <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 12, lineHeight: 1.5 }}>{signal.reason}</p>
       )}
 
-      {signal.created_at && (
-        <p style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
-          {new Date(signal.created_at).toLocaleString()}
-        </p>
-      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+        {signal.created_at && (
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>
+            {new Date(signal.created_at).toLocaleString()}
+          </span>
+        )}
+        {signal.symbol && (
+          <Link to="/jarvis-signals" style={{ fontSize: 11.5, color: "var(--jarvis)", fontWeight: 600, textDecoration: "none" }}>
+            View chart →
+          </Link>
+        )}
+      </div>
     </div>
   );
 }

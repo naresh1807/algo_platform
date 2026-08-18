@@ -1,7 +1,7 @@
 import { createChart, LineStyle } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
-import { chartLayoutOptions } from "../constants/chartTheme.js";
+import { chartLayoutOptions, semanticColors } from "../constants/chartTheme.js";
 import { istLocalizationOptions, istTimeScaleOptions } from "../constants/chartTime.js";
 
 // Shared by every series built off `timestamp` fields (candles AND the
@@ -57,12 +57,13 @@ export default function PriceChart({ candles = [], liveCandle = null, indicators
       localization: istLocalizationOptions,
       height: 420,
     });
+    const initialColors = semanticColors(theme);
     const series = chart.addCandlestickSeries({
-      upColor: "#16a34a",
-      downColor: "#dc2626",
+      upColor: initialColors.green,
+      downColor: initialColors.red,
       borderVisible: false,
-      wickUpColor: "#16a34a",
-      wickDownColor: "#dc2626",
+      wickUpColor: initialColors.green,
+      wickDownColor: initialColors.red,
     });
 
     // EMA9/EMA21: the manual's own trend-following pair (section 11),
@@ -103,6 +104,10 @@ export default function PriceChart({ candles = [], liveCandle = null, indicators
   useEffect(() => {
     if (!chartRef.current) return;
     chartRef.current.applyOptions(chartLayoutOptions(theme));
+    const c = semanticColors(theme);
+    seriesRef.current?.applyOptions({
+      upColor: c.green, downColor: c.red, wickUpColor: c.green, wickDownColor: c.red,
+    });
   }, [theme]);
 
   useEffect(() => {

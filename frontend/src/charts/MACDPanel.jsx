@@ -1,7 +1,7 @@
 import { createChart } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
-import { chartLayoutOptions } from "../constants/chartTheme.js";
+import { chartLayoutOptions, semanticColors } from "../constants/chartTheme.js";
 import { istLocalizationOptions, istTimeScaleOptions } from "../constants/chartTime.js";
 
 const toChartTime = (timestamp) => Math.floor(new Date(timestamp).getTime() / 1000);
@@ -60,6 +60,7 @@ export default function MACDPanel({ indicators = [], theme = "dark" }) {
     const sorted = [...indicators]
       .filter((r) => r.macd !== null && r.macd !== undefined)
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const c = semanticColors(theme);
 
     macdRef.current.setData(
       sorted.map((r) => ({ time: toChartTime(r.timestamp), value: Number(r.macd) }))
@@ -71,10 +72,14 @@ export default function MACDPanel({ indicators = [], theme = "dark" }) {
       sorted.map((r) => ({
         time: toChartTime(r.timestamp),
         value: Number(r.macd_hist),
-        color: Number(r.macd_hist) >= 0 ? "#16a34a" : "#dc2626",
+        color: Number(r.macd_hist) >= 0 ? c.green : c.red,
       }))
     );
-  }, [indicators]);
+    // Re-runs on theme change too (not just indicators) so the
+    // histogram bars' colors stay in sync with the active theme's
+    // green/red tokens, same as PriceChart's candles/RSIPanel's
+    // reference lines.
+  }, [indicators, theme]);
 
   return <div ref={containerRef} style={{ width: "100%" }} />;
 }

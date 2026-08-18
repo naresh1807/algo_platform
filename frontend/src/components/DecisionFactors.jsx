@@ -1,3 +1,5 @@
+import { CheckCircle2, HelpCircle, XCircle } from "lucide-react";
+
 // Mirrors the default apps.risk.engine.check_option_contract_liquidity
 // threshold (settings.RISK_HARD_LIMITS["MAX_OPTION_BID_ASK_SPREAD_PCT"])
 // -- shown here purely as an informational reference for the spread
@@ -6,6 +8,8 @@
 const REFERENCE_MAX_SPREAD_PCT = 5.0;
 
 function Row({ label, ok, detail, unknown }) {
+  const Icon = unknown ? HelpCircle : ok ? CheckCircle2 : XCircle;
+  const color = unknown ? "var(--muted)" : ok ? "var(--green)" : "var(--red)";
   return (
     <div
       style={{
@@ -13,12 +17,12 @@ function Row({ label, ok, detail, unknown }) {
         padding: "6px 0", borderTop: "1px solid var(--border)",
       }}
     >
-      <span className={`status-dot ${unknown ? "warn" : ok ? "ok" : "bad"}`} style={{ marginTop: 5 }} />
+      <Icon size={15} color={color} style={{ marginTop: 2, flexShrink: 0 }} />
       <div style={{ flex: 1 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
           <span style={{ fontWeight: 600 }}>{label}</span>
-          <span style={{ color: unknown ? "var(--muted)" : ok ? "var(--green)" : "var(--red)", fontSize: 12 }}>
-            {unknown ? "No data" : ok ? "✓" : "✗"}
+          <span style={{ color, fontSize: 12, fontWeight: 600 }}>
+            {unknown ? "No data" : ok ? "Pass" : "Fail"}
           </span>
         </div>
         {detail && <div style={{ fontSize: 12, color: "var(--muted)" }}>{detail}</div>}
@@ -95,7 +99,7 @@ export default function DecisionFactors({ signal, chainRow }) {
 
   return (
     <div className="panel">
-      <h3>AI Decision Factors</h3>
+      <h3 style={{ color: "var(--jarvis)" }}>AI Decision Factors</h3>
       <Row label="Trend" unknown={!trendKnown} ok={trendOk}
         detail={trendKnown ? `EMA9 slope ${(ema9 * 100).toFixed(2)}% / EMA21 slope ${(ema21 * 100).toFixed(2)}%` : null} />
       <Row label="Momentum" unknown={!momentumKnown} ok={momentumOk}
