@@ -71,7 +71,11 @@ class Command(BaseCommand):
             obj, was_created = OptionContract.objects.update_or_create(
                 underlying=underlying, expiry=expiry,
                 strike=c["strike"], option_type=c["option_type"],
-                defaults={"symbol_token": c["symbol_token"]},
+                defaults={
+                    "symbol_token": c["symbol_token"],
+                    "tradingsymbol": c["tradingsymbol"],
+                    "lot_size": c["lot_size"],
+                },
             )
             created += int(was_created)
             updated += int(not was_created)

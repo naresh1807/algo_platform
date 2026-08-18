@@ -1,12 +1,19 @@
 from rest_framework import serializers
 
-from .models import OptionChainSnapshot, OptionContract
+from .models import OptionChainSnapshot, OptionContract, OptionsStrategySetting
 
 
 class OptionContractSerializer(serializers.ModelSerializer):
     class Meta:
         model = OptionContract
         fields = "__all__"
+
+
+class OptionsStrategySettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OptionsStrategySetting
+        fields = "__all__"
+        read_only_fields = ["changed_at"]
 
 
 class OptionChainSnapshotSerializer(serializers.ModelSerializer):

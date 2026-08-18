@@ -9,8 +9,18 @@ pipelines that could drift apart and behave inconsistently.
 SAFETY NOTES (read before ever setting BROKER_MODE=live):
   - This module does NOT re-implement or bypass any risk check. By the
     time open_position_live() is called, apps.risk.engine.check_pre_trade
-    has already approved the trade and computed its size -- this module
-    only ever executes what was already approved.
+    (and, for an option-contract signal, apps.risk.engine.
+    check_option_contract_liquidity) has already approved the trade and
+    computed its size -- this module only ever executes what was already
+    approved.
+  - Option-contract-aware: when signal.option_contract is set (apps.
+    options.index_direction_strategy's real-option-order path), this
+    places a real NFO order on that EXACT resolved contract (its own
+    tradingsymbol/symbol_token, via BrokerClient.place_order's override
+    kwargs) instead of the underlying-symbol order path -- see
+    open_position_live's own docstring. Before this existed, LIVE mode
+    could only ever place an order on the underlying itself ("NIFTY"),
+    never a real option contract, regardless of what the signal said.
   - Every order placed here is INTRADAY (see broker_client.place_order's
     producttype) -- there is no overnight-position code path in this
     scaffold at all, matching a same-day index-derivatives strategy.
@@ -99,6 +109,17 @@ def open_position_live(signal) -> OpenPosition:
     fails or doesn't fill, the signal is marked REJECTED with the
     failure reason rather than EXECUTED -- an order that never filled
     must never silently look like a successful trade in the log.
+
+    When signal.option_contract is set (apps.options.
+    index_direction_strategy's real-option-order path), this places a
+    real NFO order on that EXACT contract -- tradingsymbol/symbol_token
+    from the resolved OptionContract, exchange="NFO" -- via
+    BrokerClient.place_order's symbol_token/exchange/tradingsymbol
+    override kwargs, instead of looking `signal.symbol` (the underlying,
+    e.g. "NIFTY") up in the index-only SYMBOL_TOKENS map. Side is forced
+    LONG for an option order, mirroring paper_executor.
+    open_position_from_signal exactly -- buying a CE or a PE is always a
+    LONG bet on that option's own premium.
     """
     client = get_broker_client()
     qty = signal.position_size or 0
@@ -108,11 +129,20 @@ def open_position_live(signal) -> OpenPosition:
         signal.save(update_fields=["status", "reason"])
         raise ValueError(f"Cannot place a live order for {signal.symbol} with qty=0.")
 
-    side = PositionSide.LONG if signal.signal_type == SignalType.BUY else PositionSide.SHORT
+    is_option_order = signal.option_contract_id is not None
+    side = PositionSide.LONG if is_option_order or signal.signal_type == SignalType.BUY else PositionSide.SHORT
     order_side = "BUY" if side == PositionSide.LONG else "SELL"
+    position_symbol = signal.option_contract.tradingsymbol if is_option_order else signal.symbol
 
     try:
-        order_id = client.place_order(signal.symbol, order_side, qty, order_type="MARKET")
+        if is_option_order:
+            order_id = client.place_order(
+                position_symbol, order_side, qty, order_type="MARKET",
+                symbol_token=signal.option_contract.symbol_token, exchange="NFO",
+                tradingsymbol=signal.option_contract.tradingsymbol,
+            )
+        else:
+            order_id = client.place_order(signal.symbol, order_side, qty, order_type="MARKET")
         filled_order = _wait_for_fill(client, order_id)
     except Exception as exc:
         logger.exception("Live order placement/fill failed for signal %s", signal.pk)
@@ -124,7 +154,7 @@ def open_position_live(signal) -> OpenPosition:
             action="order_rejected",
             actor_label="live_executor",
             target=signal,
-            details={"symbol": signal.symbol, "qty": qty, "error": str(exc), "mode": "live"},
+            details={"symbol": position_symbol, "qty": qty, "error": str(exc), "mode": "live"},
         )
         raise
 
@@ -146,7 +176,8 @@ def open_position_live(signal) -> OpenPosition:
     with transaction.atomic():
         position = OpenPosition.objects.create(
             signal=signal,
-            symbol=signal.symbol,
+            option_contract=signal.option_contract if is_option_order else None,
+            symbol=position_symbol,
             side=side,
             qty=filled_qty,
             entry_price=fill_price,
@@ -165,13 +196,13 @@ def open_position_live(signal) -> OpenPosition:
         target=position,
         details={
             "symbol": position.symbol, "qty": filled_qty, "fill_price": str(fill_price),
-            "broker_order_id": order_id, "mode": "live",
+            "broker_order_id": order_id, "mode": "live", "option_contract_id": signal.option_contract_id,
         },
     )
 
     logger.info(
         "LIVE position opened: %s x%d @ %s (order_id=%s)",
-        signal.symbol, filled_qty, fill_price, order_id,
+        position_symbol, filled_qty, fill_price, order_id,
     )
     return position
 
@@ -185,10 +216,25 @@ def close_position_live(position: OpenPosition, reason: str) -> None:
     only live-mode code path allowed to write to AccountEquity.
     current_equity. P&L uses paper_executor._pnl_for (not reimplemented
     here) so paper and live can never compute it two different ways.
+
+    Uses the same symbol_token/exchange/tradingsymbol overrides as
+    open_position_live when position.option_contract is set, so the
+    closing order targets the exact same NFO contract the opening order
+    did -- position.symbol is already that contract's own tradingsymbol
+    in that case (see open_position_live), but the token/exchange still
+    need to be supplied explicitly since place_order can't look an NFO
+    contract up in SYMBOL_TOKENS.
     """
     client = get_broker_client()
     closing_side = "SELL" if position.side == PositionSide.LONG else "BUY"
-    order_id = client.place_order(position.symbol, closing_side, position.qty, order_type="MARKET")
+    if position.option_contract_id is not None:
+        order_id = client.place_order(
+            position.symbol, closing_side, position.qty, order_type="MARKET",
+            symbol_token=position.option_contract.symbol_token, exchange="NFO",
+            tradingsymbol=position.symbol,
+        )
+    else:
+        order_id = client.place_order(position.symbol, closing_side, position.qty, order_type="MARKET")
     filled_order = _wait_for_fill(client, order_id)
     exit_price = Decimal(str(filled_order.get("averageprice")))
 
@@ -232,22 +278,42 @@ def check_and_close_positions_live(timeframe: str = "5m") -> list[dict]:
     duplicating the stop/target comparison logic, so "when to exit" stays
     identical between paper and live -- only "how the exit is executed"
     differs.
+
+    Option positions (position.option_contract set) are priced from a
+    live option-chain quote (apps.options.pricing.latest_ltp_for_contract)
+    instead of compute_indicators(position.symbol, timeframe) -- there is
+    no candle history for an option contract's own symbol -- and skip the
+    should_exit_position technical-exit fallback for the same reason:
+    stop/target are the only exit triggers for these positions. Exactly
+    mirrors paper_executor.check_and_close_positions's option branch, so
+    "when to exit" never differs between paper and live for the same
+    position type.
     """
     from apps.market_data.indicators import compute_indicators
     from apps.signals.engine import should_exit_position
 
     results = []
     for position in OpenPosition.objects.filter(closed_at__isnull=True):
-        ind = compute_indicators(position.symbol, timeframe)
-        if ind is None:
-            continue
-        current_price = Decimal(str(ind["close"]))
+        if position.option_contract_id is not None:
+            from apps.options.pricing import latest_ltp_for_contract
+
+            ltp = latest_ltp_for_contract(position.option_contract)
+            if ltp is None:
+                continue
+            current_price = Decimal(str(ltp))
+        else:
+            ind = compute_indicators(position.symbol, timeframe)
+            if ind is None:
+                continue
+            current_price = Decimal(str(ind["close"]))
 
         from .trailing_stop import update_trailing_stop
         update_trailing_stop(position, current_price)
 
         # See paper_executor.check_and_close_positions -- SHORT's
         # stop/target sit on the opposite sides of entry from LONG's.
+        # Option positions are always LONG, so they always take that
+        # branch.
         if position.side == PositionSide.LONG:
             stop_hit = current_price <= position.stop_loss
             target_hit = position.target_price is not None and current_price >= position.target_price
@@ -266,10 +332,14 @@ def check_and_close_positions_live(timeframe: str = "5m") -> list[dict]:
                 results.append({"symbol": position.symbol, "closed": True, "reason": "target"})
                 continue
 
-            should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
-            if should_exit:
-                close_position_live(position, f"Technical exit: {', '.join(exit_reasons)}")
-                results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})
+            if position.option_contract_id is None:
+                should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
+                if should_exit:
+                    close_position_live(position, f"Technical exit: {', '.join(exit_reasons)}")
+                    results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})
+                    continue
+
+            results.append({"symbol": position.symbol, "closed": False})
         except Exception:
             # A failed exit order is serious -- log loudly, but keep
             # checking other positions rather than letting one broker

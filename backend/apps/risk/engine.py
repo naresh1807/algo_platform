@@ -351,6 +351,58 @@ def _is_options_expiry_day(symbol: str) -> bool:
         return False
 
 
+def check_option_contract_liquidity(
+    contract, bid: float | None, ask: float | None, open_interest: int | None, volume: int | None,
+) -> tuple[bool, str]:
+    """
+    manual section 11's "Risk Engine should validate lot size, liquidity,
+    bid/ask spread" applied to one already-resolved option contract --
+    called by apps.options.index_direction_strategy right after it
+    resolves a real OptionContract, alongside (not instead of) the
+    symbol-level check_pre_trade() below. Plain-value signature (bid/
+    ask/open_interest/volume, not an OptionChainSnapshot instance) since
+    apps.options.strike_selector.suggest_best_strike's candidate dict
+    already carries these -- no extra query needed here.
+
+    Two distinct failure phrasings, matching the platform's safety
+    rules: "OPTION DATA UNAVAILABLE" when the data needed to judge
+    liquidity simply isn't there yet (never invent a spread/liquidity
+    verdict from missing data), "TRADE BLOCKED" when real data says the
+    contract fails a threshold.
+    """
+    if not contract.lot_size:
+        return False, f"TRADE BLOCKED: lot size unknown for {contract.tradingsymbol or contract}."
+
+    if bid is None or ask is None:
+        return False, f"OPTION DATA UNAVAILABLE: no live bid/ask for {contract.tradingsymbol or contract}."
+
+    mid = (bid + ask) / 2
+    if mid <= 0:
+        return False, f"OPTION DATA UNAVAILABLE: non-positive bid/ask midpoint for {contract.tradingsymbol or contract}."
+
+    limits = settings.RISK_HARD_LIMITS
+    spread_pct = (ask - bid) / mid * 100
+    if spread_pct > limits["MAX_OPTION_BID_ASK_SPREAD_PCT"]:
+        return False, (
+            f"TRADE BLOCKED: bid/ask spread {spread_pct:.1f}% on {contract.tradingsymbol or contract} "
+            f"exceeds the {limits['MAX_OPTION_BID_ASK_SPREAD_PCT']}% limit."
+        )
+
+    if (open_interest or 0) < limits["MIN_OPTION_OPEN_INTEREST"]:
+        return False, (
+            f"TRADE BLOCKED: open interest {open_interest or 0} on {contract.tradingsymbol or contract} "
+            f"is below the {limits['MIN_OPTION_OPEN_INTEREST']} minimum."
+        )
+
+    if (volume or 0) < limits["MIN_OPTION_VOLUME"]:
+        return False, (
+            f"TRADE BLOCKED: volume {volume or 0} on {contract.tradingsymbol or contract} "
+            f"is below the {limits['MIN_OPTION_VOLUME']} minimum."
+        )
+
+    return True, ""
+
+
 def _compute_position_size(
     equity: AccountEquity, entry_price: Decimal, stop_loss: Decimal, symbol: str,
 ) -> tuple[int, str]:

@@ -535,3 +535,53 @@ body {
   font-size: 13px;
   cursor: pointer;
 }
+
+/* ---------------------------------------------------------------------
+   Responsive breakpoints -- the first ones in this codebase (confirmed
+   zero @media rules existed before). Scoped tightly to .main-layout's
+   fixed 3-column grid (220px sidebar | 1fr content | 320px right-panel,
+   see .main-layout above), which is what actually breaks on a narrower
+   viewport -- everything else (.panel/.card/.badge/etc.) already uses
+   relative sizing and reflows fine on its own. Fixed-position overlays
+   (.signal-alert-stack, .jarvis-fab, .jarvis-toast-stack, .jarvis-panel)
+   are untouched here since they float independently of this grid.
+
+   Tablet (<=1100px): drop the right-panel out of the grid (it's
+   reserve/secondary content, per its own "Quick Notes" placeholder in
+   App.jsx) so content gets the room back, keep the sidebar.
+   Mobile (<=700px): also collapse the sidebar out of the grid, into a
+   horizontal scrollable strip above the content, so a phone-width
+   screen isn't squeezed into a fixed 220px nav column. -------------- */
+@media (max-width: 1100px) {
+  .main-layout {
+    grid-template-columns: 220px 1fr;
+  }
+  .right-panel {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .main-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  .sidebar {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-height: unset;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .sidebar a,
+  .sidebar button {
+    margin-bottom: 0 !important;
+    margin-right: 4px;
+    flex-shrink: 0;
+  }
+  .two-col-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

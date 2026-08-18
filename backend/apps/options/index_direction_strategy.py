@@ -14,23 +14,20 @@ to actually trade before now.
 
 SCOPE, STATED UP FRONT (same honesty convention as apps.analytics.
 backtest's own docstring):
-  - The position this strategy opens is on the UNDERLYING index itself
-    (LONG for the CE/up case, SHORT for the PE/down case), executed
-    through the existing apps.execution pipeline -- NOT a real order on
-    the suggested option contract. Two reasons: (1) apps.market_data
-    only ingests OHLC candle history for WATCHLIST underlyings, not
-    per-option-contract history, so apps.execution's mark-to-market /
-    stop-target checks (which call compute_indicators(position.symbol))
-    have nothing to read for an option contract's own symbol; (2) a
-    long call/put's payoff is directionally equivalent to a long/short
-    position in the underlying (bounded downside aside), so trading the
-    underlying is an honest, executable proxy for "take the CE/PE
-    trade" without pretending to model real option premium/theta/
-    greeks decay this codebase doesn't have live execution wiring for.
-    The suggested strike (via strike_selector.suggest_best_strike) is
-    included in every signal's `reason` purely as the actionable "if
-    you want to actually buy the option by hand, here's the contract"
-    detail -- same advisory role that function already plays elsewhere.
+  - Both PAPER and LIVE mode trade the REAL suggested option contract
+    (via strike_selector.suggest_best_strike -> the resolved
+    OptionContract), priced/sized in that contract's own premium (see
+    the entry_price/stop_loss/target computation below, and
+    TradingSignal.option_contract's own docstring) -- not the
+    underlying-index proxy this module used to trade unconditionally.
+    If no contract can be resolved (no options data synced yet, no
+    strike in the delta sweet spot, liquidity gate failed, position
+    size rounds down to under one lot, ...), the signal is NO_TRADE;
+    there is no fallback to trading the underlying instead.
+    apps.execution.live_executor places a real NFO order using the
+    resolved contract's own symbol_token/tradingsymbol -- see that
+    module's docstring, and its own pre-real-account safety caveats,
+    before ever setting BROKER_MODE=live for this strategy.
   - The "success rate" is bootstrapped by backtesting the direction's
     technical conditions against real historical index candles (see
     _simulate_directional_r_multiples) -- same technical-layer-only
@@ -48,10 +45,12 @@ from __future__ import annotations
 from decimal import Decimal
 from types import SimpleNamespace
 
+from django.conf import settings
+
 from apps.market_data.indicators import compute_indicators, indicator_dict_at, load_full_indicator_frame
 from apps.market_data.regime import classify_regime, regime_size_multiplier
 from apps.news.scoring import aggregate_sentiment
-from apps.risk.engine import check_pre_trade
+from apps.risk.engine import check_option_contract_liquidity, check_pre_trade
 from apps.signals.engine import (
     ATR_STOP_MULTIPLIER,
     HIGH_VOLATILITY_SCORE_MARGIN,
@@ -64,14 +63,16 @@ from apps.signals.engine import (
 from apps.signals.models import TradingSignal
 from common.constants import MarketRegime, SignalStatus, SignalType
 
-from .signals_engine import nearest_expiry, options_confluence_score
+from .models import OptionContract
+from .signals_engine import options_confluence_score, select_expiry
 from .strike_selector import suggest_best_strike
 
-# Mirrors settings.WATCHLIST's default -- this strategy is specifically
-# about index direction driving a CE/PE choice, so it targets the two
-# indices by name rather than iterating the whole (possibly
-# stock-inclusive) watchlist.
-INDEX_UNDERLYINGS = ("NIFTY", "BANKNIFTY")
+# Reads settings.OPTIONS_PIPELINE_UNDERLYINGS (not hard-coded, and not
+# imported by apps.signals.tasks -- that module reads the same setting
+# independently, so neither app has to import the other's module to
+# agree on which underlyings trade via real option contracts instead
+# of apps.signals.engine's plain index-level engine).
+INDEX_UNDERLYINGS = tuple(settings.OPTIONS_PIPELINE_UNDERLYINGS)
 
 DIRECTION_TIMEFRAME = "5m"
 
@@ -331,15 +332,20 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
 
     Pipeline: direction (determine_index_direction) -> that side's
     backtest-bootstrapped success rate (success_rate_for_side) ->
-    sentiment veto -> options-chain confluence -> best-strike
-    suggestion (advisory only, see module docstring) -> risk engine ->
-    ML win-probability veto/sizing. Any stage after direction detection
-    can add a rejection reason; ANY reason means NO_TRADE, mirroring
-    generate_signal()'s "run every check, report everything wrong" style.
+    sentiment veto -> options-chain confluence -> best-strike suggestion,
+    which must resolve a real OptionContract (see module docstring -- no
+    contract means NO_TRADE now, no underlying-proxy fallback) -> risk
+    engine, sized against the option's own premium -> ML win-probability
+    veto/sizing, rounded to whole lots. Any stage after direction
+    detection can add a rejection reason; ANY reason means NO_TRADE,
+    mirroring generate_signal()'s "run every check, report everything
+    wrong" style.
 
-    signal_type is BUY for the up/CE case (opens LONG through the
-    existing apps.execution path) and SELL for the down/PE case (opens
-    SHORT -- see apps.execution.paper_executor/live_executor).
+    signal_type is always BUY once a contract is resolved -- buying a CE
+    or a PE is always a LONG bet on THAT option's own premium (the
+    up-vs-down call only decides which side, CE or PE, gets bought), not
+    a BUY/SELL on the underlying the way the old underlying-proxy version
+    of this function used to encode direction.
     """
     direction_result = determine_index_direction(underlying, timeframe)
     direction = direction_result["direction"]
@@ -354,6 +360,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             sentiment_score=0, risk_score=0, options_score=0,
             regime=direction_result["regime"] or MarketRegime.SIDEWAYS,
             status=SignalStatus.REJECTED,
+            rejection_stage=TradingSignal.RejectionStage.DIRECTION,
             reason=direction_result["detail"],
             **_indicator_signal_fields(ind),
         )
@@ -364,15 +371,24 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
     technical_score = direction_result["score"]
 
     reasons: list[str] = []
+    # Tracks the FIRST pipeline stage that added a reason -- since
+    # success_rate/sentiment below can both add to `reasons` before the
+    # first `if not reasons:` gate further down, "first to add" (not
+    # "last check that ran") is what actually explains why this signal
+    # died, so every reasons.append() below is paired with
+    # `stage = stage or "..."` (never overwrites an earlier stage).
+    stage: str | None = None
 
     success = success_rate_for_side(underlying, direction, timeframe)
     if not success["available"]:
         reasons.append(success["detail"])
+        stage = stage or TradingSignal.RejectionStage.SUCCESS_RATE
     elif not success["profitable"]:
         reasons.append(
             f"{side}-side historical success rate isn't profitable enough to trade: "
             f"{success['detail']} (needs win rate > {SUCCESS_RATE_THRESHOLD:.0%} and positive expectancy)."
         )
+        stage = stage or TradingSignal.RejectionStage.SUCCESS_RATE
 
     sentiment = aggregate_sentiment(underlying)
     # Direction-aware, unlike apps.signals.engine (which only ever
@@ -386,12 +402,20 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             "A strongly negative, high-confidence headline vetoes this CE setup "
             "(sentiment is a filter, not a standalone trigger -- but it CAN block)."
         )
+        stage = stage or TradingSignal.RejectionStage.SENTIMENT
     elif direction == "down" and sentiment["has_strongly_positive_headline"]:
         reasons.append(
             "A strongly positive, high-confidence headline vetoes this PE setup "
             "(sentiment is a filter, not a standalone trigger -- but it CAN block)."
         )
+        stage = stage or TradingSignal.RejectionStage.SENTIMENT
 
+    # entry_price/stop_loss here are the INDEX's own price/ATR-stop --
+    # used only for direction-detection bookkeeping and the NO_TRADE
+    # branches' informational entry_price/stop_loss below. The real,
+    # executable trade (once a contract resolves further down) is priced
+    # in that contract's own premium via option_entry_price/
+    # option_stop_loss instead -- see module docstring.
     entry_price = Decimal(str(ind["close"]))
     raw_atr_distance = ind["atr"] * ATR_STOP_MULTIPLIER
     # NaN-safe, same reasoning as the backtest simulator's identical-
@@ -407,50 +431,93 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             f"ATR is invalid ({ind['atr']!r}) -- cannot size a stop-loss right now "
             f"(likely a gap in ingested candles)."
         )
+        stage = stage or TradingSignal.RejectionStage.RISK
         stop_loss = entry_price
     elif direction == "up":
-        atr_distance = Decimal(str(raw_atr_distance))
-        stop_loss = entry_price - atr_distance
-        target_1 = entry_price + atr_distance
-        target_2 = entry_price + atr_distance * 2
+        stop_loss = entry_price - Decimal(str(raw_atr_distance))
     else:
-        atr_distance = Decimal(str(raw_atr_distance))
-        stop_loss = entry_price + atr_distance
-        target_1 = entry_price - atr_distance
-        target_2 = entry_price - atr_distance * 2
+        stop_loss = entry_price + Decimal(str(raw_atr_distance))
 
     options_score = 0.0
     options_detail = ""
     strike_detail = ""
     suggested_strike_price = None
+    resolved_contract = None
+    option_entry_price = None
+    option_stop_loss = None
+    option_target_1 = None
+    option_target_2 = None
     if not reasons:
         options_result = options_confluence_score(underlying, direction=option_direction)
         options_score = options_result["score"]
         options_detail = options_result["detail"]
         if options_result["veto"]:
             reasons.append(f"Options-chain veto: {options_result['veto_reason']}")
+            stage = stage or TradingSignal.RejectionStage.OPTIONS_CONFLUENCE
         elif options_score < OPTIONS_SCORE_THRESHOLD:
             reasons.append(
                 f"Options-chain confirmation score {options_score:.2f} below "
                 f"{OPTIONS_SCORE_THRESHOLD:.2f} threshold. {options_detail}"
             )
+            stage = stage or TradingSignal.RejectionStage.OPTIONS_CONFLUENCE
 
     if not reasons:
-        expiry = nearest_expiry(underlying)
+        expiry = select_expiry(underlying)
         if expiry is None:
-            strike_detail = f"No options contracts synced for {underlying} yet."
+            strike_detail = f"No options contracts synced for {underlying}'s configured expiry mode yet."
+            reasons.append(strike_detail)
+            stage = stage or TradingSignal.RejectionStage.EXPIRY
         else:
             suggestion = suggest_best_strike(underlying, expiry, direction=option_direction)
             if suggestion["suggested"] is None:
                 reasons.append(f"No suitable {side} strike to suggest: {suggestion['reason']}")
+                stage = stage or TradingSignal.RejectionStage.STRIKE
             else:
                 strike_detail = f"Suggested {side}: {suggestion['reason']}"
-                suggested_strike_price = suggestion["suggested"]["strike"]
+                best = suggestion["suggested"]
+                suggested_strike_price = best["strike"]
+
+                # Resolve the actual OptionContract row and price/size the
+                # trade in ITS OWN PREMIUM, not the index -- see module
+                # docstring. premium_distance scales the same ATR-based
+                # index stop-distance every other strategy already uses by
+                # this contract's own delta (its own rough "how much
+                # premium moves per index point" proxy, already computed
+                # by suggest_best_strike), rather than inventing a second,
+                # unrelated stop-sizing rule just for this path.
+                resolved_contract = OptionContract.objects.get(pk=best["contract_id"])
+
+                liquidity_ok, liquidity_reason = check_option_contract_liquidity(
+                    resolved_contract, best.get("bid"), best.get("ask"),
+                    best["open_interest"], best["volume"],
+                )
+                if not liquidity_ok:
+                    reasons.append(liquidity_reason)
+                    stage = stage or TradingSignal.RejectionStage.LIQUIDITY
+
+                option_entry_price = Decimal(str(best["ltp"]))
+                premium_distance = Decimal(str(raw_atr_distance * abs(best["delta"])))
+                # Buying a CE or a PE is always a LONG bet on that option's
+                # own premium -- unlike the underlying-proxy stop/target
+                # above, this shape does NOT flip between up/CE and
+                # down/PE.
+                option_stop_loss = option_entry_price - premium_distance
+                option_target_1 = option_entry_price + premium_distance
+                option_target_2 = option_entry_price + premium_distance * 2
+
+                if option_stop_loss <= 0:
+                    reasons.append(
+                        f"Computed option stop-loss ({option_stop_loss}) would be at/below zero "
+                        f"for the {suggested_strike_price} {side} at this premium/ATR -- cannot "
+                        f"size a real stop."
+                    )
+                    stage = stage or TradingSignal.RejectionStage.STRIKE
 
     if not reasons:
-        risk_decision = check_pre_trade(underlying, entry_price, stop_loss)
+        risk_decision = check_pre_trade(underlying, option_entry_price, option_stop_loss)
         if not risk_decision.approved:
             reasons.extend(risk_decision.reasons)
+            stage = stage or TradingSignal.RejectionStage.RISK
         risk_score = risk_decision.risk_score
     else:
         risk_score = 0.0
@@ -471,6 +538,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             sentiment_score=sentiment["sentiment_score"], risk_score=risk_score,
             options_score=options_score,
             regime=regime, status=SignalStatus.REJECTED,
+            rejection_stage=stage,
             reason=f"[{side} side] " + " ".join(reasons),
             **_indicator_signal_fields(ind),
         )
@@ -505,6 +573,7 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             sentiment_score=sentiment["sentiment_score"], risk_score=risk_score,
             options_score=options_score,
             regime=regime, status=SignalStatus.REJECTED,
+            rejection_stage=TradingSignal.RejectionStage.ML_CONFIDENCE,
             reason=(
                 f"[{side} side] Rule-based checks (incl. {side}-side success rate) passed but ML "
                 f"win-probability model rates this setup {ml_probability:.0%}, below the "
@@ -516,11 +585,39 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
 
     confidence_multiplier = ml_confidence_size_multiplier(ml_probability)
     size_multiplier = regime_size_multiplier(regime) * confidence_multiplier
-    position_size = int(risk_decision.position_size * size_multiplier)
+    scaled_qty = int(risk_decision.position_size * size_multiplier)
 
     total_score = round(
         (technical_score + max(sentiment["sentiment_score"], 0) + risk_score + options_score) / 4, 4,
     )
+
+    # Real orders must be a whole multiple of the contract's lot size --
+    # rounded down here (not earlier, against risk_decision.position_size
+    # before regime/ML scaling) since the regime and ML-confidence
+    # multipliers above can still push an already-lot-sized qty below one
+    # lot, and this is the true final quantity that would be ordered.
+    lots = scaled_qty // resolved_contract.lot_size if resolved_contract.lot_size else 0
+    if lots < 1:
+        return _create_signal(
+            _ml_probability=ml_probability,
+            symbol=underlying, signal_type=SignalType.NO_TRADE,
+            entry_price=option_entry_price, stop_loss=option_stop_loss,
+            total_score=total_score, technical_score=round(technical_score, 4),
+            sentiment_score=sentiment["sentiment_score"], risk_score=risk_score,
+            options_score=options_score,
+            option_side=side, strike_price=suggested_strike_price,
+            regime=regime, status=SignalStatus.REJECTED,
+            rejection_stage=TradingSignal.RejectionStage.LOT_SIZE,
+            reason=(
+                f"[{side} side] Rule-based and ML checks passed, but the sized quantity "
+                f"({scaled_qty}) rounds down to under one lot (lot_size="
+                f"{resolved_contract.lot_size}) for the {suggested_strike_price} {side} "
+                f"at {option_entry_price} premium -- no real order can be placed."
+            ),
+            **_indicator_signal_fields(ind),
+        )
+    position_size = lots * resolved_contract.lot_size
+
     ml_note = (
         f" ML win-probability {ml_probability:.0%} (size x{confidence_multiplier})."
         if ml_probability is not None else ""
@@ -529,22 +626,23 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
     return _create_signal(
         _ml_probability=ml_probability,
         symbol=underlying,
-        signal_type=SignalType.BUY if direction == "up" else SignalType.SELL,
-        entry_price=entry_price, stop_loss=stop_loss,
-        target_1=target_1, target_2=target_2, position_size=position_size,
-        option_side=side, strike_price=suggested_strike_price,
+        signal_type=SignalType.BUY,
+        entry_price=option_entry_price, stop_loss=option_stop_loss,
+        target_1=option_target_1, target_2=option_target_2, position_size=position_size,
+        option_side=side, strike_price=suggested_strike_price, option_contract=resolved_contract,
         total_score=total_score, technical_score=round(technical_score, 4),
         sentiment_score=sentiment["sentiment_score"], risk_score=risk_score,
         options_score=options_score,
         regime=regime, status=SignalStatus.APPROVED,
+        rejection_stage=None,
         reason=(
             f"[{side} side] {direction_result['detail']} {success['detail']} "
             f"Sentiment {sentiment['sentiment_score']:+.2f} over {sentiment['headline_count']} headlines. "
             f"Options-chain: {options_detail} {strike_detail} "
-            f"Regime={regime}; risk-approved at size {position_size}.{ml_note} "
-            f"NOTE: executes as a {'LONG' if direction == 'up' else 'SHORT'} position on the "
-            f"underlying index -- a same-direction proxy for buying the {side} option, not a "
-            f"real option-contract order (see apps.options.index_direction_strategy's docstring)."
+            f"Regime={regime}; risk-approved at {lots} lot(s) ({position_size} qty).{ml_note} "
+            f"Executes as a real BUY order on {resolved_contract.tradingsymbol} "
+            f"({suggested_strike_price} {side}) at premium {option_entry_price}, in whichever "
+            f"execution mode (paper/live) is currently active."
         ),
         **_indicator_signal_fields(ind),
     )

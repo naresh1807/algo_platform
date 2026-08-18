@@ -171,9 +171,30 @@ app.conf.beat_schedule = {
         "task": "apps.learning.tasks.run_scalping_strategy_comparison",
         "schedule": 60.0,
     },
+    # apps.learning.scalp_execution's REAL (paper-mode) option-position
+    # path for the same three scalping methods -- an ADDITIONAL entry
+    # alongside the isolated comparison above, not a replacement; same
+    # 1-minute cadence for the same "scalping needs sub-5-minute checking"
+    # reason. See that module's own docstring for the one-open-position-
+    # per-symbol consequence of running this alongside
+    # index-direction-strategy-every-5-minutes below.
+    "scalping-real-execution-every-minute": {
+        "task": "apps.learning.tasks.run_scalping_real_execution",
+        "schedule": 60.0,
+    },
     "evaluate-scalping-strategy-methods-daily": {
         "task": "apps.learning.tasks.evaluate_scalping_strategy_methods",
         "schedule": crontab(hour=16, minute=50),  # right after evaluate-strategy-methods-daily
+    },
+    # apps.learning.scalp_ml_train's own win-probability model, trained
+    # ONLY on closed scalping HypotheticalTrade rows (see that module's
+    # docstring for why it's a separate model from retrain-win-
+    # probability-model-daily's) -- right after the scalping methods'
+    # daily win-rate/avg-R evaluation above, same "once the day's scalps
+    # are all accounted for" timing that task already uses.
+    "retrain-scalp-win-probability-model-daily": {
+        "task": "apps.learning.tasks.retrain_scalp_win_probability_model",
+        "schedule": crontab(hour=17, minute=0),
     },
     # manual 14.16 "JARVIS Announces": Market Open / Market Close. NSE's
     # regular session is 09:15-15:30 IST, Mon-Fri -- day_of_week='1-5'

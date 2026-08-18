@@ -119,7 +119,8 @@ export default function Scalping() {
           <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--muted)" }}>
-                <th>Method</th><th>Symbol</th><th>Entry</th><th>Stop</th><th>Target</th><th>Opened</th>
+                <th>Method</th><th>Symbol</th><th>Entry</th><th>Stop</th><th>Target</th>
+                <th>Option</th><th>Win Prob</th><th>Opened</th>
               </tr>
             </thead>
             <tbody>
@@ -130,6 +131,30 @@ export default function Scalping() {
                   <td>{t.entry_price}</td>
                   <td>{t.stop_loss}</td>
                   <td>{t.target_price ?? "—"}</td>
+                  <td>
+                    {t.strike_price != null && t.option_side ? (
+                      <span
+                        className={`badge ${t.option_side === "CE" ? "badge-green" : "badge-red"}`}
+                        title="Advisory only -- this trade's own P&L still simulates the underlying, not this option's premium"
+                      >
+                        {t.strike_price} {t.option_side}
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
+                  <td>
+                    {t.ml_win_probability != null ? (
+                      <span
+                        className="badge badge-muted"
+                        title="Advisory only, from apps.learning.scalp_ml_train's own model (trained on this method group's closed trades) -- doesn't affect whether this trade opened"
+                      >
+                        {(t.ml_win_probability * 100).toFixed(0)}%
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
                   <td style={{ color: "var(--muted)" }}>{formatIst(t.opened_at)}</td>
                 </tr>
               ))}
@@ -146,7 +171,8 @@ export default function Scalping() {
           <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--muted)" }}>
-                <th>Method</th><th>Symbol</th><th>Exit reason</th><th>P&amp;L</th><th>R-multiple</th><th>Closed</th>
+                <th>Method</th><th>Symbol</th><th>Option</th><th>Win Prob</th><th>Exit reason</th>
+                <th>P&amp;L</th><th>R-multiple</th><th>Closed</th>
               </tr>
             </thead>
             <tbody>
@@ -154,6 +180,24 @@ export default function Scalping() {
                 <tr key={t.id} style={{ borderTop: "1px solid var(--border)" }}>
                   <td>{SCALPING_METHODS.find((m) => m.name === t.method)?.label ?? t.method}</td>
                   <td>{t.symbol}</td>
+                  <td>
+                    {t.strike_price != null && t.option_side ? (
+                      <span className={`badge ${t.option_side === "CE" ? "badge-green" : "badge-red"}`}>
+                        {t.strike_price} {t.option_side}
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
+                  <td>
+                    {t.ml_win_probability != null ? (
+                      <span className="badge badge-muted" title="Advisory only -- see the Open Scalps column of the same name">
+                        {(t.ml_win_probability * 100).toFixed(0)}%
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
                   <td>{t.exit_reason}</td>
                   <td style={{ color: t.pnl >= 0 ? "var(--green)" : "var(--red)" }}>
                     {t.pnl != null ? (t.pnl >= 0 ? "+" : "") + Number(t.pnl).toFixed(2) : "—"}

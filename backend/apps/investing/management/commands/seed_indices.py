@@ -28,6 +28,12 @@ DEFAULT_INDICES = [
     ("NIFTY FMCG", "NIFTYFMCG", Index.Exchange.NSE),
     ("NIFTY PHARMA", "NIFTYPHARMA", Index.Exchange.NSE),
     ("SENSEX", "SENSEX", Index.Exchange.BSE),
+    # Volatility index, not a basket of stocks -- has a real, working
+    # apps.market_data.broker_client.SYMBOL_TOKENS entry (so it ticks
+    # live) but no NSE constituent CSV to sync (_sync_nse_indices will
+    # just log a harmless "empty response" for it each cycle, same
+    # graceful-skip convention as SENSEX's own BSE gap above).
+    ("INDIA VIX", "INDIAVIX", Index.Exchange.NSE),
 ]
 
 

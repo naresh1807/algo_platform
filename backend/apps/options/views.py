@@ -1,15 +1,16 @@
 from datetime import date
 
+from django.core.cache import cache
 from django.utils import timezone
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import metrics
 from .greeks import compute_greeks_for_contract
-from .models import OptionChainSnapshot, OptionContract
-from .serializers import OptionChainSnapshotSerializer, OptionContractSerializer
+from .models import OptionChainSnapshot, OptionContract, OptionsStrategySetting
+from .serializers import OptionChainSnapshotSerializer, OptionContractSerializer, OptionsStrategySettingSerializer
 from .signals_engine import _latest_underlying_ltp, evaluate_options_signals
 
 
@@ -197,3 +198,69 @@ class BestStrikeView(APIView):
         return Response({
             "underlying": underlying, "expiry": expiry_str, "direction": direction, **result,
         })
+
+
+class OptionsStrategySettingView(APIView):
+    """
+    GET/POST for apps.options.models.OptionsStrategySetting -- the
+    expiry/strike mode preferences apps.options.index_direction_strategy
+    reads via select_expiry()/suggest_best_strike() on every scheduled
+    evaluation. Same DB-backed-singleton pattern as apps.execution.
+    views.ExecutionModeView, minus that view's LIVE-mode confirmation
+    phrase -- changing a strategy preference isn't a real-money-risk
+    action the way flipping to live execution is, so no extra friction.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        row, _ = OptionsStrategySetting.objects.get_or_create(pk=1)
+        return Response(OptionsStrategySettingSerializer(row).data)
+
+    def post(self, request):
+        row, _ = OptionsStrategySetting.objects.get_or_create(pk=1)
+        serializer = OptionsStrategySettingSerializer(row, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save(changed_by=request.user.get_username())
+        return Response(serializer.data)
+
+
+EVALUATE_NOW_COOLDOWN_SECONDS = 30  # per-underlying throttle -- evaluate_index_direction_trade
+# makes live broker calls (spot LTP, option chain quotes) inline in the
+# request/response cycle, and this codebase has real prior AB1021
+# rate-limit-cooldown incident history (see project memory) -- a user
+# mashing a "Re-analyze Now" button must not be able to burst past that
+# on top of the existing 5-minute beat cadence.
+
+
+class EvaluateNowView(APIView):
+    """
+    Manual trigger for apps.options.index_direction_strategy.
+    evaluate_index_direction_trade -- backs the frontend terminal's
+    "Re-analyze Now" button so a trader doesn't have to wait up to 5
+    minutes for the next scheduled beat tick. Thin wrapper only: all the
+    real pipeline logic stays in index_direction_strategy, this view
+    just calls it synchronously and returns the resulting signal.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        underlying = request.data.get("underlying", "NIFTY")
+        timeframe = request.data.get("timeframe", "5m")
+
+        cache_key = f"options:evaluate_now:{underlying}"
+        if cache.get(cache_key):
+            return Response(
+                {"error": f"Please wait a moment before re-analyzing {underlying} again."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        cache.set(cache_key, True, timeout=EVALUATE_NOW_COOLDOWN_SECONDS)
+
+        from apps.signals.serializers import TradingSignalSerializer
+
+        from .index_direction_strategy import evaluate_index_direction_trade
+
+        signal = evaluate_index_direction_trade(underlying, timeframe)
+        return Response(TradingSignalSerializer(signal).data)

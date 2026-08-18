@@ -77,6 +77,19 @@ class OpenPosition(models.Model):
     signal = models.ForeignKey(
         "signals.TradingSignal", on_delete=models.PROTECT, related_name="positions",
     )
+    option_contract = models.ForeignKey(
+        "options.OptionContract", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="positions",
+        help_text=(
+            "Set only when this position is a real option-premium position (copied "
+            "from signal.option_contract at open time, see paper_executor.open_position_"
+            "from_signal) -- entry_price/stop_loss/target_price are OPTION PREMIUM, not "
+            "index points, whenever this is set, and check_and_close_positions fetches "
+            "this contract's own live LTP (apps.options.pricing.latest_ltp_for_contract) "
+            "instead of compute_indicators(symbol), which has no candle history for an "
+            "option contract's own symbol."
+        ),
+    )
     symbol = models.CharField(max_length=32, db_index=True)
     side = models.CharField(max_length=8, choices=PositionSide.choices)
     qty = models.PositiveIntegerField()

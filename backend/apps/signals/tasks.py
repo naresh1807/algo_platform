@@ -36,14 +36,26 @@ def generate_signals_for_watchlist(timeframe: str = "5m"):
     Deliberately does not stop the whole run if one symbol errors --
     logs it and continues, since a data problem with one symbol (e.g.
     a feed gap) shouldn't prevent evaluating the rest of the watchlist.
+
+    Skips every symbol in settings.OPTIONS_PIPELINE_UNDERLYINGS: those
+    trade via a real resolved option contract exclusively through
+    apps.options.index_direction_strategy (apps.options.tasks.
+    run_index_direction_strategy, same 5-minute schedule) instead of this
+    plain index-level engine -- without this skip, both pipelines would
+    write a competing TradingSignal for the same underlying every cycle,
+    and generate_signal()'s signal (no option_contract attached) could
+    just as easily be the one a viewer/executor sees first.
     """
     market_open, reason = is_market_open()
     if not market_open:
         logger.info("generate_signals_for_watchlist skipped: %s", reason)
         return {"skipped": True, "reason": reason}
 
+    options_pipeline_symbols = set(settings.OPTIONS_PIPELINE_UNDERLYINGS)
     results = []
     for symbol in settings.WATCHLIST:
+        if symbol in options_pipeline_symbols:
+            continue
         try:
             signal = generate_signal(symbol, timeframe)
             results.append({"symbol": symbol, "status": signal.status, "signal_id": signal.pk})

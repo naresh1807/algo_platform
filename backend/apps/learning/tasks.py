@@ -440,6 +440,23 @@ def retrain_win_probability_model():
 
 
 @shared_task
+def retrain_scalp_win_probability_model():
+    """
+    Daily retrain of the SCALPING win-probability model (config/celery.py
+    beat_schedule, right after evaluate-scalping-strategy-methods-daily) --
+    see apps.learning.scalp_ml_train.train_scalp_win_probability_model for
+    the training logic and why this is a separate model from
+    retrain_win_probability_model's, trained only on closed scalping
+    HypotheticalTrade rows. Same no-op-until-enough-data safety as that
+    task -- returns trained=False with a reason rather than erroring until
+    apps.learning.scalp_ml_train.MIN_TRAINING_SAMPLES closed scalps exist.
+    """
+    from apps.learning.scalp_ml_train import train_scalp_win_probability_model
+
+    return train_scalp_win_probability_model()
+
+
+@shared_task
 def retrain_technical_direction_models():
     """
     Weekly retrain of apps.learning.ml_technical's technical-direction
@@ -513,6 +530,45 @@ def _hypothetical_r_multiple(trade) -> float | None:
     return float(trade.pnl) / risk_amount
 
 
+def _suggest_option_for_idea(symbol: str, idea: dict) -> tuple[str | None, float | None]:
+    """
+    Advisory-only CE/PE + strike suggestion attached to a HypotheticalTrade
+    at open time (see that model's option_side/strike_price fields for
+    why) -- every trader-requested detail ("which contract would I
+    actually trade") without changing what the trade simulates against
+    (still the underlying's own entry/stop/target). Direction is read
+    off the idea itself (stop_loss below entry = long/bullish = CE,
+    same convention as apps.signals.engine reading regime/technical
+    conditions) rather than hardcoded, so this keeps working correctly
+    if a short-side comparison method is ever added to
+    apps.learning.strategy_methods -- today all six of them are long-only.
+
+    Never raises and never blocks opening the (real, underlying-based)
+    hypothetical trade -- (None, None) whenever no options data is
+    synced for this underlying yet, or the strike selector can't score
+    anything, same "missing data isn't a hard error" stance
+    apps.options.strike_selector.suggest_best_strike's own callers
+    already take.
+    """
+    try:
+        from apps.options.signals_engine import nearest_expiry
+        from apps.options.strike_selector import suggest_best_strike
+
+        direction = "bullish" if idea["stop_loss"] < idea["entry_price"] else "bearish"
+        expiry = nearest_expiry(symbol)
+        if expiry is None:
+            return None, None
+        result = suggest_best_strike(symbol, expiry, direction)
+        suggested = result.get("suggested")
+        if not suggested:
+            return None, None
+        option_side = "CE" if direction == "bullish" else "PE"
+        return option_side, suggested["strike"]
+    except Exception:
+        logger.exception("_suggest_option_for_idea failed for %s -- leaving option_side/strike_price null.", symbol)
+        return None, None
+
+
 def _run_comparison_cycle(method_funcs: dict, timeframe: str, max_holding_bars: int, task_name: str) -> dict:
     """
     Shared open/close/timeout cycle for BOTH the 5m swing comparison
@@ -529,6 +585,7 @@ def _run_comparison_cycle(method_funcs: dict, timeframe: str, max_holding_bars: 
     from apps.market_data.models import HistoricalData
 
     from .models import HypotheticalTrade
+    from .strategy_methods import SCALPING_METHOD_FUNCS
 
     tf_minutes = _TIMEFRAME_MINUTES.get(timeframe, 5)
     results = {"opened": [], "closed": [], "errors": []}
@@ -573,7 +630,38 @@ def _run_comparison_cycle(method_funcs: dict, timeframe: str, max_holding_bars: 
                 idea = generate_idea(symbol, timeframe)
                 if idea is None:
                     continue
-                trade = HypotheticalTrade.objects.create(method=method, symbol=symbol, timeframe=timeframe, **idea)
+                option_side, strike_price = _suggest_option_for_idea(symbol, idea)
+
+                # "ind" is only present for SCALPING_METHOD_FUNCS ideas
+                # (see strategy_methods.py's module docstring) -- pop it
+                # out before spreading `idea` into create() below (that
+                # dict must only contain real HypotheticalTrade fields)
+                # and convert it to the ind_* columns apps.learning.
+                # scalp_ml_train trains on, via the exact same helper
+                # apps.signals.engine uses for TradingSignal's identical
+                # columns, so the two never normalize NaN/scale
+                # differently.
+                ind = idea.pop("ind", None)
+                ind_fields = {}
+                if ind is not None:
+                    from apps.signals.engine import _indicator_signal_fields
+
+                    ind_fields = _indicator_signal_fields(ind)
+
+                trade = HypotheticalTrade.objects.create(
+                    method=method, symbol=symbol, timeframe=timeframe,
+                    option_side=option_side, strike_price=strike_price,
+                    **idea, **ind_fields,
+                )
+
+                if method in SCALPING_METHOD_FUNCS:
+                    from .scalp_ml_predict import predict_scalp_win_probability
+
+                    probability = predict_scalp_win_probability(trade)
+                    if probability is not None:
+                        trade.ml_win_probability = probability
+                        trade.save(update_fields=["ml_win_probability"])
+
                 results["opened"].append({"method": method, "symbol": symbol, "id": trade.pk})
             except Exception:
                 logger.exception("%s: failed for %s/%s", task_name, method, symbol)
@@ -637,6 +725,58 @@ def run_scalping_strategy_comparison(timeframe: str = "1m"):
     return _run_comparison_cycle(
         SCALPING_METHOD_FUNCS, timeframe, SCALPING_COMPARISON_MAX_HOLDING_BARS, "run_scalping_strategy_comparison",
     )
+
+
+@shared_task
+def run_scalping_real_execution():
+    """
+    Real (paper-mode) option-position execution for the scalping methods
+    -- an ADDITIONAL path alongside run_scalping_strategy_comparison
+    above, not a replacement (that task and its HypotheticalTrade
+    comparison data are completely untouched by this one). See
+    apps.learning.scalp_execution's module docstring for the full
+    reasoning, including why real trades from this task now compete with
+    apps.options.index_direction_strategy's own signals for the shared
+    one-open-position-per-symbol risk-engine slot.
+
+    Own 1-minute beat schedule entry, same cadence as
+    run_scalping_strategy_comparison, for the same reason (checking a
+    scalp's stop/target only every 5 minutes would defeat the point) --
+    exit-checking is apps.execution.paper_executor.check_and_close_positions,
+    already option-contract-aware and safe to call repeatedly, run once
+    here after every method/symbol combo has had a chance to open.
+    """
+    from apps.market_data.market_hours import is_market_open
+
+    from .scalp_execution import evaluate_and_open_scalp
+    from .strategy_methods import SCALPING_METHOD_FUNCS
+
+    is_open, reason = is_market_open()
+    if not is_open:
+        logger.info("run_scalping_real_execution: market closed (%s) -- skipping.", reason)
+        return {"skipped": True, "reason": reason}
+
+    from django.conf import settings
+
+    results = {"signals": [], "errors": []}
+    for method, generate_idea in SCALPING_METHOD_FUNCS.items():
+        for symbol in settings.WATCHLIST:
+            symbol = symbol.strip()
+            try:
+                signal = evaluate_and_open_scalp(method, generate_idea, symbol)
+                if signal is not None:
+                    results["signals"].append({
+                        "method": method, "symbol": symbol,
+                        "status": signal.status, "signal_id": signal.pk,
+                    })
+            except Exception:
+                logger.exception("run_scalping_real_execution: failed for %s/%s", method, symbol)
+                results["errors"].append(f"{method}/{symbol}")
+
+    from apps.execution.paper_executor import check_and_close_positions
+
+    results["position_updates"] = check_and_close_positions("1m")
+    return results
 
 
 def _evaluate_method_group(method_funcs: dict, task_name: str) -> dict:

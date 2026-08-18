@@ -53,6 +53,19 @@ class TradingSignal(models.Model):
         max_digits=12, decimal_places=2, null=True, blank=True,
         help_text="The suggested option contract's strike, when option_side is set.",
     )
+    option_contract = models.ForeignKey(
+        "options.OptionContract", null=True, blank=True,
+        on_delete=models.PROTECT, related_name="signals",
+        help_text=(
+            "Set only by apps.options.index_direction_strategy when suggest_best_strike "
+            "resolved an actual OptionContract row for this signal -- this (not "
+            "option_side/strike_price, which are display-only) is what "
+            "apps.execution.paper_executor keys off to open a real option-premium "
+            "position instead of the underlying-index proxy. entry_price/stop_loss/"
+            "target_1/target_2 are in OPTION PREMIUM terms whenever this is set, not "
+            "index points -- see index_direction_strategy's own docstring."
+        ),
+    )
 
     total_score = models.FloatField()
     technical_score = models.FloatField()
@@ -123,7 +136,31 @@ class TradingSignal(models.Model):
     )
 
 
+    class RejectionStage(models.TextChoices):
+        DIRECTION = "direction", "Underlying Direction"
+        SUCCESS_RATE = "success_rate", "Historical Success Rate"
+        SENTIMENT = "sentiment", "Sentiment Veto"
+        OPTIONS_CONFLUENCE = "options_confluence", "Options-Chain Confluence"
+        EXPIRY = "expiry", "Expiry Selection"
+        STRIKE = "strike", "Strike Selection"
+        LIQUIDITY = "liquidity", "Liquidity Validation"
+        RISK = "risk", "Risk Validation"
+        ML_CONFIDENCE = "ml_confidence", "ML Confidence"
+        LOT_SIZE = "lot_size", "Lot-Size Rounding"
+
     status = models.CharField(max_length=16, choices=SignalStatus.choices, default=SignalStatus.PENDING)
+    rejection_stage = models.CharField(
+        max_length=24, choices=RejectionStage.choices, null=True, blank=True,
+        help_text=(
+            "Only set by apps.options.index_direction_strategy, on a REJECTED/NO_TRADE "
+            "signal, to the first pipeline stage that added a reason to `reasons` -- "
+            "lets the frontend render a real 'which stage did this die at' lifecycle "
+            "waterfall instead of parsing the free-text `reason` string. Null for "
+            "APPROVED signals and for every signal apps.signals.engine.generate_signal "
+            "produces (that engine has no equivalent multi-stage pipeline to attribute "
+            "a rejection to)."
+        ),
+    )
     reason = models.TextField(
         help_text="Human-readable explanation, especially for rejections -- "
                   "this is what the daily review reads."

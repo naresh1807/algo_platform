@@ -189,6 +189,19 @@ SYMBOL_TOKENS = {
     "NIFTYFMCG": {"token": "99926021", "exchange": "NSE"},
     "NIFTYPHARMA": {"token": "99926023", "exchange": "NSE"},
     "SENSEX": {"token": "99919000", "exchange": "BSE"},
+    # Confirmed live against Angel One's real instrument master
+    # 2026-08-17 (apps.options.instrument_master.get_instrument_master,
+    # exch_seg=NSE, instrumenttype=AMXIDX, symbol="India VIX") -- adding
+    # it here is what makes it join the live SmartWebSocketV2 tick
+    # subscription in broker_ws_client._connect_and_subscribe, same as
+    # every other row in this dict; apps.investing.live_feed.
+    # handle_index_tick then picks it up automatically once a matching
+    # Index row exists (see seed_indices.DEFAULT_INDICES), no other
+    # wiring needed. No SGX Nifty entry -- confirmed zero matches for
+    # "SGX"/"GIFT" in the same instrument master; SGX Nifty was
+    # discontinued in favor of GIFT Nifty (NSE IX, GIFT City), a
+    # segment Angel One's retail API doesn't expose.
+    "INDIAVIX": {"token": "99926017", "exchange": "NSE"},
 }
 
 
@@ -370,17 +383,28 @@ class BrokerClient:
         }
 
     def fetch_recent_candles(
-        self, symbol: str, timeframe: str, lookback_days: int = 5
+        self, symbol: str, timeframe: str, lookback_days: int = 5, to_date: datetime | None = None,
     ) -> list[dict]:
         """
         Returns a list of dicts shaped exactly like HistoricalData's
         fields (minus id/source) so apps.market_data.tasks can bulk-
         create them directly. lookback_days is intentionally small
-        (default 5) for the *recurring* ingestion job -- a separate,
-        manually-run backfill (not built here) is the right tool for
-        pulling years of history; the recurring job just needs to catch
-        up on whatever's new since the last run, and unique_together on
-        HistoricalData makes re-fetching overlapping days harmless.
+        (default 5) for the *recurring* ingestion job -- pulling years
+        of history is apps.market_data.management.commands.
+        backfill_historical_candles's job instead; the recurring job
+        just needs to catch up on whatever's new since the last run,
+        and unique_together on HistoricalData makes re-fetching
+        overlapping days harmless.
+
+        to_date: defaults to now (every existing caller's behavior,
+        unchanged) -- backfill_historical_candles passes an explicit,
+        walked-backward value instead, since a single Angel One request
+        is capped per-interval (MAX_LOOKBACK_DAYS below, e.g. 30 days
+        for 1m candles) well short of a year; getting a full year of
+        finer-than-daily history means calling this repeatedly with
+        `to_date` stepped back by one window each time, not one call
+        with a bigger lookback_days (which just gets silently clamped,
+        see below).
         """
         if symbol not in SYMBOL_TOKENS:
             raise ValueError(
@@ -420,7 +444,7 @@ class BrokerClient:
         # own trading-hours convention means. Getting this wrong doesn't
         # raise an error -- it silently fetches the wrong 5.5-hour
         # window, which is a worse failure mode than a crash.
-        to_date = django_timezone.localtime(django_timezone.now())
+        to_date = django_timezone.localtime(to_date) if to_date is not None else django_timezone.localtime(django_timezone.now())
         from_date = to_date - timedelta(days=lookback_days)
 
         response = self._smartapi_request(
@@ -553,6 +577,9 @@ class BrokerClient:
         qty: int,
         order_type: str = "MARKET",
         price: float = 0.0,
+        symbol_token: str | None = None,
+        exchange: str | None = None,
+        tradingsymbol: str | None = None,
     ) -> str:
         """
         Places a real order. transaction_type is "BUY" or "SELL".
@@ -566,18 +593,37 @@ class BrokerClient:
         trade has already been made and approved. This function's only
         job is "send exactly this order to the broker, and report
         exactly what came back."
+
+        symbol_token/exchange/tradingsymbol: optional overrides so this
+        same function can place an order for ANY resolved instrument --
+        e.g. apps.execution.live_executor placing a real NFO option
+        order using an apps.options.OptionContract's own symbol_token/
+        tradingsymbol -- not just the small hard-coded SYMBOL_TOKENS map
+        below (index cash-segment symbols only). When all three are
+        given, the SYMBOL_TOKENS lookup is skipped entirely; `symbol`
+        is still used as `tradingsymbol` unless `tradingsymbol` is also
+        explicitly given. Every pre-existing caller passes none of
+        these and is unaffected.
         """
-        if symbol not in SYMBOL_TOKENS:
-            raise ValueError(f"No symboltoken configured for {symbol}.")
-        token_info = SYMBOL_TOKENS[symbol]
+        if symbol_token and exchange:
+            token = symbol_token
+            exch = exchange
+            trading_symbol = tradingsymbol or symbol
+        else:
+            if symbol not in SYMBOL_TOKENS:
+                raise ValueError(f"No symboltoken configured for {symbol}.")
+            token_info = SYMBOL_TOKENS[symbol]
+            token = token_info["token"]
+            exch = token_info["exchange"]
+            trading_symbol = symbol
         connection = self._connect()
 
         order_params = {
             "variety": "NORMAL",
-            "tradingsymbol": symbol,
-            "symboltoken": token_info["token"],
+            "tradingsymbol": trading_symbol,
+            "symboltoken": token,
             "transactiontype": transaction_type,
-            "exchange": token_info["exchange"],
+            "exchange": exch,
             "ordertype": order_type,
             "producttype": "INTRADAY",
             "duration": "DAY",

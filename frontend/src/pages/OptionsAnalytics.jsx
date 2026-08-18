@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import OptionChainTable from "../components/OptionChainTable.jsx";
 import OptionContractChartModal from "../components/OptionContractChartModal.jsx";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
@@ -18,28 +19,6 @@ const selectStyle = {
   background: "var(--panel)", color: "var(--text)",
   border: "1px solid var(--border)", borderRadius: 6, padding: 6,
 };
-
-// Thin background bar behind an OI number, width scaled to the max OI
-// currently visible in the chain -- the same "scan the bars, not the
-// digits" convention real broker option-chain screens use so OI
-// concentration reads at a glance. `side` picks which edge the bar
-// grows from (call side reads right-to-left toward the strike, put
-// side left-to-right) so both halves visually point at the strike
-// column between them.
-function OiCell({ value, max, side }) {
-  const pct = max > 0 && value != null ? Math.max(2, (value / max) * 100) : 0;
-  return (
-    <span className="chain-oi-bar-wrap">
-      {pct > 0 && (
-        <span
-          className={`chain-oi-bar ${side === "put" ? "chain-oi-bar-red" : ""}`}
-          style={{ [side === "call" ? "right" : "left"]: 0, width: `${pct}%` }}
-        />
-      )}
-      <span className="chain-oi-value">{value != null ? value.toLocaleString() : "—"}</span>
-    </span>
-  );
-}
 
 /**
  * manual section 6: "Options Analytics" + the option-chain grid itself
@@ -214,19 +193,6 @@ export default function OptionsAnalytics() {
     setBestStrike(null);
   }, [underlying, expiry]);
 
-  // Scales the OI depth bars behind each OI cell -- one shared max
-  // across both call/put columns (not per-side) so a glance at bar
-  // width is comparable across the whole visible ladder, matching how
-  // a real chain's OI concentration reads at a glance.
-  const maxOi = useMemo(() => {
-    let max = 0;
-    for (const row of chainRows) {
-      if (row.call?.open_interest > max) max = row.call.open_interest;
-      if (row.put?.open_interest > max) max = row.put.open_interest;
-    }
-    return max;
-  }, [chainRows]);
-
   // The strike closest to the live underlying price -- "ATM" (at the
   // money) in options terminology. chainRows is already strike-sorted
   // ascending (see the WebSocket-merge effect above, which re-sorts on
@@ -307,107 +273,15 @@ export default function OptionsAnalytics() {
         {error && <p style={{ color: "var(--red)" }}>{error}</p>}
 
         {expiry && !chainLoading && chainRows.length > 0 && (
-          <div ref={chainContainerRef} style={{ overflowX: "auto", overflowY: "auto", maxHeight: 480, marginTop: 12 }}>
-            <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ color: "var(--muted)", textAlign: "right" }}>
-                  <th className="chain-th">Δ</th>
-                  <th className="chain-th">IV</th>
-                  <th className="chain-th">OI</th>
-                  <th className="chain-th">Chg OI</th>
-                  <th className="chain-th">Vol</th>
-                  <th className="chain-th">Bid</th>
-                  <th className="chain-th">Ask</th>
-                  <th className="chain-th">LTP</th>
-                  <th className="chain-th" style={{ textAlign: "center" }}>Strike</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>LTP</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>Bid</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>Ask</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>Vol</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>Chg OI</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>OI</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>IV</th>
-                  <th className="chain-th" style={{ textAlign: "left" }}>Δ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {chainRows.map((row) => {
-                  const isAtm = row.strike === atmStrike;
-                  // ITM = "in the money": a call is worth intrinsic value
-                  // once spot has moved past its strike, a put the
-                  // opposite way -- the light per-side tint real chains
-                  // use so it's obvious which half of each row is
-                  // currently "live" premium vs. mostly time value.
-                  const callItm = spot != null && row.strike < spot;
-                  const putItm = spot != null && row.strike > spot;
-                  const callFlash = flash[`${row.strike}-call`];
-                  const putFlash = flash[`${row.strike}-put`];
-                  return (
-                  <tr
-                    key={row.strike}
-                    ref={isAtm ? atmRowRef : null}
-                    className="chain-row"
-                    style={{
-                      borderTop: "1px solid var(--border)",
-                      background: isAtm ? "color-mix(in srgb, var(--accent) 14%, transparent)" : undefined,
-                    }}
-                  >
-                    <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)", background: callItm && !isAtm ? "color-mix(in srgb, var(--green) 6%, transparent)" : undefined }}>
-                      {row.call?.greeks?.delta != null ? row.call.greeks.delta.toFixed(2) : "—"}
-                    </td>
-                    <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)" }}>{row.call?.iv ?? "—"}</td>
-                    <td className="chain-td" style={{ textAlign: "right" }}><OiCell value={row.call?.open_interest} max={maxOi} side="call" /></td>
-                    <td className="chain-td" style={{ textAlign: "right", color: (row.call?.change_in_oi ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {row.call?.change_in_oi?.toLocaleString() ?? "—"}
-                    </td>
-                    <td className="chain-td" style={{ textAlign: "right" }}>{row.call?.volume?.toLocaleString() ?? "—"}</td>
-                    <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)" }}>{row.call?.bid ?? "—"}</td>
-                    <td className="chain-td" style={{ textAlign: "right", color: "var(--muted)" }}>{row.call?.ask ?? "—"}</td>
-                    <td
-                      className={`chain-td ${callFlash === "up" ? "chain-flash-up" : callFlash === "down" ? "chain-flash-down" : ""}`}
-                      style={{ textAlign: "right", fontWeight: 600, cursor: row.call?.ltp != null ? "pointer" : undefined }}
-                      title={row.call?.ltp != null ? "View this contract's price chart" : undefined}
-                      onClick={() => {
-                        if (row.call?.ltp == null) return;
-                        setSelectedContract({ strike: row.strike, optionType: "CE", underlying, expiry });
-                      }}
-                    >
-                      {row.call?.ltp ?? "—"}
-                    </td>
-                    <td className="chain-td" style={{ textAlign: "center" }}>
-                      <span style={{ fontWeight: 600, color: isAtm ? "var(--accent)" : undefined }}>{row.strike}</span>
-                      {isAtm && <span className="badge badge-accent" style={{ marginLeft: 6 }}>ATM</span>}
-                    </td>
-                    <td
-                      className={`chain-td ${putFlash === "up" ? "chain-flash-up" : putFlash === "down" ? "chain-flash-down" : ""}`}
-                      style={{ fontWeight: 600, cursor: row.put?.ltp != null ? "pointer" : undefined }}
-                      title={row.put?.ltp != null ? "View this contract's price chart" : undefined}
-                      onClick={() => {
-                        if (row.put?.ltp == null) return;
-                        setSelectedContract({ strike: row.strike, optionType: "PE", underlying, expiry });
-                      }}
-                    >
-                      {row.put?.ltp ?? "—"}
-                    </td>
-                    <td className="chain-td" style={{ color: "var(--muted)" }}>{row.put?.bid ?? "—"}</td>
-                    <td className="chain-td" style={{ color: "var(--muted)" }}>{row.put?.ask ?? "—"}</td>
-                    <td className="chain-td">{row.put?.volume?.toLocaleString() ?? "—"}</td>
-                    <td className="chain-td" style={{ color: (row.put?.change_in_oi ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {row.put?.change_in_oi?.toLocaleString() ?? "—"}
-                    </td>
-                    <td className="chain-td" style={{ background: putItm && !isAtm ? "color-mix(in srgb, var(--red) 6%, transparent)" : undefined }}>
-                      <OiCell value={row.put?.open_interest} max={maxOi} side="put" />
-                    </td>
-                    <td className="chain-td" style={{ color: "var(--muted)" }}>{row.put?.iv ?? "—"}</td>
-                    <td className="chain-td" style={{ color: "var(--muted)" }}>
-                      {row.put?.greeks?.delta != null ? row.put.greeks.delta.toFixed(2) : "—"}
-                    </td>
-                  </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <OptionChainTable
+            rows={chainRows}
+            spot={spot}
+            atmStrike={atmStrike}
+            flash={flash}
+            containerRef={chainContainerRef}
+            atmRowRef={atmRowRef}
+            onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType, underlying, expiry })}
+          />
         )}
         {expiry && !chainLoading && chainRows.length === 0 && !error && (
           <p style={{ color: "var(--muted)", marginTop: 12 }}>

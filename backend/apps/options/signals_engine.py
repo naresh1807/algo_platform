@@ -219,6 +219,70 @@ def nearest_expiry(underlying: str) -> date | None:
     )
 
 
+def select_expiry(underlying: str, mode: str | None = None) -> date | None:
+    """
+    The configurable counterpart to nearest_expiry() above (which stays
+    untouched -- other callers, e.g. apps.jarvis, keep using it exactly
+    as before). mode: "current_week"/"next_week"/"monthly"/"custom"
+    (case-insensitive), or None to read apps.options.models.
+    OptionsStrategySetting.expiry_mode.
+
+    Every mode still only ever returns an expiry that ALREADY has synced
+    OptionContract rows for this underlying -- "what the correct expiry
+    is" (a live-data question, answered from the real broker instrument
+    master for MONTHLY) is kept separate from "have we synced it yet" (a
+    local-data question), so a not-yet-synced correct expiry returns
+    None (an honest "not there yet") rather than silently falling back
+    to nearest_expiry's answer and trading the wrong expiry.
+    """
+    from .models import get_options_strategy_settings
+
+    if mode is None:
+        mode = get_options_strategy_settings().expiry_mode
+    mode = mode.lower()
+
+    synced = list(
+        OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
+        .order_by("expiry").values_list("expiry", flat=True).distinct()
+    )
+    if not synced:
+        return None
+
+    if mode == "current_week":
+        return synced[0]
+
+    if mode == "next_week":
+        return synced[1] if len(synced) > 1 else None
+
+    if mode == "monthly":
+        # "Monthly" isn't a flag Angel One's instrument master exposes
+        # directly -- it's the LAST weekly expiry that falls within the
+        # earliest calendar month among the underlying's real listed
+        # expiries (NSE's actual monthly-expiry convention). Determined
+        # from live broker data (list_expiries), not merely from
+        # whatever happens to already be synced, so the answer doesn't
+        # depend on how many expiries a past sync run happened to pull.
+        from .instrument_master import list_expiries
+
+        listed = list_expiries(underlying, limit=12)
+        if not listed:
+            return None
+        earliest_month = (listed[0].year, listed[0].month)
+        in_month = [e for e in listed if (e.year, e.month) == earliest_month]
+        monthly_expiry = max(in_month)
+        return monthly_expiry if monthly_expiry in synced else None
+
+    if mode == "custom":
+        from .models import get_options_strategy_settings
+
+        custom = get_options_strategy_settings().custom_expiry
+        if custom is None or custom not in synced:
+            return None
+        return custom
+
+    return None
+
+
 # How many of the *directional* options-flow signals (buildup/covering/
 # unwinding -- excludes the risk-only flags below) must agree with the
 # technical setup's direction for options to count as confirming it.

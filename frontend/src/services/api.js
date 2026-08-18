@@ -72,6 +72,10 @@ export const endpoints = {
   killSwitch: () => api.get("/risk/kill-switch/"),
   equity: () => api.get("/risk/equity/"),
   performance: () => api.get("/analytics/performance/", { params: { page_size: 500 } }),
+  // apps.analytics.views.DailyPnLReportView -- today's row is always
+  // refreshed live server-side (today isn't over yet), past days read
+  // straight from the stored PerformanceMetrics table.
+  dailyPnLReport: (days = 30) => api.get("/analytics/daily-pnl/", { params: { days } }),
   dailyReviews: () => api.get("/learning/daily-reviews/", { params: { page_size: 500 } }),
   driftEvents: () => api.get("/learning/drift-events/", { params: { page_size: 500 } }),
   strategyVersions: () => api.get("/learning/strategy-versions/", { params: { page_size: 500 } }),
@@ -112,6 +116,19 @@ export const endpoints = {
   optionChain: (underlying, expiry) => api.get("/options/chain/", { params: { underlying, expiry } }),
   bestStrike: (underlying, expiry, direction) =>
     api.get("/options/best-strike/", { params: { underlying, expiry, direction } }),
+  // apps.options.views.OptionsStrategySettingView -- the expiry/strike
+  // mode preferences (current week/next week/monthly/custom expiry;
+  // ATM/ITM/OTM/AI strike selection) apps.options.index_direction_strategy
+  // reads on every scheduled evaluation. Same GET/POST singleton pattern
+  // as executionMode()/setExecutionMode() above.
+  optionsStrategySettings: () => api.get("/options/strategy-settings/"),
+  setOptionsStrategySettings: (settings) => api.post("/options/strategy-settings/", settings),
+  // apps.options.views.EvaluateNowView -- manual "Re-analyze Now" trigger
+  // for apps.options.index_direction_strategy.evaluate_index_direction_trade,
+  // instead of waiting up to 5 minutes for the next scheduled beat tick.
+  // Server-side throttled per underlying (EVALUATE_NOW_COOLDOWN_SECONDS).
+  evaluateNow: (underlying, timeframe = "5m") =>
+    api.post("/options/evaluate/", { underlying, timeframe }),
   // One contract's own LTP/OI/volume/IV history (OptionChainSnapshotViewSet
   // filtered down to a single strike+side) -- powers the option-chain
   // "click a strike to see its own price chart" popup, page_size=200 to

@@ -42,11 +42,14 @@ def open_position_from_signal(signal) -> OpenPosition:
     "approved" with an orphaned position, or vice versa.
 
     side is derived from signal_type (BUY -> LONG, SELL -> SHORT) --
-    e.g. apps.options.index_direction_strategy produces SELL signals
-    for its PE-side case (buying a put is, payoff-wise, a bet that
-    profits as the underlying falls, same direction as going short the
-    underlying -- see that module's docstring for why it trades the
-    underlying itself rather than a real option contract).
+    EXCEPT when signal.option_contract is set (apps.options.
+    index_direction_strategy's real-option-order path): buying a CE or a
+    PE is always a LONG bet on THAT OPTION's own premium regardless of
+    which side it is, so side is forced to LONG there, and the position's
+    symbol/entry/stop/target come from the option contract's own
+    tradingsymbol/premium (already what signal carries in that case, see
+    TradingSignal.option_contract's docstring), not signal.symbol
+    (the underlying's name).
 
     Raises ValueError (and marks the signal REJECTED instead of
     EXECUTED) if position_size rounds down to 0 -- reachable in
@@ -72,7 +75,9 @@ def open_position_from_signal(signal) -> OpenPosition:
         signal.save(update_fields=["status", "reason"])
         raise ValueError(f"Cannot open a paper position for {signal.symbol} with qty=0.")
 
-    side = PositionSide.LONG if signal.signal_type == SignalType.BUY else PositionSide.SHORT
+    is_option_order = signal.option_contract_id is not None
+    side = PositionSide.LONG if is_option_order or signal.signal_type == SignalType.BUY else PositionSide.SHORT
+    position_symbol = signal.option_contract.tradingsymbol if is_option_order else signal.symbol
 
     trailing_distance = None
     peak_price = None
@@ -87,7 +92,8 @@ def open_position_from_signal(signal) -> OpenPosition:
     with transaction.atomic():
         position = OpenPosition.objects.create(
             signal=signal,
-            symbol=signal.symbol,
+            option_contract=signal.option_contract if is_option_order else None,
+            symbol=position_symbol,
             side=side,
             # Already an int (see the qty=0 guard above) -- signal.position_size
             # itself is a DecimalField, and OpenPosition.qty (PositiveIntegerField)
@@ -118,6 +124,7 @@ def open_position_from_signal(signal) -> OpenPosition:
         details={
             "symbol": position.symbol, "side": position.side, "qty": position.qty,
             "entry_price": str(position.entry_price), "mode": "paper",
+            "option_contract_id": signal.option_contract_id,
         },
     )
     return position
@@ -178,20 +185,39 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
     price levels -- these always take priority over the softer
     "should_exit_position" indicator-based exit), then fall back to
     the technical exit conditions from apps.signals.engine.
+
+    Option positions (position.option_contract set -- see that field's
+    docstring) are priced from a live option-chain quote
+    (apps.options.pricing.latest_ltp_for_contract) instead of
+    compute_indicators(position.symbol), which has no candle history for
+    an option contract's own symbol, and skip the should_exit_position
+    technical-exit fallback for the same reason -- stop/target are the
+    only exit triggers for these positions. They're also always LONG
+    (buying an option is always long its own premium), so only the LONG
+    side of the stop/target comparison below ever applies to them.
     """
     results = []
     for position in OpenPosition.objects.filter(closed_at__isnull=True):
-        ind = compute_indicators(position.symbol, timeframe)
-        if ind is None:
-            continue
-        current_price = Decimal(str(ind["close"]))
+        if position.option_contract_id is not None:
+            from apps.options.pricing import latest_ltp_for_contract
+
+            ltp = latest_ltp_for_contract(position.option_contract)
+            if ltp is None:
+                continue
+            current_price = Decimal(str(ltp))
+        else:
+            ind = compute_indicators(position.symbol, timeframe)
+            if ind is None:
+                continue
+            current_price = Decimal(str(ind["close"]))
 
         from .trailing_stop import update_trailing_stop
         update_trailing_stop(position, current_price)
 
         # SHORT's stop sits ABOVE entry (price rising is the adverse
         # move) and target sits BELOW entry -- the opposite of LONG --
-        # so both comparisons flip by side.
+        # so both comparisons flip by side. Option positions are always
+        # LONG (see docstring above), so they always take this branch.
         if position.side == PositionSide.LONG:
             stop_hit = current_price <= position.stop_loss
             target_hit = position.target_price is not None and current_price >= position.target_price
@@ -209,11 +235,12 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
             results.append({"symbol": position.symbol, "closed": True, "reason": "target"})
             continue
 
-        should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
-        if should_exit:
-            close_position(position, current_price, f"Technical exit: {', '.join(exit_reasons)}")
-            results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})
-            continue
+        if position.option_contract_id is None:
+            should_exit, exit_reasons = should_exit_position(position.symbol, timeframe, position.side)
+            if should_exit:
+                close_position(position, current_price, f"Technical exit: {', '.join(exit_reasons)}")
+                results.append({"symbol": position.symbol, "closed": True, "reason": "technical_exit"})
+                continue
 
         mark_to_market(position, current_price)
         results.append({"symbol": position.symbol, "closed": False})

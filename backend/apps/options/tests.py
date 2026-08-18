@@ -99,6 +99,49 @@ class LatestSnapshotsCorrelationTests(TestCase):
         self.assertEqual(result[0].open_interest, 2000)
 
 
+class SuggestBestStrikeTests(TestCase):
+    """
+    apps.options.strike_selector.suggest_best_strike -- specifically that
+    a winning candidate's dict carries "contract_id", which is what
+    apps.options.index_direction_strategy uses to load the real
+    OptionContract row for real-option execution (see that module's
+    docstring) instead of a second (underlying, expiry, strike,
+    option_type) lookup.
+    """
+
+    def test_suggested_candidate_carries_contract_id(self):
+        from apps.market_data.models import HistoricalData
+
+        from .strike_selector import suggest_best_strike
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500,
+            volume=100000, source="test",
+        )
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400,
+            option_type="CE", symbol_token="tok_ce_24400", tradingsymbol="NIFTY24400CE",
+            lot_size=25,
+        )
+        # ltp chosen so its Black-Scholes-implied delta (~0.59) lands
+        # inside strike_selector.DELTA_SWEET_SPOT (0.35-0.65) -- see
+        # GreeksTests above for how this module already checks the
+        # underlying math; this fixture just needs ONE real candidate to
+        # clear that filter so "suggested" is non-null.
+        OptionChainSnapshot.objects.create(
+            contract=contract, timestamp=timezone.now(),
+            ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000,
+        )
+
+        result = suggest_best_strike("NIFTY", expiry, direction="bullish")
+
+        self.assertIsNotNone(result["suggested"])
+        self.assertEqual(result["suggested"]["contract_id"], contract.pk)
+        self.assertEqual(result["suggested"]["strike"], 24400.0)
+
+
 class GreeksTests(TestCase):
     """
     Pure-math tests (no DB) for apps.options.greeks -- checked against
@@ -319,9 +362,15 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
             "headline_count": 3, "confidence": 0.5,
         }
         options_result = {"score": 0.6, "veto": False, "veto_reason": "", "detail": "forced confirming for test"}
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=24400,
+            option_type="PE", symbol_token="tok_pe_24400", tradingsymbol="NIFTY24400PE",
+            lot_size=1,  # =1 so the mocked position_size below survives lot-rounding unchanged
+        )
         suggestion = {
             "suggested": {
-                "strike": 24400.0, "ltp": 110.0, "open_interest": 1000, "volume": 500,
+                "contract_id": contract.pk,
+                "strike": 24400.0, "ltp": 110.0, "bid": 109.0, "ask": 111.0, "open_interest": 1000, "volume": 500,
                 "delta": -0.4, "theta": -10, "vega": 5, "iv": 15, "in_sweet_spot": True, "score": 0.7,
             },
             "reason": "24400 PE test suggestion", "candidates": [],
@@ -342,16 +391,20 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
              patch.object(strat, "success_rate_for_side", return_value=success), \
              patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
              patch.object(strat, "options_confluence_score", return_value=options_result), \
-             patch.object(strat, "nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "select_expiry", return_value=date.today() + timedelta(days=7)), \
              patch.object(strat, "suggest_best_strike", return_value=suggestion), \
              patch.object(strat, "check_pre_trade", return_value=risk_decision):
             signal = strat.evaluate_index_direction_trade("NIFTY", "5m")
 
         self.assertIsInstance(signal, TradingSignal)
         self.assertEqual(signal.status, SignalStatus.APPROVED)
-        self.assertEqual(signal.signal_type, SignalType.SELL)
+        # Always BUY once a real contract resolves -- buying a PE is a LONG
+        # bet on that PE's own premium, not a SELL/short (see
+        # index_direction_strategy's module docstring).
+        self.assertEqual(signal.signal_type, SignalType.BUY)
         self.assertEqual(signal.option_side, "PE")
         self.assertEqual(signal.strike_price, 24400.0)
+        self.assertEqual(signal.option_contract_id, contract.pk)
 
     def _run_with_sentiment(self, direction: str, sentiment_extra: dict):
         """Shared plumbing for the direction-aware sentiment veto tests below."""
@@ -383,9 +436,15 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
             **sentiment_extra,
         }
         options_result = {"score": 0.6, "veto": False, "veto_reason": "", "detail": "forced for test"}
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=24400,
+            option_type=option_side, symbol_token=f"tok_{option_side.lower()}_24400",
+            tradingsymbol=f"NIFTY24400{option_side}", lot_size=1,
+        )
         suggestion = {
             "suggested": {
-                "strike": 24400.0, "ltp": 110.0, "open_interest": 1000, "volume": 500,
+                "contract_id": contract.pk,
+                "strike": 24400.0, "ltp": 110.0, "bid": 109.0, "ask": 111.0, "open_interest": 1000, "volume": 500,
                 "delta": -0.4, "theta": -10, "vega": 5, "iv": 15, "in_sweet_spot": True, "score": 0.7,
             },
             "reason": "test suggestion", "candidates": [],
@@ -396,7 +455,7 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
              patch.object(strat, "success_rate_for_side", return_value=success), \
              patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
              patch.object(strat, "options_confluence_score", return_value=options_result), \
-             patch.object(strat, "nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "select_expiry", return_value=date.today() + timedelta(days=7)), \
              patch.object(strat, "suggest_best_strike", return_value=suggestion), \
              patch.object(strat, "check_pre_trade", return_value=risk_decision):
             return strat.evaluate_index_direction_trade("NIFTY", "5m")

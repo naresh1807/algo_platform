@@ -227,6 +227,15 @@ RISK_HARD_LIMITS = {
     "MAX_CONSECUTIVE_LOSSES": 3,
     "DRAWDOWN_PAUSE_PCT": 15.0,          # pause new entries
     "DRAWDOWN_FLATTEN_PCT": 20.0,        # flatten everything + halt
+    # Option-contract liquidity gate (apps.risk.engine.check_option_contract_liquidity)
+    # -- kept in this hard-coded dict, not the DB-backed OptionsStrategySetting,
+    # on purpose: these are risk limits (never DB-editable, per this dict's own
+    # docstring above), not strategy preferences.
+    "MAX_OPTION_BID_ASK_SPREAD_PCT": 5.0,
+    "MIN_OPTION_OPEN_INTEREST": 500,
+    "MIN_OPTION_VOLUME": 0,               # off by default -- OI is the more
+    # meaningful liquidity proxy for a single 5-minute index-option snapshot;
+    # raise this if a specific underlying/expiry needs a volume floor too.
 }
 
 # Placeholder starting balance for a fresh AccountEquity row (see
@@ -241,6 +250,21 @@ STARTING_EQUITY = float(os.environ.get("STARTING_EQUITY", "100000"))
 # small, rarely-changing personal watchlist -- promote to a model if
 # this ever needs to be edited from the dashboard instead of a redeploy.
 WATCHLIST = os.environ.get("WATCHLIST", "NIFTY,BANKNIFTY").split(",")
+
+# Underlyings whose signals are generated EXCLUSIVELY by
+# apps.options.index_direction_strategy (the option-contract-resolving
+# pipeline), not apps.signals.engine.generate_signal (the plain
+# index-level engine) -- apps.signals.tasks.generate_signals_for_watchlist
+# skips every symbol in this list, and apps.options.index_direction_strategy.
+# INDEX_UNDERLYINGS reads this same setting, so neither app imports the
+# other's module to agree on which symbols trade via real option contracts.
+# Defaults to WATCHLIST's own default since both start out meaning "the
+# same two index underlyings" -- override independently if WATCHLIST ever
+# grows to include a non-index/equity symbol that should keep using the
+# plain engine instead.
+OPTIONS_PIPELINE_UNDERLYINGS = os.environ.get(
+    "OPTIONS_PIPELINE_UNDERLYINGS", "NIFTY,BANKNIFTY"
+).split(",")
 
 # Where apps.learning.ml_train serializes trained win-probability model
 # artifacts (joblib files) -- kept out of the DB / git on purpose, same

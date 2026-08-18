@@ -6,12 +6,14 @@ import TopBar from "./components/TopBar.jsx";
 import JarvisPanel from "./components/JarvisPanel.jsx";
 import SignalAlertPopup from "./components/SignalAlertPopup.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
+import JarvisSignalTerminal from "./pages/JarvisSignalTerminal.jsx";
 import Learning from "./pages/Learning.jsx";
 import Login from "./pages/Login.jsx";
 import News from "./pages/News.jsx";
 import OptionsAnalytics from "./pages/OptionsAnalytics.jsx";
 import StockInvesting from "./pages/StockInvesting.jsx";
 import Positions from "./pages/Positions.jsx";
+import Reports from "./pages/Reports.jsx";
 import RiskLog from "./pages/RiskLog.jsx";
 import Scalping from "./pages/Scalping.jsx";
 import Settings from "./pages/Settings.jsx";
@@ -54,12 +56,14 @@ function AppShell() {
         <main className="content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/jarvis-signals" element={<JarvisSignalTerminal />} />
             <Route path="/signals" element={<Signals />} />
             <Route path="/news" element={<News />} />
             <Route path="/options" element={<OptionsAnalytics />} />
             <Route path="/investing" element={<StockInvesting />} />
             <Route path="/positions" element={<Positions />} />
             <Route path="/scalping" element={<Scalping />} />
+            <Route path="/reports" element={<Reports />} />
             <Route path="/risk" element={<RiskLog />} />
             <Route path="/learning" element={<Learning />} />
             <Route path="/settings" element={<Settings />} />

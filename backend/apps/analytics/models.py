@@ -12,6 +12,11 @@ class PerformanceMetrics(models.Model):
 
     date = models.DateField(unique=True)
     total_trades = models.PositiveIntegerField(default=0)
+    net_pnl = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True,
+        help_text="Net realized P&L for the day, in rupees (gross profit minus gross loss "
+                  "across all closed OpenPosition rows that day). Null when total_trades is 0.",
+    )
     win_rate = models.FloatField(null=True, blank=True, help_text="0.0-1.0")
     profit_factor = models.FloatField(null=True, blank=True)
     expectancy = models.FloatField(null=True, blank=True, help_text="Average R per trade")

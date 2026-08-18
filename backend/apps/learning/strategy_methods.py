@@ -25,6 +25,15 @@ and returns either None (no trade this cycle) or a plain dict of
 here -- see apps/learning/models.py's HypotheticalTrade docstring for
 why persistence is kept in the calling task instead, and why this
 never touches apps.execution/apps.risk/real money.
+
+The three SCALPING_METHOD_FUNCS also include the full "ind" dict they
+computed internally in their returned dict (the three swing METHOD_FUNCS
+do not) -- apps.learning.tasks._run_comparison_cycle pops it out and
+converts it to HypotheticalTrade's ind_* columns, which feed
+apps.learning.scalp_ml_train's win-probability model. Not added to the
+three swing functions too since no model consumes their data yet (see
+scalp_ml_train's own docstring for why that model is scoped to scalping
+only) -- extend them the same way if that ever changes.
 """
 
 from __future__ import annotations
@@ -178,7 +187,7 @@ def generate_ema_momentum_scalp_idea(symbol: str, timeframe: str = "1m") -> dict
     risk = entry - stop
     if risk <= 0:
         return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.0 * risk}
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.0 * risk, "ind": ind}
 
 
 def generate_rsi_extreme_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
@@ -203,7 +212,7 @@ def generate_rsi_extreme_scalp_idea(symbol: str, timeframe: str = "1m") -> dict 
     risk = entry - stop
     if risk <= 0:
         return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.2 * risk}
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.2 * risk, "ind": ind}
 
 
 def generate_sar_volume_burst_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
@@ -233,7 +242,7 @@ def generate_sar_volume_burst_scalp_idea(symbol: str, timeframe: str = "1m") -> 
     risk = entry - stop
     if risk <= 0:
         return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.5 * risk}
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.5 * risk, "ind": ind}
 
 
 METHOD_FUNCS = {

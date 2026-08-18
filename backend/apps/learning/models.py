@@ -215,6 +215,10 @@ class HypotheticalTrade(models.Model):
         ("timeout", "Max Holding Period"),
     ]
 
+    class OptionSide(models.TextChoices):
+        CALL = "CE", "Call"
+        PUT = "PE", "Put"
+
     method = models.CharField(max_length=32, choices=METHOD_CHOICES, db_index=True)
     symbol = models.CharField(max_length=32, db_index=True)
     timeframe = models.CharField(max_length=8, default="5m")
@@ -222,6 +226,68 @@ class HypotheticalTrade(models.Model):
     stop_loss = models.DecimalField(max_digits=14, decimal_places=4)
     target_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
     qty = models.PositiveIntegerField(default=1)
+    # Advisory only -- this trade's own win/loss simulation is always
+    # against the underlying's price (entry/stop/target above), never
+    # against option premium. Set once at open time (apps.learning.
+    # tasks._run_comparison_cycle, via apps.options.strike_selector.
+    # suggest_best_strike) purely so a trader glancing at this page has
+    # a concrete "if you wanted to actually trade this idea with
+    # options, here's the strike/side" answer instead of just an
+    # underlying price level. Inlined as its own choices class (not
+    # importing apps.options.models.OptionContract.OptionType) for the
+    # same app-load-order reason apps.signals.models.TradingSignal.
+    # OptionSide already documents. Null when no options data was
+    # synced for this underlying/expiry at open time -- "not available"
+    # is a normal, expected state, not an error.
+    option_side = models.CharField(max_length=2, choices=OptionSide.choices, null=True, blank=True)
+    strike_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    # Raw indicator snapshot at open time -- same fields, same docstring,
+    # same pre-normalization convention (*_pct fields divided by that
+    # candle's close) as apps.signals.models.TradingSignal's own ind_*
+    # columns, kept in sync deliberately so apps.learning.scalp_ml_features
+    # can reuse apps.learning.ml_features.RAW_INDICATOR_FEATURES verbatim
+    # instead of a second, easily-drifting copy of the same list. Only
+    # ever set for the SCALPING_METHOD_FUNCS group (apps.learning.tasks.
+    # _run_comparison_cycle) -- the three swing METHOD_FUNCS ideas don't
+    # populate these, since apps.learning.scalp_ml_train's model is scoped
+    # to scalping trades only (see that module's own docstring).
+    ind_rsi = models.FloatField(null=True, blank=True, help_text="RSI (0-100) at open time.")
+    ind_adx = models.FloatField(null=True, blank=True, help_text="ADX (0-100) at open time.")
+    ind_bb_width = models.FloatField(
+        null=True, blank=True,
+        help_text="Bollinger band width as a fraction of the middle band (already unitless).",
+    )
+    ind_relative_volume = models.FloatField(
+        null=True, blank=True, help_text="Volume vs. its 20-period average, as a ratio.",
+    )
+    ind_atr_pct = models.FloatField(
+        null=True, blank=True, help_text="ATR divided by close price (scale-free volatility).",
+    )
+    ind_macd_hist_pct = models.FloatField(
+        null=True, blank=True, help_text="MACD histogram divided by close price.",
+    )
+    ind_ema9_slope_pct = models.FloatField(
+        null=True, blank=True, help_text="EMA9 candle-over-candle change divided by close price.",
+    )
+    ind_ema21_slope_pct = models.FloatField(
+        null=True, blank=True, help_text="EMA21 candle-over-candle change divided by close price.",
+    )
+    ml_win_probability = models.FloatField(
+        null=True, blank=True,
+        help_text=(
+            "Win-probability from apps.learning.scalp_ml_train's own logistic-regression "
+            "model (trained ONLY on closed scalping HypotheticalTrade rows -- a separate "
+            "model from apps.signals.models.TradingSignal.ml_win_probability's, see "
+            "apps.learning.scalp_ml_train's module docstring for why they're kept apart), "
+            "scored at open time via apps.learning.scalp_ml_predict. Purely advisory, same "
+            "as the real model's field -- never gates which ideas open, so the daily "
+            "method-comparison ranking keeps measuring each method's own unfiltered "
+            "performance. NULL until a model has been trained (needs "
+            "apps.learning.scalp_ml_train.MIN_TRAINING_SAMPLES closed scalps)."
+        ),
+    )
+
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
     exit_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)

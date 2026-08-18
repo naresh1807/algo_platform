@@ -2,12 +2,14 @@ import { NavLink, useNavigate } from "react-router-dom";
 
 const LINKS = [
   { to: "/", label: "Dashboard", end: true },
+  { to: "/jarvis-signals", label: "JARVIS Signal Terminal" },
   { to: "/signals", label: "Signals" },
   { to: "/news", label: "News" },
   { to: "/options", label: "Options Analytics" },
   { to: "/investing", label: "Stock Investing" },
   { to: "/positions", label: "Positions" },
   { to: "/scalping", label: "Scalping Strategies" },
+  { to: "/reports", label: "Daily P&L Report" },
   { to: "/risk", label: "Risk Log" },
   { to: "/learning", label: "Learning / Review" },
 ];

@@ -12,7 +12,7 @@ class TradingSignalViewSet(viewsets.ReadOnlyModelViewSet):
     technical + sentiment + regime logic from manual sections 11-12 and
     then asks apps.risk to approve/reject before writing a row here.
     """
-    queryset = TradingSignal.objects.select_related("strategy_version").all()
+    queryset = TradingSignal.objects.select_related("strategy_version", "option_contract").all()
     serializer_class = TradingSignalSerializer
     permission_classes = [IsAuthenticated]
     filterset_fields = ["symbol", "status", "signal_type"]

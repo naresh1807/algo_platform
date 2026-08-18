@@ -33,16 +33,26 @@ logger = logging.getLogger(__name__)
 def sync_watchlist_option_contracts():
     """
     Weekly (config/celery.py beat_schedule): for every underlying in
-    settings.WATCHLIST, finds its nearest listed expiry via the real
-    instrument master and upserts OptionContract rows for it -- the
-    automated equivalent of manually running `python manage.py
-    sync_option_contracts --underlying X --expiry <nearest>` for each
-    watchlist symbol. Weekly, not daily, because a listed expiry's own
+    settings.WATCHLIST, syncs OptionContract rows for its nearest
+    SYNC_EXPIRY_COUNT listed expiries (not just the single nearest one)
+    via the real instrument master -- the automated equivalent of
+    manually running `python manage.py sync_option_contracts
+    --underlying X --expiry <e>` once per expiry, for each watchlist
+    symbol. Weekly, not daily, because a listed expiry's own
     strikes/tokens almost never change mid-week in practice (see
     OptionContract's docstring) -- what DOES change weekly is which
-    expiry counts as "nearest" once the current one expires.
+    expiries count as "nearest" once the current one expires.
 
-    Only ever ADDS/updates contracts for the nearest expiry -- it never
+    Syncing more than just the nearest expiry is required for
+    apps.options.signals_engine.select_expiry's NEXT_WEEK/MONTHLY/CUSTOM
+    modes to ever find real contracts to resolve -- with only the
+    nearest expiry synced, every mode except CURRENT_WEEK would
+    permanently NO_TRADE on "not synced yet". Cheap to do: get_instrument_
+    master() already caches Angel One's full instrument list in-process
+    for 24h, so looping N expiries costs no extra network calls beyond
+    the first.
+
+    Only ever ADDS/updates contracts for these expiries -- it never
     deletes stale ones for past expiries, so historical
     OptionChainSnapshot rows stay attached to a real OptionContract for
     analytics/backtesting even after that contract has expired.
@@ -57,28 +67,37 @@ def sync_watchlist_option_contracts():
 
     client = get_option_chain_client()
     results = {}
+    SYNC_EXPIRY_COUNT = 6  # enough to cover ~current week/next week/the
+
+    # month's monthly expiry under NSE's usual weekly-expiry cadence.
 
     for underlying in settings.WATCHLIST:
         underlying = underlying.strip()
         try:
-            expiries = list_expiries(underlying, limit=1)
+            expiries = list_expiries(underlying, limit=SYNC_EXPIRY_COUNT)
             if not expiries:
                 logger.warning("sync_watchlist_option_contracts: no listed expiries for %s.", underlying)
                 results[underlying] = {"skipped": True, "reason": "no_expiries_listed"}
                 continue
 
-            nearest = expiries[0]
-            contracts = client.fetch_contract_list(underlying, nearest)
-            created = updated = 0
-            for c in contracts:
-                _, was_created = OptionContract.objects.update_or_create(
-                    underlying=underlying, expiry=nearest,
-                    strike=c["strike"], option_type=c["option_type"],
-                    defaults={"symbol_token": c["symbol_token"]},
-                )
-                created += int(was_created)
-                updated += int(not was_created)
-            results[underlying] = {"expiry": nearest.isoformat(), "created": created, "updated": updated}
+            per_expiry = {}
+            for expiry in expiries:
+                contracts = client.fetch_contract_list(underlying, expiry)
+                created = updated = 0
+                for c in contracts:
+                    _, was_created = OptionContract.objects.update_or_create(
+                        underlying=underlying, expiry=expiry,
+                        strike=c["strike"], option_type=c["option_type"],
+                        defaults={
+                            "symbol_token": c["symbol_token"],
+                            "tradingsymbol": c["tradingsymbol"],
+                            "lot_size": c["lot_size"],
+                        },
+                    )
+                    created += int(was_created)
+                    updated += int(not was_created)
+                per_expiry[expiry.isoformat()] = {"created": created, "updated": updated}
+            results[underlying] = per_expiry
         except Exception:
             logger.exception("sync_watchlist_option_contracts failed for %s", underlying)
             results[underlying] = {"error": True}
@@ -101,7 +120,16 @@ def ingest_option_chain_snapshots():
     from .broker_client import get_option_chain_client
     from .models import OptionChainSnapshot, OptionContract
 
-    contracts = list(OptionContract.objects.all())
+    # Expired contracts are deliberately never deleted (see
+    # sync_watchlist_option_contracts's docstring -- historical snapshots
+    # stay attached for backtesting), but they must never be re-quoted
+    # here: since that sync task now syncs SYNC_EXPIRY_COUNT expiries per
+    # underlying instead of just one, an unfiltered query here would pull
+    # in several times as many contracts every run, multiplying Angel
+    # One call volume for expiries nobody can trade any more -- exactly
+    # the kind of avoidable load this codebase has hit real AB1021
+    # rate-limit cooldowns from before.
+    contracts = list(OptionContract.objects.filter(expiry__gte=timezone.localdate()))
     if not contracts:
         logger.warning(
             "ingest_option_chain_snapshots: no OptionContract rows exist yet -- "

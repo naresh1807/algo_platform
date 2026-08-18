@@ -122,8 +122,11 @@ def options_for_expiry(underlying: str, expiry: date) -> list[dict]:
     """
     Filters the instrument master down to every NFO index-option
     contract for one underlying+expiry. Returns [{"strike",
-    "option_type", "symbol_token"}, ...] -- exactly the shape
-    apps.options.tasks needs to create/update OptionContract rows.
+    "option_type", "symbol_token", "tradingsymbol", "lot_size"}, ...] --
+    exactly the shape apps.options.tasks needs to create/update
+    OptionContract rows. tradingsymbol/lot_size are what an actual order
+    placement needs beyond the quote-only symbol_token (see
+    OptionContract's own field docstrings).
 
     Scoped to instrumenttype == "OPTIDX" (index options: NIFTY,
     BANKNIFTY, etc.) since that matches this scaffold's current
@@ -160,5 +163,7 @@ def options_for_expiry(underlying: str, expiry: date) -> list[dict]:
             "strike": strike,
             "option_type": option_type,
             "symbol_token": row["token"],
+            "tradingsymbol": symbol,
+            "lot_size": int(row.get("lotsize") or 0),
         })
     return results

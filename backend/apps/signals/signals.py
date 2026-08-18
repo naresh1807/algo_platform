@@ -81,6 +81,14 @@ def broadcast_new_signal(sender, instance: TradingSignal, created: bool, **kwarg
                     "target_2": (
                         str(instance.target_2) if instance.target_2 is not None else None
                     ),
+                    # Added so the live signal card/terminal doesn't need a
+                    # second REST round-trip to show confidence, the
+                    # options-chain confirmation score, or which stage a
+                    # rejected signal died at.
+                    "option_contract_id": instance.option_contract_id,
+                    "ml_win_probability": instance.ml_win_probability,
+                    "options_score": instance.options_score,
+                    "rejection_stage": instance.rejection_stage,
                 },
             },
         )

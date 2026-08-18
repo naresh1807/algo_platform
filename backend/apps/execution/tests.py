@@ -66,6 +66,81 @@ class PaperExecutorTests(TestCase):
         self.assertLess(equity.current_equity, Decimal("100000"))
 
 
+class PaperExecutorOptionContractTests(TestCase):
+    """
+    apps.execution.paper_executor's real-option-order path -- a
+    TradingSignal with option_contract set (apps.options.
+    index_direction_strategy's premium-based execution, see that
+    module's docstring) must open a LONG OpenPosition priced at the
+    CONTRACT's own tradingsymbol/premium, regardless of the signal's own
+    signal_type/symbol (the underlying), and must close on stop/target
+    using a live contract quote instead of compute_indicators.
+    """
+
+    def setUp(self):
+        from datetime import timedelta
+
+        from apps.options.models import OptionContract
+
+        AccountEquity.objects.create(
+            pk=1, current_equity=Decimal("100000"), daily_start_equity=Decimal("100000"),
+            peak_equity=Decimal("100000"), trading_day=timezone.localdate(),
+        )
+        self.contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=timezone.localdate() + timedelta(days=7),
+            strike=24400, option_type="PE", symbol_token="tok_pe_24400",
+            tradingsymbol="NIFTY24400PE", lot_size=25,
+        )
+        # signal_type SELL (as the underlying-direction "down" case would
+        # produce) but option_contract set -- the position must still
+        # open LONG (buying a PE is a long bet on the PE's own premium).
+        self.signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.SELL, entry_price=Decimal("110"),
+            stop_loss=Decimal("95"), target_1=Decimal("140"), position_size=25,
+            option_side="PE", strike_price=Decimal("24400"), option_contract=self.contract,
+            total_score=1, technical_score=1, sentiment_score=0, risk_score=1,
+            regime="trending", status=SignalStatus.APPROVED, reason="test",
+        )
+
+    def test_open_position_is_long_on_the_contract_tradingsymbol(self):
+        position = open_position_from_signal(self.signal)
+        self.assertEqual(position.side, PositionSide.LONG)
+        self.assertEqual(position.symbol, "NIFTY24400PE")
+        self.assertEqual(position.option_contract_id, self.contract.pk)
+        self.assertEqual(position.entry_price, Decimal("110"))
+
+    def test_check_and_close_positions_uses_live_contract_quote(self):
+        from unittest.mock import patch
+
+        from .paper_executor import check_and_close_positions
+
+        open_position_from_signal(self.signal)
+
+        with patch("apps.options.pricing.latest_ltp_for_contract", return_value=145.0):
+            results = check_and_close_positions("5m")
+
+        self.assertEqual(results[0]["reason"], "target")
+        equity = AccountEquity.objects.get(pk=1)
+        # (140 target - 110 entry) * 25 qty = 750 profit, realized at the
+        # signal's own target_1 price (close_position closes at
+        # position.target_price, not the live quote that triggered it).
+        self.assertEqual(equity.current_equity, Decimal("100750"))
+
+    def test_check_and_close_positions_skips_when_quote_unavailable(self):
+        from unittest.mock import patch
+
+        from .paper_executor import check_and_close_positions
+
+        position = open_position_from_signal(self.signal)
+
+        with patch("apps.options.pricing.latest_ltp_for_contract", return_value=None):
+            results = check_and_close_positions("5m")
+
+        self.assertEqual(results, [])
+        position.refresh_from_db()
+        self.assertIsNone(position.closed_at)
+
+
 class TrailingStopTests(TestCase):
     """apps.execution.trailing_stop -- stop only ever ratchets up, never down."""
 
@@ -349,3 +424,143 @@ class WaitForFillTests(TestCase):
         finally:
             live_executor.time.sleep = original_sleep
             live_executor.FILL_POLL_MAX_ATTEMPTS = original_attempts
+
+
+class LiveExecutorOptionContractTests(TestCase):
+    """
+    apps.execution.live_executor's real-option-order path -- mirrors
+    PaperExecutorOptionContractTests above, but for live_executor: a
+    TradingSignal with option_contract set must place a real NFO order
+    using the CONTRACT's own symbol_token/tradingsymbol (via
+    BrokerClient.place_order's override kwargs), not look `signal.symbol`
+    (the underlying) up in SYMBOL_TOKENS, and check_and_close_positions_live
+    must price/exit it the same option-aware way paper_executor does.
+
+    Uses a fake broker client (no real network/Angel One session) that
+    records exactly what place_order was called with.
+    """
+
+    def setUp(self):
+        from datetime import timedelta
+
+        from apps.options.models import OptionContract
+
+        AccountEquity.objects.create(
+            pk=1, current_equity=Decimal("100000"), daily_start_equity=Decimal("100000"),
+            peak_equity=Decimal("100000"), trading_day=timezone.localdate(),
+        )
+        self.contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=timezone.localdate() + timedelta(days=7),
+            strike=24400, option_type="PE", symbol_token="tok_pe_24400",
+            tradingsymbol="NIFTY24400PE", lot_size=25,
+        )
+        self.signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.SELL, entry_price=Decimal("110"),
+            stop_loss=Decimal("95"), target_1=Decimal("140"), position_size=25,
+            option_side="PE", strike_price=Decimal("24400"), option_contract=self.contract,
+            total_score=1, technical_score=1, sentiment_score=0, risk_score=1,
+            regime="trending", status=SignalStatus.APPROVED, reason="test",
+        )
+
+    def _fake_client(self):
+        class FakeClient:
+            def __init__(self):
+                self.place_order_calls = []
+
+            def place_order(self, symbol, transaction_type, qty, order_type="MARKET", price=0.0,
+                             symbol_token=None, exchange=None, tradingsymbol=None):
+                self.place_order_calls.append({
+                    "symbol": symbol, "transaction_type": transaction_type, "qty": qty,
+                    "symbol_token": symbol_token, "exchange": exchange, "tradingsymbol": tradingsymbol,
+                })
+                return "ORDER1"
+
+            def get_order_status(self, order_id):
+                return {"status": "complete", "averageprice": "112.5", "filledshares": "25"}
+
+        return FakeClient()
+
+    def test_open_position_live_places_nfo_order_on_the_contract(self):
+        from unittest.mock import patch
+
+        from .live_executor import open_position_live
+
+        client = self._fake_client()
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client):
+            position = open_position_live(self.signal)
+
+        self.assertEqual(len(client.place_order_calls), 1)
+        call = client.place_order_calls[0]
+        self.assertEqual(call["symbol"], "NIFTY24400PE")
+        self.assertEqual(call["symbol_token"], "tok_pe_24400")
+        self.assertEqual(call["exchange"], "NFO")
+        self.assertEqual(call["tradingsymbol"], "NIFTY24400PE")
+        # SELL signal_type but option_contract set -- must still open LONG
+        # (buying a PE is a long bet on the PE's own premium).
+        self.assertEqual(position.side, PositionSide.LONG)
+        self.assertEqual(position.symbol, "NIFTY24400PE")
+        self.assertEqual(position.option_contract_id, self.contract.pk)
+
+    def test_open_position_live_plain_symbol_does_not_pass_option_overrides(self):
+        from unittest.mock import patch
+
+        from .live_executor import open_position_live
+
+        plain_signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.BUY, entry_price=Decimal("24500"),
+            stop_loss=Decimal("24400"), position_size=10,
+            total_score=1, technical_score=1, sentiment_score=0, risk_score=1,
+            regime="trending", status=SignalStatus.APPROVED, reason="test",
+        )
+        client = self._fake_client()
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client):
+            open_position_live(plain_signal)
+
+        call = client.place_order_calls[0]
+        self.assertEqual(call["symbol"], "NIFTY")
+        self.assertIsNone(call["symbol_token"])
+        self.assertIsNone(call["exchange"])
+        self.assertIsNone(call["tradingsymbol"])
+
+    def test_check_and_close_positions_live_uses_contract_quote_and_skips_technical_exit(self):
+        from unittest.mock import patch
+
+        from .live_executor import check_and_close_positions_live, open_position_live
+
+        client = self._fake_client()
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client):
+            open_position_live(self.signal)
+
+        # should_exit_position must never even be consulted for an option
+        # position -- patched to raise if called, so the test fails loudly
+        # if that branch is ever reached for this position.
+        def _should_not_be_called(*args, **kwargs):
+            raise AssertionError("should_exit_position must be skipped for option positions")
+
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client), \
+             patch("apps.options.pricing.latest_ltp_for_contract", return_value=145.0), \
+             patch("apps.signals.engine.should_exit_position", side_effect=_should_not_be_called):
+            results = check_and_close_positions_live("5m")
+
+        self.assertEqual(results[0]["reason"], "target")
+        # The closing order must ALSO carry the contract's own token/exchange.
+        closing_call = client.place_order_calls[-1]
+        self.assertEqual(closing_call["symbol_token"], "tok_pe_24400")
+        self.assertEqual(closing_call["exchange"], "NFO")
+
+    def test_check_and_close_positions_live_skips_when_quote_unavailable(self):
+        from unittest.mock import patch
+
+        from .live_executor import check_and_close_positions_live, open_position_live
+
+        client = self._fake_client()
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client):
+            position = open_position_live(self.signal)
+
+        with patch("apps.execution.live_executor.get_broker_client", return_value=client), \
+             patch("apps.options.pricing.latest_ltp_for_contract", return_value=None):
+            results = check_and_close_positions_live("5m")
+
+        self.assertEqual(results, [])
+        position.refresh_from_db()
+        self.assertIsNone(position.closed_at)

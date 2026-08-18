@@ -184,10 +184,13 @@ def compute_daily_performance(for_date: date) -> PerformanceMetrics:
     # price, which live_executor records but paper_executor doesn't
     # (paper fills are always exactly the intended price by
     # construction) -- that remains a real, documented gap.
+    net_pnl = round(gross_profit - gross_loss, 2) if total_trades else None
+
     metrics, _created = PerformanceMetrics.objects.update_or_create(
         date=for_date,
         defaults={
             "total_trades": total_trades,
+            "net_pnl": net_pnl,
             "win_rate": win_rate,
             "profit_factor": profit_factor,
             "expectancy": expectancy,
