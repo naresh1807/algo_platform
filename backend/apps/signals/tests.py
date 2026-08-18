@@ -196,3 +196,40 @@ class ShouldExitPositionSideTests(TestCase):
     def test_short_side_no_data_returns_false(self):
         should_exit, reasons = should_exit_position("NOPE_SYMBOL", "5m", PositionSide.SHORT)
         self.assertFalse(should_exit)
+
+
+class SignalFeatureSnapshotTests(TestCase):
+    """
+    apps.signals.signals.save_feature_snapshot -- the post_save receiver
+    wiring apps.options.feature_store into every new TradingSignal,
+    best-effort (must never raise even for a plain signal with no
+    resolved option_contract).
+    """
+
+    def test_creating_a_signal_automatically_creates_a_feature_snapshot(self):
+        from .models import SignalFeatureSnapshot
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.NO_TRADE, entry_price=Decimal("24500"), stop_loss=Decimal("24500"),
+            total_score=0, technical_score=0, sentiment_score=0, risk_score=0, options_score=0,
+            regime="sideways", status=SignalStatus.REJECTED, reason="test",
+        )
+        snapshot = SignalFeatureSnapshot.objects.get(signal=signal)
+        self.assertIn("marketRegime", snapshot.features)
+        self.assertEqual(snapshot.features["marketRegime"], "sideways")
+        # No option_contract -- every contract-specific field must be
+        # explicitly None, never a guess.
+        self.assertIsNone(snapshot.features["delta"])
+        self.assertIsNone(snapshot.features["expiry"])
+
+    def test_one_to_one_never_duplicates_on_resave(self):
+        from .models import SignalFeatureSnapshot
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type=SignalType.NO_TRADE, entry_price=Decimal("24500"), stop_loss=Decimal("24500"),
+            total_score=0, technical_score=0, sentiment_score=0, risk_score=0, options_score=0,
+            regime="sideways", status=SignalStatus.REJECTED, reason="test",
+        )
+        signal.reason = "updated"
+        signal.save(update_fields=["reason"])  # created=False -- receiver must no-op, not error on the OneToOne
+        self.assertEqual(SignalFeatureSnapshot.objects.filter(signal=signal).count(), 1)

@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     BestStrikeView,
     EvaluateNowView,
+    FinalSignalView,
     OptionChainSnapshotViewSet,
     OptionChainView,
     OptionContractViewSet,
@@ -23,4 +24,5 @@ urlpatterns = router.urls + [
     path("best-strike/", BestStrikeView.as_view(), name="options-best-strike"),
     path("strategy-settings/", OptionsStrategySettingView.as_view(), name="options-strategy-settings"),
     path("evaluate/", EvaluateNowView.as_view(), name="options-evaluate-now"),
+    path("final-signal/", FinalSignalView.as_view(), name="options-final-signal"),
 ]

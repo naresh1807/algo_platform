@@ -74,7 +74,20 @@ class CommandEngineHistoryTests(APITestCase):
         self.assertEqual(JarvisCommandHistory.objects.count(), before + 1)
 
     def test_unrecognized_command_still_logs_and_answers(self):
-        response = engine.process("do a backflip", self.user)
+        # local_llm.is_configured() makes a real network call to Ollama
+        # (see that function's own docstring) -- on a machine that
+        # happens to have Ollama actually running (true on this dev
+        # box), an unmocked call here would go down the real free-form-
+        # LLM path and get a real answer back (success=True), instead of
+        # testing what this test is actually about: the canned
+        # "I didn't recognize that command" fallback still logs and
+        # answers. Mocked False so the outcome doesn't depend on
+        # whatever service happens to be running on the machine the
+        # suite executes on.
+        from unittest.mock import patch
+
+        with patch("apps.jarvis.local_llm.is_configured", return_value=False):
+            response = engine.process("do a backflip", self.user)
         self.assertFalse(response.success)
         self.assertTrue(response.text)
 

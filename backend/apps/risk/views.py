@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .engine import get_equity
-from .models import KillSwitchState, RiskEvent
+from .models import EquitySnapshot, KillSwitchState, RiskEvent
 from .serializers import AccountEquitySerializer, KillSwitchStateSerializer, RiskEventSerializer
 
 
@@ -44,3 +44,28 @@ class EquityStatusView(APIView):
         data["drawdown_pct"] = equity.drawdown_pct
         data["daily_pnl_pct"] = equity.daily_pnl_pct
         return Response(data)
+
+
+class EquityCurveView(APIView):
+    """
+    GET the raw EquitySnapshot time series over a trailing window -- the
+    same append-only history apps.analytics.services' Sharpe/Sortino/
+    Calmar functions already read, exposed directly here so the
+    performance dashboard can plot an actual equity curve instead of only
+    showing the derived ratios. Read-only, ascending by time (chart
+    libraries expect strictly increasing x-values).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        lookback_days = int(request.query_params.get("lookback_days", 30))
+        window_start = timezone.now() - timedelta(days=lookback_days)
+        snapshots = EquitySnapshot.objects.filter(timestamp__gte=window_start).order_by("timestamp")
+        return Response({
+            "lookback_days": lookback_days,
+            "results": [{"timestamp": s.timestamp, "equity": s.equity} for s in snapshots],
+        })

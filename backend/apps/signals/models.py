@@ -138,6 +138,7 @@ class TradingSignal(models.Model):
 
     class RejectionStage(models.TextChoices):
         DIRECTION = "direction", "Underlying Direction"
+        DATA_QUALITY = "data_quality", "Data Quality"
         SUCCESS_RATE = "success_rate", "Historical Success Rate"
         SENTIMENT = "sentiment", "Sentiment Veto"
         OPTIONS_CONFLUENCE = "options_confluence", "Options-Chain Confluence"
@@ -184,3 +185,44 @@ class TradingSignal(models.Model):
 
     def __str__(self):
         return f"{self.symbol} {self.signal_type} score={self.total_score:.2f} [{self.status}]"
+
+
+class SignalFeatureSnapshot(models.Model):
+    """
+    The Feature Store / Signal Audit Trail: one row per TradingSignal,
+    storing the full feature vector "as of" that signal's own creation
+    moment (apps.options.feature_store.build_feature_vector's output --
+    trend/momentum/OI/volume/skew/liquidity/expected-move/risk-reward
+    scores, raw greeks, market regime, time-of-day, strike distance).
+
+    Deliberately a snapshot, not a live-recomputable view: re-deriving
+    these values later from current option-chain/candle data would
+    silently answer a DIFFERENT question ("what does the market look
+    like NOW") than what this table exists for ("what did the model
+    actually see at decision time") -- the same reason apps.signals.
+    models.TradingSignal's own ind_* fields are stored rather than
+    recomputed, applied here to the full feature set apps.options'
+    analytics engines produce, not just the four composite scores.
+
+    OneToOne (not a plain FK) -- exactly one snapshot per signal, taken
+    once, never updated after creation.
+
+    Populated by a best-effort apps.signals.signals.py post_save
+    receiver (same "never let this write's failure look like a
+    signal-generation failure" discipline as that file's existing
+    WS-broadcast receiver) -- a missing snapshot for an old/edge-case
+    signal is a gap in the audit trail, never a reason to fail the
+    signal itself.
+    """
+
+    signal = models.OneToOneField(TradingSignal, on_delete=models.CASCADE, related_name="feature_snapshot")
+    features = models.JSONField(
+        help_text="apps.options.feature_store.build_feature_vector's output -- see that function's own docstring for the exact field set.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "signal_feature_snapshots"
+
+    def __str__(self):
+        return f"features for signal #{self.signal_id}"

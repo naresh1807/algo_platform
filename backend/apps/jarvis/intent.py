@@ -76,7 +76,15 @@ def detect_intent(text: str) -> DetectedIntent:
                 )
 
     for phrase, action in _RANKED_PHRASES:
-        if phrase in normalized:
+        # Word-boundary match, not a plain substring check -- a bare `in`
+        # test lets a short registered phrase match inside an unrelated
+        # longer word (e.g. go_back's "back" matching inside "backflip",
+        # turning "do a backflip" into a false-positive navigation
+        # command). \b around the phrase keeps the same "find this
+        # phrase anywhere in the sentence" behavior for genuine word/
+        # phrase matches (multi-word phrases like "show risk" still match
+        # as a run of words) while refusing to match mid-word.
+        if re.search(rf"\b{re.escape(phrase.strip())}\b", normalized):
             return DetectedIntent(
                 action=action, category=COMMANDS[action]["category"],
                 confidence=0.7, entities=entities, matched_phrase=phrase,

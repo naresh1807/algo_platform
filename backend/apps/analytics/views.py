@@ -71,12 +71,50 @@ class SharpeRatioView(APIView):
     PerformanceMetrics (a rolling statistic doesn't fit that per-day
     model) -- computed fresh on each call instead, same as any other
     on-demand analytics figure in this app.
+
+    sortino_ratio/calmar_ratio added alongside the original sharpe_ratio
+    key (additive, not a breaking response-shape change -- any existing
+    caller reading only "sharpe_ratio" is unaffected) since a real
+    performance dashboard reads all three together, not one at a time.
     """
     permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
-        from .services import compute_sharpe_ratio
+        from .services import compute_calmar_ratio, compute_sharpe_ratio, compute_sortino_ratio
 
         lookback_days = int(request.query_params.get("lookback_days", 30))
-        sharpe = compute_sharpe_ratio(lookback_days=lookback_days)
-        return Response({"lookback_days": lookback_days, "sharpe_ratio": sharpe})
+        return Response({
+            "lookback_days": lookback_days,
+            "sharpe_ratio": compute_sharpe_ratio(lookback_days=lookback_days),
+            "sortino_ratio": compute_sortino_ratio(lookback_days=lookback_days),
+            "calmar_ratio": compute_calmar_ratio(lookback_days=lookback_days),
+        })
+
+
+class PerformanceBreakdownView(APIView):
+    """
+    manual section 18's performance dashboard, "by dimension" view --
+    strategy-wise/regime-wise/expiry-wise/CE-vs-PE/time-of-day breakdowns
+    of real closed trades, plus the no-trade engine's own rate, all from
+    apps.analytics.services' new breakdown functions. One combined
+    response (rather than five separate endpoints) since the dashboard
+    always renders all of them together.
+    """
+    permission_classes = [IsTraderOrAdmin]
+
+    def get(self, request):
+        from .services import (
+            compute_expiry_breakdown, compute_no_trade_rate, compute_option_side_breakdown,
+            compute_regime_breakdown, compute_strategy_breakdown, compute_time_of_day_breakdown,
+        )
+
+        lookback_days = int(request.query_params.get("lookback_days", 30))
+        return Response({
+            "lookback_days": lookback_days,
+            "by_regime": compute_regime_breakdown(lookback_days=lookback_days),
+            "by_expiry": compute_expiry_breakdown(lookback_days=lookback_days),
+            "by_option_side": compute_option_side_breakdown(lookback_days=lookback_days),
+            "by_strategy": compute_strategy_breakdown(lookback_days=lookback_days),
+            "by_time_of_day": compute_time_of_day_breakdown(lookback_days=lookback_days),
+            "no_trade": compute_no_trade_rate(lookback_days=lookback_days),
+        })

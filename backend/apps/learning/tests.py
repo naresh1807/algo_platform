@@ -404,6 +404,82 @@ class ScalpWinProbabilityTrainTests(TestCase):
         self.assertFalse(ModelRegistry.objects.filter(model_name="win_probability").exists())
 
 
+class WinProbabilityEnsembleTests(TestCase):
+    """
+    apps.learning.ml_train.WinProbabilityEnsemble -- averages two
+    sub-models' predict_proba output exactly, and is joblib-picklable
+    (a real requirement: apps.learning.ml_predict loads it back via
+    joblib.load, not just constructs it in-process).
+    """
+
+    def test_predict_proba_is_the_exact_average_of_both_submodels(self):
+        import numpy as np
+
+        from apps.learning.ml_train import WinProbabilityEnsemble
+
+        class FakeModel:
+            def __init__(self, probs):
+                self._probs = np.array(probs)
+
+            def predict_proba(self, X):
+                return self._probs
+
+        logistic = FakeModel([[0.3, 0.7], [0.6, 0.4]])
+        gbm = FakeModel([[0.5, 0.5], [0.2, 0.8]])
+        ensemble = WinProbabilityEnsemble(logistic, gbm)
+
+        result = ensemble.predict_proba([[0], [0]])
+        np.testing.assert_allclose(result, [[0.4, 0.6], [0.4, 0.6]])
+
+    def test_predict_thresholds_at_half(self):
+        import numpy as np
+
+        from apps.learning.ml_train import WinProbabilityEnsemble
+
+        class FakeModel:
+            def __init__(self, probs):
+                self._probs = np.array(probs)
+
+            def predict_proba(self, X):
+                return self._probs
+
+        logistic = FakeModel([[0.9, 0.1], [0.1, 0.9]])
+        gbm = FakeModel([[0.9, 0.1], [0.1, 0.9]])
+        ensemble = WinProbabilityEnsemble(logistic, gbm)
+
+        preds = ensemble.predict([[0], [0]])
+        self.assertEqual(list(preds), [0, 1])
+
+    def test_ensemble_is_joblib_picklable_and_round_trips(self):
+        import numpy as np
+
+        from apps.learning.ml_train import (
+            WinProbabilityEnsemble, _new_gbm_pipeline, _new_logistic_pipeline,
+        )
+
+        X = [[0, 1, 0, 1, 0], [1, 0, 1, 0, 1], [0, 0, 1, 1, 0], [1, 1, 0, 0, 1]] * 10
+        y = [0, 1, 0, 1] * 10
+
+        logistic = _new_logistic_pipeline()
+        logistic.fit(X, y)
+        gbm = _new_gbm_pipeline()
+        gbm.fit(X, y)
+        ensemble = WinProbabilityEnsemble(logistic, gbm)
+
+        import io
+
+        import joblib
+
+        buffer = io.BytesIO()
+        joblib.dump(ensemble, buffer)
+        buffer.seek(0)
+        reloaded = joblib.load(buffer)
+
+        original_probs = ensemble.predict_proba(X)
+        reloaded_probs = reloaded.predict_proba(X)
+        np.testing.assert_allclose(original_probs, reloaded_probs)
+
+
 class ScalpWinProbabilityPredictTests(TestCase):
     """apps.learning.scalp_ml_predict.predict_scalp_win_probability."""
 

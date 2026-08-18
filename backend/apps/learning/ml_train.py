@@ -14,19 +14,22 @@ well-trained, eliminates losing trades; the honest goal here is a
 lean into higher-confidence setups and away from low-confidence ones --
 not a claim that losses stop happening.
 
-Model choice: logistic regression over a small, fixed, interpretable
-feature set (the four existing composite scores + one-hot regime +
-one-hot symbol). Deliberately NOT a bigger model (gradient boosting /
-neural net) while trade counts are still small (tens to low hundreds
-after a month or two of paper trading) -- a high-capacity model on a
-tiny sample mostly learns noise, and logistic regression's coefficients
-are directly readable ("which factor is actually associated with
-wins"), matching the manual's "AI must explain every signal" principle
-even at the ML layer. Swap in GradientBoostingClassifier / XGBoost here
-once there's a few hundred+ closed trades to train on -- the
-surrounding pipeline (feature building, versioning via ModelRegistry,
-chronological validation, champion/challenger gate) does not need to
-change to do that.
+Model choice: a small, transparent ENSEMBLE of two models over the
+same small, fixed, interpretable feature set (the four existing
+composite scores + one-hot regime + one-hot symbol) -- logistic
+regression (directly-readable coefficients, matches the manual's "AI
+must explain every signal" principle even at the ML layer) AVERAGED
+with a GradientBoostingClassifier (sklearn's built-in implementation,
+no new dependency -- can pick up non-linear feature interactions the
+linear model can't see). "Compare models using out-of-sample
+performance... combine using a transparent ensemble... do not let one
+model blindly override the others" applied literally: WinProbability
+Ensemble below is a plain, equal-weight average of the two models' own
+predict_proba outputs, nothing stacked/meta-learned that could itself
+overfit on a still-small dataset. Both sub-models AND the ensemble are
+each evaluated independently on the same chronological holdout (see
+_fit_and_evaluate) so it's visible whether the ensemble is actually
+earning its complexity over either model alone.
 
 Production-grade pieces in this module, beyond the first pass:
   1. CHRONOLOGICAL validation split, not random -- a random split on
@@ -86,6 +89,34 @@ HOLDOUT_FRACTION = 0.25
 MAX_ACCEPTABLE_ACCURACY_REGRESSION = 0.05
 
 
+class WinProbabilityEnsemble:
+    """
+    Averages the calibrated probability from two independently-fitted
+    sub-models (a LogisticRegression pipeline and a GradientBoosting
+    pipeline) -- see module docstring for why. Exposes predict_proba/
+    predict with the EXACT shape a plain sklearn estimator returns, so
+    apps.learning.ml_predict's existing
+    `joblib.load(...).predict_proba([vector])` call site needs ZERO
+    changes -- this is a drop-in replacement artifact, not a new
+    inference code path. Must stay defined at this stable module path
+    (apps.learning.ml_train.WinProbabilityEnsemble) for joblib/pickle to
+    resolve it correctly when a previously-saved artifact is reloaded.
+    """
+
+    def __init__(self, logistic_pipeline, gbm_pipeline):
+        self.logistic_pipeline = logistic_pipeline
+        self.gbm_pipeline = gbm_pipeline
+
+    def predict_proba(self, X):
+        logistic_probs = self.logistic_pipeline.predict_proba(X)
+        gbm_probs = self.gbm_pipeline.predict_proba(X)
+        return (logistic_probs + gbm_probs) / 2.0
+
+    def predict(self, X):
+        probs = self.predict_proba(X)
+        return (probs[:, 1] >= 0.5).astype(int)
+
+
 def _training_rows():
     """
     Yields (TradingSignal, won: bool) for every closed OpenPosition,
@@ -106,22 +137,72 @@ def _training_rows():
         yield position.signal, bool(position.unrealized_pnl > 0)
 
 
-def _fit_and_evaluate(X: list, y: list) -> tuple:
-    """
-    Returns (fitted_pipeline_on_all_data, metrics_dict). Chronological
-    holdout when there's enough data (module docstring point 1);
-    train-only metrics (clearly labelled optimistic) otherwise.
-    """
+def _new_logistic_pipeline():
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
-    def _new_pipeline():
-        return Pipeline([
-            ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
-        ])
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
+    ])
+
+
+def _new_gbm_pipeline():
+    # No StandardScaler -- tree-based models are scale-invariant, so
+    # scaling would only add compute with no effect on the fit.
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    return GradientBoostingClassifier(
+        # Deliberately shallow/slow-learning defaults for a still-small
+        # dataset (tens to low hundreds of trades): a deep, fast-fitting
+        # GBM on that little data would mostly memorize noise, the exact
+        # failure mode the module docstring already warns about for a
+        # "bigger model." max_depth=2 and a low learning_rate favor
+        # underfitting over overfitting on purpose.
+        n_estimators=100, max_depth=2, learning_rate=0.05, subsample=0.8, random_state=42,
+    )
+
+
+def _evaluate_on_holdout(pipeline, X_test: list, y_test: list) -> dict:
+    from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
+
+    preds = pipeline.predict(X_test)
+    probs = pipeline.predict_proba(X_test)[:, 1]
+    metrics = {
+        "eval_type": "chronological_holdout",
+        "holdout_size": len(y_test),
+        "accuracy": round(float(accuracy_score(y_test, preds)), 4),
+        "brier_score": round(float(brier_score_loss(y_test, probs)), 4),
+    }
+    if len(set(y_test)) == 2:  # AUC undefined with one class in the holdout
+        metrics["roc_auc"] = round(float(roc_auc_score(y_test, probs)), 4)
+    else:
+        metrics["note_holdout"] = (
+            "Holdout slice contains only one outcome class -- ROC-AUC not "
+            "computable; accuracy/Brier score still reported but treat with "
+            "extra caution until a more balanced holdout is available."
+        )
+    return metrics
+
+
+def _fit_and_evaluate(X: list, y: list) -> tuple:
+    """
+    Returns (fitted_ensemble_on_all_data, metrics_dict). metrics_dict's
+    top-level accuracy/brier_score/eval_type describe the ENSEMBLE
+    (the thing actually deployed/gated by _should_promote below) --
+    metrics_dict["logistic_metrics"]/["gbm_metrics"] report each
+    sub-model's OWN holdout performance independently alongside it, per
+    "compare models using out-of-sample performance" -- so it's always
+    visible whether the ensemble is actually earning its extra
+    complexity over either model alone, not just asserted.
+
+    Chronological holdout when there's enough data (module docstring);
+    train-only metrics (clearly labelled optimistic) otherwise -- same
+    split policy as before, just evaluating three models against it
+    instead of one.
+    """
+    from sklearn.metrics import accuracy_score
 
     n = len(y)
     if n >= MIN_SAMPLES_FOR_HOLDOUT:
@@ -129,29 +210,22 @@ def _fit_and_evaluate(X: list, y: list) -> tuple:
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        eval_pipeline = _new_pipeline()
-        eval_pipeline.fit(X_train, y_train)
-        preds = eval_pipeline.predict(X_test)
-        probs = eval_pipeline.predict_proba(X_test)[:, 1]
+        logistic_eval = _new_logistic_pipeline()
+        logistic_eval.fit(X_train, y_train)
+        gbm_eval = _new_gbm_pipeline()
+        gbm_eval.fit(X_train, y_train)
+        ensemble_eval = WinProbabilityEnsemble(logistic_eval, gbm_eval)
 
-        metrics = {
-            "eval_type": "chronological_holdout",
-            "holdout_size": len(y_test),
-            "accuracy": round(float(accuracy_score(y_test, preds)), 4),
-            "brier_score": round(float(brier_score_loss(y_test, probs)), 4),
-        }
-        if len(set(y_test)) == 2:  # AUC undefined with one class in the holdout
-            metrics["roc_auc"] = round(float(roc_auc_score(y_test, probs)), 4)
-        else:
-            metrics["note_holdout"] = (
-                "Holdout slice contains only one outcome class -- ROC-AUC not "
-                "computable; accuracy/Brier score still reported but treat with "
-                "extra caution until a more balanced holdout is available."
-            )
+        metrics = _evaluate_on_holdout(ensemble_eval, X_test, y_test)
+        metrics["logistic_metrics"] = _evaluate_on_holdout(logistic_eval, X_test, y_test)
+        metrics["gbm_metrics"] = _evaluate_on_holdout(gbm_eval, X_test, y_test)
     else:
-        eval_pipeline = _new_pipeline()
-        eval_pipeline.fit(X, y)
-        preds = eval_pipeline.predict(X)
+        logistic_eval = _new_logistic_pipeline()
+        logistic_eval.fit(X, y)
+        gbm_eval = _new_gbm_pipeline()
+        gbm_eval.fit(X, y)
+        ensemble_eval = WinProbabilityEnsemble(logistic_eval, gbm_eval)
+        preds = ensemble_eval.predict(X)
         metrics = {
             "eval_type": "train_only_no_holdout",
             "note": (
@@ -168,9 +242,12 @@ def _fit_and_evaluate(X: list, y: list) -> tuple:
     # above exists only to get an honest, unbiased metric; throwing away
     # the most recent slice of a still-small dataset in the live model
     # would waste exactly the data most relevant to current conditions.
-    final_pipeline = _new_pipeline()
-    final_pipeline.fit(X, y)
-    return final_pipeline, metrics
+    final_logistic = _new_logistic_pipeline()
+    final_logistic.fit(X, y)
+    final_gbm = _new_gbm_pipeline()
+    final_gbm.fit(X, y)
+    final_ensemble = WinProbabilityEnsemble(final_logistic, final_gbm)
+    return final_ensemble, metrics
 
 
 def _should_promote(challenger_metrics: dict, champion_metrics: dict | None) -> tuple[bool, str]:
@@ -244,8 +321,15 @@ def train_win_probability_model() -> dict:
     metrics["sample_count"] = len(rows)
     metrics["baseline_win_rate"] = round(win_rate, 4)
     metrics["feature_columns"] = feature_names
+    # `pipeline` is now a WinProbabilityEnsemble of two sub-models, each
+    # explaining "which factor matters" a different way -- both reported
+    # rather than picking one, per the module's own "AI must explain
+    # every signal" principle applied at this layer.
     metrics["feature_coefficients"] = dict(
-        zip(feature_names, pipeline.named_steps["clf"].coef_[0].round(4).tolist())
+        zip(feature_names, pipeline.logistic_pipeline.named_steps["clf"].coef_[0].round(4).tolist())
+    )
+    metrics["feature_importances_gbm"] = dict(
+        zip(feature_names, pipeline.gbm_pipeline.feature_importances_.round(4).tolist())
     )
 
     champion = ModelRegistry.objects.filter(model_name="win_probability", active_flag=True).first()

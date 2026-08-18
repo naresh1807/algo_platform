@@ -63,6 +63,7 @@ from apps.signals.engine import (
 from apps.signals.models import TradingSignal
 from common.constants import MarketRegime, SignalStatus, SignalType
 
+from .data_quality import validate_option_chain_snapshot
 from .models import OptionContract
 from .signals_engine import options_confluence_score, select_expiry
 from .strike_selector import suggest_best_strike
@@ -468,6 +469,12 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
             reasons.append(strike_detail)
             stage = stage or TradingSignal.RejectionStage.EXPIRY
         else:
+            quality_report = validate_option_chain_snapshot(underlying, expiry)
+            if not quality_report.valid:
+                reasons.append(f"OPTION DATA UNAVAILABLE: {'; '.join(quality_report.issues)}")
+                stage = stage or TradingSignal.RejectionStage.DATA_QUALITY
+
+        if expiry is not None and not reasons:
             suggestion = suggest_best_strike(underlying, expiry, direction=option_direction)
             if suggestion["suggested"] is None:
                 reasons.append(f"No suitable {side} strike to suggest: {suggestion['reason']}")

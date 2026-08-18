@@ -7,7 +7,9 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.risk.models import AccountEquity
+from apps.signals.models import TradingSignal
 
+from .data_quality import DataQualityReport
 from .metrics import compute_max_pain, compute_pcr, strike_support_resistance
 from .models import OptionChainSnapshot, OptionContract
 
@@ -392,6 +394,7 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
              patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
              patch.object(strat, "options_confluence_score", return_value=options_result), \
              patch.object(strat, "select_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "validate_option_chain_snapshot", return_value=DataQualityReport(valid=True, status="DATA_VALID", issues=[])), \
              patch.object(strat, "suggest_best_strike", return_value=suggestion), \
              patch.object(strat, "check_pre_trade", return_value=risk_decision):
             signal = strat.evaluate_index_direction_trade("NIFTY", "5m")
@@ -456,6 +459,7 @@ class EvaluateIndexDirectionTradeApprovalTests(TestCase):
              patch.object(strat, "aggregate_sentiment", return_value=sentiment), \
              patch.object(strat, "options_confluence_score", return_value=options_result), \
              patch.object(strat, "select_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch.object(strat, "validate_option_chain_snapshot", return_value=DataQualityReport(valid=True, status="DATA_VALID", issues=[])), \
              patch.object(strat, "suggest_best_strike", return_value=suggestion), \
              patch.object(strat, "check_pre_trade", return_value=risk_decision):
             return strat.evaluate_index_direction_trade("NIFTY", "5m")
@@ -603,3 +607,1064 @@ class SyncWatchlistOptionContractsTests(TestCase):
             result = sync_watchlist_option_contracts()
         self.assertTrue(result.get("skipped"))
         self.assertIn("BROKER_MODE", result.get("reason", ""))
+
+
+class DataQualityValidatorTests(TestCase):
+    """
+    apps.options.data_quality -- pure-function per-field validators (no
+    DB). Each one is a plain (ok, reason) check, mirroring apps.risk.
+    engine's own check style.
+    """
+
+    def test_validate_ltp(self):
+        from .data_quality import validate_ltp
+
+        self.assertTrue(validate_ltp(112.20)[0])
+        self.assertFalse(validate_ltp(None)[0])
+        self.assertFalse(validate_ltp(0)[0])
+        self.assertFalse(validate_ltp(-5)[0])
+
+    def test_validate_bid_ask(self):
+        from .data_quality import validate_bid_ask
+
+        self.assertTrue(validate_bid_ask(109.0, 111.0)[0])
+        self.assertFalse(validate_bid_ask(None, 111.0)[0])
+        self.assertFalse(validate_bid_ask(111.0, 109.0)[0])  # crossed
+        self.assertFalse(validate_bid_ask(0, 0)[0])
+
+    def test_validate_iv_rejects_outside_solver_bounds(self):
+        from .data_quality import validate_iv
+
+        self.assertTrue(validate_iv(18.5)[0])
+        self.assertFalse(validate_iv(None)[0])
+        self.assertFalse(validate_iv(0)[0])
+        self.assertFalse(validate_iv(600)[0])  # beyond greeks.py's own solver bound of 500%
+
+    def test_validate_greeks_rejects_out_of_range_delta(self):
+        from .data_quality import validate_greeks
+
+        self.assertTrue(validate_greeks({"delta": 0.55, "gamma": 0.001, "vega": 5.0})[0])
+        self.assertFalse(validate_greeks(None)[0])
+        self.assertFalse(validate_greeks({"delta": 1.5})[0])
+        self.assertFalse(validate_greeks({"delta": 0.5, "gamma": -0.001})[0])
+
+    def test_detect_stale_quotes(self):
+        from datetime import timedelta
+
+        from .data_quality import detect_stale_quotes
+
+        now = timezone.now()
+        is_stale, _ = detect_stale_quotes(now - timedelta(minutes=30), now=now, threshold_minutes=15)
+        self.assertTrue(is_stale)
+        is_stale, _ = detect_stale_quotes(now - timedelta(minutes=2), now=now, threshold_minutes=15)
+        self.assertFalse(is_stale)
+        self.assertTrue(detect_stale_quotes(None)[0])
+
+    def test_detect_bad_ticks_flags_ltp_far_outside_bid_ask(self):
+        from .data_quality import detect_bad_ticks
+
+        self.assertFalse(detect_bad_ticks(110.0, 109.0, 111.0)[0])
+        self.assertTrue(detect_bad_ticks(200.0, 109.0, 111.0)[0])  # LTP way outside the quoted spread
+        self.assertTrue(detect_bad_ticks(110.0, 111.0, 109.0)[0])  # crossed
+
+    def test_detect_wide_spread_contracts(self):
+        from .data_quality import detect_wide_spread_contracts
+
+        self.assertFalse(detect_wide_spread_contracts(109.0, 111.0, max_spread_pct=10.0)[0])
+        self.assertTrue(detect_wide_spread_contracts(90.0, 130.0, max_spread_pct=10.0)[0])
+
+
+class ValidateOptionChainSnapshotTests(TestCase):
+    """apps.options.data_quality.validate_option_chain_snapshot -- the chain-wide gate wired into evaluate_index_direction_trade."""
+
+    def setUp(self):
+        self.expiry = date.today() + timedelta(days=7)
+        self.contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24400,
+            option_type="CE", symbol_token="tok_ce_24400", tradingsymbol="NIFTY24400CE", lot_size=25,
+        )
+
+    def test_valid_with_a_fresh_sane_snapshot(self):
+        from .data_quality import validate_option_chain_snapshot
+
+        OptionChainSnapshot.objects.create(
+            contract=self.contract, timestamp=timezone.now(),
+            ltp=Decimal("112.20"), open_interest=5000, change_in_oi=0, volume=1000,
+        )
+        report = validate_option_chain_snapshot("NIFTY", self.expiry)
+        self.assertTrue(report.valid)
+        self.assertEqual(report.status, "DATA_VALID")
+
+    def test_invalid_when_every_snapshot_is_stale(self):
+        from datetime import timedelta as td
+
+        from .data_quality import validate_option_chain_snapshot
+
+        OptionChainSnapshot.objects.create(
+            contract=self.contract, timestamp=timezone.now() - td(minutes=60),
+            ltp=Decimal("112.20"), open_interest=5000, change_in_oi=0, volume=1000,
+        )
+        report = validate_option_chain_snapshot("NIFTY", self.expiry)
+        self.assertFalse(report.valid)
+        self.assertEqual(report.status, "DATA_INVALID")
+
+    def test_invalid_when_no_contracts_synced(self):
+        from .data_quality import validate_option_chain_snapshot
+
+        report = validate_option_chain_snapshot("BANKNIFTY", self.expiry)
+        self.assertFalse(report.valid)
+
+    def test_invalid_for_an_expired_expiry(self):
+        from .data_quality import validate_option_chain_snapshot
+
+        report = validate_option_chain_snapshot("NIFTY", date.today() - timedelta(days=1))
+        self.assertFalse(report.valid)
+
+
+class VolatilitySurfaceTests(TestCase):
+    """apps.options.volatility_surface -- IV percentile (pure) + skew/term-structure (DB-backed, real Greeks)."""
+
+    def test_calculate_iv_percentile(self):
+        from .volatility_surface import calculate_iv_percentile
+
+        self.assertEqual(calculate_iv_percentile(15.0, [10.0, 12.0, 14.0, 16.0, 18.0]), 60.0)
+        self.assertIsNone(calculate_iv_percentile(None, [10.0, 12.0]))
+        self.assertIsNone(calculate_iv_percentile(15.0, []))
+
+    def test_detect_contango_or_backwardation_pure(self):
+        from .volatility_surface import detect_contango_or_backwardation
+
+        contango = [{"days_to_expiry": 7, "atm_iv": 14.0}, {"days_to_expiry": 30, "atm_iv": 18.0}]
+        self.assertEqual(detect_contango_or_backwardation(contango), "contango")
+
+        backwardation = [{"days_to_expiry": 7, "atm_iv": 22.0}, {"days_to_expiry": 30, "atm_iv": 16.0}]
+        self.assertEqual(detect_contango_or_backwardation(backwardation), "backwardation")
+
+        self.assertEqual(detect_contango_or_backwardation([{"days_to_expiry": 7, "atm_iv": 14.0}]), "insufficient_data")
+
+    def test_calculate_atm_iv_and_skew_with_real_chain_fixture(self):
+        from apps.market_data.models import HistoricalData
+
+        from .volatility_surface import calculate_25_delta_skew, calculate_atm_iv, calculate_call_skew
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        # ATM CE (~0.59 delta, matches SuggestBestStrikeTests' known fixture)
+        atm_call = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="CE",
+            symbol_token="tok_ce_24400", tradingsymbol="NIFTY24400CE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=atm_call, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+        # Deep OTM CE, priced cheaply -> low delta, a plausible ~0.25-delta candidate
+        otm_call = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=25200, option_type="CE",
+            symbol_token="tok_ce_25200", tradingsymbol="NIFTY25200CE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=otm_call, timestamp=timezone.now(), ltp=Decimal("40.0"), open_interest=3000, change_in_oi=0, volume=800)
+        atm_put = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="PE",
+            symbol_token="tok_pe_24400", tradingsymbol="NIFTY24400PE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=atm_put, timestamp=timezone.now(), ltp=Decimal("220.0"), open_interest=4000, change_in_oi=0, volume=900)
+        otm_put = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=23800, option_type="PE",
+            symbol_token="tok_pe_23800", tradingsymbol="NIFTY23800PE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=otm_put, timestamp=timezone.now(), ltp=Decimal("35.0"), open_interest=2500, change_in_oi=0, volume=700)
+
+        atm_iv = calculate_atm_iv("NIFTY", expiry, 24500)
+        self.assertIsNotNone(atm_iv["call_iv"])
+        self.assertIsNotNone(atm_iv["put_iv"])
+        self.assertIsNotNone(atm_iv["average_iv"])
+
+        call_skew = calculate_call_skew("NIFTY", expiry, 24500)
+        self.assertIsNotNone(call_skew)  # a real number, not asserting a specific sign/magnitude on synthetic data
+
+        skew_25d = calculate_25_delta_skew("NIFTY", expiry, 24500)
+        self.assertIsNotNone(skew_25d)
+
+    def test_calculate_atm_iv_returns_none_side_when_unavailable(self):
+        from .volatility_surface import calculate_atm_iv
+
+        expiry = date.today() + timedelta(days=7)
+        result = calculate_atm_iv("NIFTY", expiry, 24500)
+        self.assertIsNone(result["call_iv"])
+        self.assertIsNone(result["put_iv"])
+        self.assertIsNone(result["average_iv"])
+
+
+class ExposureTests(TestCase):
+    """apps.options.exposure -- gamma/vanna/charm exposure proxies, all explicitly labeled MODELED."""
+
+    def setUp(self):
+        from apps.market_data.models import HistoricalData
+
+        self.expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        call = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24400, option_type="CE",
+            symbol_token="tok_ce_24400", tradingsymbol="NIFTY24400CE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=call, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+        put = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24400, option_type="PE",
+            symbol_token="tok_pe_24400", tradingsymbol="NIFTY24400PE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=put, timestamp=timezone.now(), ltp=Decimal("220.0"), open_interest=4000, change_in_oi=0, volume=900)
+
+    def test_net_gamma_exposure_is_modeled_and_uses_both_sides(self):
+        from .exposure import calculate_net_gamma_exposure
+
+        result = calculate_net_gamma_exposure("NIFTY", self.expiry, 24500)
+        self.assertEqual(result["label"], "MODELED")
+        self.assertIn("assumption", result)
+        self.assertEqual(result["contracts_used"], 2)
+        self.assertIsNotNone(result["net_gamma_exposure"])
+        self.assertIsNotNone(result["call_gamma_exposure"])
+        self.assertIsNotNone(result["put_gamma_exposure"])
+
+    def test_net_gamma_exposure_none_when_no_contracts(self):
+        from .exposure import calculate_net_gamma_exposure
+
+        result = calculate_net_gamma_exposure("BANKNIFTY", self.expiry, 55000)
+        self.assertIsNone(result["net_gamma_exposure"])
+        self.assertEqual(result["contracts_used"], 0)
+
+    def test_vanna_exposure_is_modeled(self):
+        from .exposure import calculate_vanna_exposure
+
+        result = calculate_vanna_exposure("NIFTY", self.expiry, 24500)
+        self.assertEqual(result["label"], "MODELED")
+        self.assertEqual(result["contracts_used"], 2)
+        self.assertIsNotNone(result["net_exposure"])
+
+    def test_charm_exposure_is_modeled(self):
+        from .exposure import calculate_charm_exposure
+
+        result = calculate_charm_exposure("NIFTY", self.expiry, 24500)
+        self.assertEqual(result["label"], "MODELED")
+        self.assertEqual(result["contracts_used"], 2)
+        self.assertIsNotNone(result["net_exposure"])
+
+
+class ExpectedMoveTests(TestCase):
+    """apps.options.expected_move -- hand-computed against spot=24500, iv=15%, dte=7 (math.sqrt-verified, not eyeballed)."""
+
+    def test_calculate_expected_move_matches_hand_computed_value(self):
+        from .expected_move import calculate_expected_move
+
+        result = calculate_expected_move(24500, 15, 7)
+        self.assertAlmostEqual(result["expected_move"], 508.93, places=2)
+        self.assertAlmostEqual(result["upper_range"], 25008.93, places=2)
+        self.assertAlmostEqual(result["lower_range"], 23991.07, places=2)
+        self.assertEqual(result["days_to_expiry"], 7)
+
+    def test_calculate_expected_move_none_on_missing_inputs(self):
+        from .expected_move import calculate_expected_move
+
+        self.assertIsNone(calculate_expected_move(None, 15, 7)["expected_move"])
+        self.assertIsNone(calculate_expected_move(24500, None, 7)["expected_move"])
+        self.assertIsNone(calculate_expected_move(24500, 15, None)["expected_move"])
+
+    def test_classify_price_vs_expected_range(self):
+        from .expected_move import classify_price_vs_expected_range
+
+        # Range [23991.07, 25008.93], width ~1017.86, near_threshold=10%
+        self.assertEqual(classify_price_vs_expected_range(24500, 25008.93, 23991.07), "inside_range")
+        self.assertEqual(classify_price_vs_expected_range(25100, 25008.93, 23991.07), "outside_upper_range")
+        self.assertEqual(classify_price_vs_expected_range(23900, 25008.93, 23991.07), "outside_lower_range")
+        self.assertEqual(classify_price_vs_expected_range(24990, 25008.93, 23991.07), "near_upper_range")
+        self.assertEqual(classify_price_vs_expected_range(None, 25008.93, 23991.07), "unavailable")
+
+    def test_calculate_expected_move_for_contract_with_real_chain_fixture(self):
+        from apps.market_data.models import HistoricalData
+
+        from .expected_move import calculate_expected_move_for_contract
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="CE",
+            symbol_token="tok_ce_24400", tradingsymbol="NIFTY24400CE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=contract, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+
+        result = calculate_expected_move_for_contract("NIFTY", expiry, 24500)
+        self.assertIsNotNone(result["expected_move"])
+        self.assertIsNotNone(result["atm_iv"])
+        self.assertGreater(result["upper_range"], 24500)
+        self.assertLess(result["lower_range"], 24500)
+
+
+class SupportResistanceTests(TestCase):
+    """apps.options.support_resistance -- confluence zones from OI + VWAP + prior-day + expected-move, no single source dominates."""
+
+    def setUp(self):
+        from apps.market_data.models import HistoricalData
+
+        self.expiry = date.today() + timedelta(days=7)
+        self.today = timezone.localdate()
+
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        # Prior day daily candle
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="1d", timestamp=timezone.now() - timedelta(days=1),
+            open=24300, high=24450, low=24250, close=24400, volume=500000, source="test",
+        )
+        call = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24600, option_type="CE",
+            symbol_token="tok_ce_24600", tradingsymbol="NIFTY24600CE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=call, timestamp=timezone.now(), ltp=Decimal("150.0"), open_interest=9000, change_in_oi=0, volume=2000)
+        put = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24300, option_type="PE",
+            symbol_token="tok_pe_24300", tradingsymbol="NIFTY24300PE", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=put, timestamp=timezone.now(), ltp=Decimal("120.0"), open_interest=8500, change_in_oi=0, volume=1800)
+
+    def test_dynamic_support_includes_oi_put_wall_below_spot(self):
+        from .support_resistance import calculate_dynamic_support
+
+        zones = calculate_dynamic_support("NIFTY", self.expiry, 24500)
+        self.assertTrue(any("oi_put_wall" in z["sources"] for z in zones))
+        for z in zones:
+            self.assertLess(z["level"], 24500)
+
+    def test_dynamic_resistance_includes_oi_call_wall_above_spot(self):
+        from .support_resistance import calculate_dynamic_resistance
+
+        zones = calculate_dynamic_resistance("NIFTY", self.expiry, 24500)
+        self.assertTrue(any("oi_call_wall" in z["sources"] for z in zones))
+        for z in zones:
+            self.assertGreater(z["level"], 24500)
+
+    def test_zones_sorted_nearest_first(self):
+        from .support_resistance import calculate_dynamic_support
+
+        zones = calculate_dynamic_support("NIFTY", self.expiry, 24500)
+        levels = [z["level"] for z in zones]
+        self.assertEqual(levels, sorted(levels, reverse=True))  # nearest (highest, below spot) first
+
+    def test_detect_support_and_resistance_break(self):
+        from .support_resistance import detect_resistance_break, detect_support_break
+
+        support_zones = [{"level": 24300, "sources": ["oi_put_wall"], "confluence_count": 1, "details": []}]
+        resistance_zones = [{"level": 24600, "sources": ["oi_call_wall"], "confluence_count": 1, "details": []}]
+
+        self.assertFalse(detect_support_break(24350, support_zones))
+        self.assertTrue(detect_support_break(24200, support_zones))
+        self.assertFalse(detect_resistance_break(24550, resistance_zones))
+        self.assertTrue(detect_resistance_break(24700, resistance_zones))
+        self.assertFalse(detect_support_break(24500, []))
+
+
+class LiquidityScoreTests(TestCase):
+    """apps.options.liquidity -- continuous 0-1 scoring, distinct from apps.risk.engine's hard pass/fail gate."""
+
+    def test_tight_spread_high_oi_scores_near_one(self):
+        from .liquidity import calculate_liquidity_score
+
+        result = calculate_liquidity_score(bid=109.9, ask=110.1, open_interest=50000, volume=20000)
+        self.assertIsNotNone(result["liquidity_score"])
+        self.assertGreater(result["liquidity_score"], 0.9)
+
+    def test_wide_spread_low_oi_scores_low(self):
+        from .liquidity import calculate_liquidity_score
+
+        result = calculate_liquidity_score(bid=80.0, ask=140.0, open_interest=10, volume=0)
+        self.assertIsNotNone(result["liquidity_score"])
+        self.assertLess(result["liquidity_score"], 0.3)
+
+    def test_missing_input_yields_none_overall_score(self):
+        from .liquidity import calculate_liquidity_score
+
+        result = calculate_liquidity_score(bid=None, ask=None, open_interest=5000, volume=1000)
+        self.assertIsNone(result["liquidity_score"])
+        self.assertIsNotNone(result["oi_score"])  # component that WAS available is still reported
+
+    def test_estimate_slippage_is_half_spread(self):
+        from .liquidity import estimate_slippage
+
+        self.assertEqual(estimate_slippage(109.0, 111.0), 1.0)
+        self.assertIsNone(estimate_slippage(None, 111.0))
+
+
+class PremiumEfficiencyTests(TestCase):
+    """apps.options.premium_efficiency -- intrinsic/time value plus premium-vs-realized-vol deviation."""
+
+    def test_intrinsic_and_time_value_for_itm_call(self):
+        from .premium_efficiency import calculate_intrinsic_value, calculate_time_value
+
+        intrinsic = calculate_intrinsic_value(spot=24550, strike=24400, option_type="CE")
+        self.assertEqual(intrinsic, 150.0)
+        self.assertEqual(calculate_time_value(option_price=180.0, intrinsic_value=intrinsic), 30.0)
+
+    def test_intrinsic_value_never_negative_for_otm(self):
+        from .premium_efficiency import calculate_intrinsic_value
+
+        self.assertEqual(calculate_intrinsic_value(spot=24300, strike=24400, option_type="CE"), 0.0)
+        self.assertEqual(calculate_intrinsic_value(spot=24500, strike=24400, option_type="PE"), 0.0)
+
+    def test_calculate_premium_deviation_labels_richness(self):
+        from .premium_efficiency import calculate_premium_deviation
+
+        self.assertEqual(calculate_premium_deviation(120.0, 100.0)["richness"], "rich")
+        self.assertEqual(calculate_premium_deviation(80.0, 100.0)["richness"], "cheap")
+        self.assertEqual(calculate_premium_deviation(102.0, 100.0)["richness"], "fair")
+        self.assertEqual(calculate_premium_deviation(None, 100.0)["richness"], "unavailable")
+
+    def test_calculate_realized_volatility_from_real_daily_candles(self):
+        from apps.market_data.models import HistoricalData
+
+        from .premium_efficiency import calculate_realized_volatility
+
+        base = timezone.now() - timedelta(days=25)
+        price = 24000
+        for i in range(22):
+            # A small deterministic oscillation -- real (nonzero) daily
+            # returns, not a flat series (which would give exactly-zero
+            # realized vol and not actually exercise the stdev math).
+            price = price + (50 if i % 2 == 0 else -30)
+            HistoricalData.objects.create(
+                symbol="NIFTY", timeframe="1d", timestamp=base + timedelta(days=i),
+                open=price, high=price + 20, low=price - 20, close=price,
+                volume=100000, source="test",
+            )
+
+        vol = calculate_realized_volatility("NIFTY", timeframe="1d", lookback_days=20)
+        self.assertIsNotNone(vol)
+        self.assertGreater(vol, 0)
+
+    def test_calculate_realized_volatility_none_with_too_little_history(self):
+        from .premium_efficiency import calculate_realized_volatility
+
+        self.assertIsNone(calculate_realized_volatility("NIFTY", timeframe="1d", lookback_days=20))
+
+    def test_calculate_premium_deviation_for_contract_with_real_fixture(self):
+        from apps.market_data.models import HistoricalData
+
+        from .premium_efficiency import calculate_premium_deviation_for_contract
+
+        base = timezone.now() - timedelta(days=25)
+        price = 24000
+        for i in range(22):
+            price = price + (50 if i % 2 == 0 else -30)
+            HistoricalData.objects.create(
+                symbol="NIFTY", timeframe="1d", timestamp=base + timedelta(days=i),
+                open=price, high=price + 20, low=price - 20, close=price,
+                volume=100000, source="test",
+            )
+
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=24400,
+            option_type="CE", symbol_token="tok_ce_24400b", tradingsymbol="NIFTY24400CE2", lot_size=25,
+        )
+        result = calculate_premium_deviation_for_contract(contract, spot=24500, market_price=313.73)
+        self.assertIsNotNone(result["theoretical_value"])
+        self.assertIsNotNone(result["realized_vol_pct"])
+        self.assertIn(result["richness"], ("rich", "cheap", "fair"))
+        self.assertEqual(result["intrinsic_value"], 100.0)  # 24500 - 24400
+
+
+class OiIntelligenceTests(TestCase):
+    """apps.options.oi_intelligence -- confidence-scored buildup, OI concentration, migration, and the smart-money proxy."""
+
+    def setUp(self):
+        self.expiry = date.today() + timedelta(days=7)
+
+    def _make_snapshot_series(self, contract, ltp_series, oi_series, volume_series, minutes_apart=5):
+        base = timezone.now() - timedelta(minutes=minutes_apart * (len(ltp_series) - 1))
+        rows = []
+        for i, (ltp, oi, vol) in enumerate(zip(ltp_series, oi_series, volume_series)):
+            rows.append(OptionChainSnapshot.objects.create(
+                contract=contract, timestamp=base + timedelta(minutes=minutes_apart * i),
+                ltp=Decimal(str(ltp)), open_interest=oi, change_in_oi=0, volume=vol,
+            ))
+        return rows
+
+    def test_classify_buildup_with_confidence_bullish_call_buildup(self):
+        from .oi_intelligence import classify_buildup_with_confidence
+
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="CE",
+            symbol_token="tok_ce_24500", tradingsymbol="NIFTY24500CE", lot_size=25,
+        )
+        # Rising price + rising OI + elevated volume -> buildup_bullish, high confidence.
+        self._make_snapshot_series(contract, ltp_series=[100, 105, 120], oi_series=[5000, 5200, 6000], volume_series=[500, 600, 2000])
+
+        result = classify_buildup_with_confidence("NIFTY", self.expiry, "CE")
+        self.assertEqual(result["classification"], "buildup_bullish")
+        self.assertIsNotNone(result["confidence"])
+        self.assertGreaterEqual(result["confidence"], 0.3)
+        self.assertLessEqual(result["confidence"], 0.95)
+
+    def test_classify_buildup_with_confidence_insufficient_data(self):
+        from .oi_intelligence import classify_buildup_with_confidence
+
+        result = classify_buildup_with_confidence("NIFTY", self.expiry, "CE")
+        self.assertIsNone(result["classification"])
+        self.assertIsNone(result["confidence"])
+
+    def test_calculate_oi_concentration_matches_hand_computed_value(self):
+        from .oi_intelligence import calculate_oi_concentration
+
+        for strike, oi in [(24400, 1000), (24500, 6000), (24600, 3000), (24700, 500)]:
+            contract = OptionContract.objects.create(
+                underlying="NIFTY", expiry=self.expiry, strike=strike, option_type="CE",
+                symbol_token=f"tok_ce_{strike}", tradingsymbol=f"NIFTY{strike}CE", lot_size=25,
+            )
+            OptionChainSnapshot.objects.create(contract=contract, timestamp=timezone.now(), ltp=Decimal("100"), open_interest=oi, change_in_oi=0, volume=500)
+
+        # total OI = 10500, top_n=2 (24500 + 24600) = 9000 -> 9000/10500 = 85.71%
+        result = calculate_oi_concentration("NIFTY", self.expiry, "CE", top_n=2)
+        self.assertAlmostEqual(result["concentration_pct"], 85.71, places=1)
+        self.assertEqual(len(result["top_strikes"]), 2)
+
+    def test_detect_oi_migration_reports_shift(self):
+        from .oi_intelligence import detect_oi_migration
+
+        c1 = OptionContract.objects.create(underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="CE", symbol_token="tok_m1", tradingsymbol="NIFTY24500CEM", lot_size=25)
+        c2 = OptionContract.objects.create(underlying="NIFTY", expiry=self.expiry, strike=24600, option_type="CE", symbol_token="tok_m2", tradingsymbol="NIFTY24600CEM", lot_size=25)
+
+        t1 = timezone.now() - timedelta(minutes=10)
+        t2 = timezone.now() - timedelta(minutes=5)
+        t3 = timezone.now()
+        # t1: c1 has the highest OI. t2/t3: c2 takes over -> a real migration.
+        OptionChainSnapshot.objects.create(contract=c1, timestamp=t1, ltp=Decimal("100"), open_interest=8000, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c2, timestamp=t1, ltp=Decimal("80"), open_interest=2000, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c1, timestamp=t2, ltp=Decimal("100"), open_interest=3000, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c2, timestamp=t2, ltp=Decimal("80"), open_interest=9000, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c1, timestamp=t3, ltp=Decimal("100"), open_interest=3100, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c2, timestamp=t3, ltp=Decimal("80"), open_interest=9500, change_in_oi=0, volume=100)
+
+        result = detect_oi_migration("NIFTY", self.expiry, "CE", lookback_points=3)
+        self.assertTrue(result["migrated"])
+        self.assertEqual(result["peak_strike_sequence"], [24500.0, 24600.0, 24600.0])
+
+    def test_detect_oi_migration_no_shift_when_peak_holds(self):
+        from .oi_intelligence import detect_oi_migration
+
+        c1 = OptionContract.objects.create(underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="CE", symbol_token="tok_h1", tradingsymbol="NIFTY24500CEH", lot_size=25)
+        t1, t2 = timezone.now() - timedelta(minutes=5), timezone.now()
+        OptionChainSnapshot.objects.create(contract=c1, timestamp=t1, ltp=Decimal("100"), open_interest=5000, change_in_oi=0, volume=100)
+        OptionChainSnapshot.objects.create(contract=c1, timestamp=t2, ltp=Decimal("100"), open_interest=5200, change_in_oi=0, volume=100)
+
+        result = detect_oi_migration("NIFTY", self.expiry, "CE", lookback_points=3)
+        self.assertFalse(result["migrated"])
+
+    def test_institutional_positioning_proxy_always_labeled_proxy(self):
+        from .oi_intelligence import institutional_positioning_proxy
+
+        result = institutional_positioning_proxy("NIFTY", self.expiry, "bullish")
+        self.assertEqual(result["label"], "PROXY")
+        self.assertIn(result["leaning"], ("insufficient_data",))  # no data seeded in this test
+
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="CE",
+            symbol_token="tok_proxy", tradingsymbol="NIFTY24500CEP", lot_size=25,
+        )
+        self._make_snapshot_series(contract, ltp_series=[100, 110, 125], oi_series=[4000, 4500, 5500], volume_series=[400, 500, 1500])
+        result = institutional_positioning_proxy("NIFTY", self.expiry, "bullish")
+        self.assertEqual(result["label"], "PROXY")
+        self.assertEqual(result["leaning"], "large_holders_likely_accumulating")
+
+
+class ConfirmationTests(TestCase):
+    """apps.options.confirmation -- structured directional/setup-quality factor breakdown + conflict detection."""
+
+    def test_evaluate_trend_bullish_and_bearish(self):
+        from .confirmation import _evaluate_trend
+
+        bullish_ind = {"close": 24500, "ema9_slope": 5.0, "ema21_slope": 3.0}
+        self.assertEqual(_evaluate_trend(bullish_ind, "bullish")["signal"], "bullish")
+
+        bearish_ind = {"close": 24500, "ema9_slope": -5.0, "ema21_slope": -3.0}
+        self.assertEqual(_evaluate_trend(bearish_ind, "bullish")["signal"], "bearish")
+
+        mixed_ind = {"close": 24500, "ema9_slope": 5.0, "ema21_slope": -3.0}
+        self.assertEqual(_evaluate_trend(mixed_ind, "bullish")["signal"], "neutral")
+
+        self.assertEqual(_evaluate_trend(None, "bullish")["signal"], "unavailable")
+
+    def test_evaluate_momentum(self):
+        from .confirmation import _evaluate_momentum
+
+        self.assertEqual(_evaluate_momentum({"close": 100, "macd_hist": 2.0}, "bullish")["signal"], "bullish")
+        self.assertEqual(_evaluate_momentum({"close": 100, "macd_hist": -2.0}, "bullish")["signal"], "bearish")
+
+    def test_evaluate_volume_requires_elevated_volume_and_direction(self):
+        from .confirmation import _evaluate_volume
+
+        low_vol = {"relative_volume": 1.0, "macd_hist": 2.0}
+        self.assertEqual(_evaluate_volume(low_vol, "bullish")["signal"], "neutral")
+
+        elevated_bullish = {"relative_volume": 2.0, "macd_hist": 2.0}
+        self.assertEqual(_evaluate_volume(elevated_bullish, "bullish")["signal"], "bullish")
+
+        elevated_bearish = {"relative_volume": 2.0, "macd_hist": -2.0}
+        self.assertEqual(_evaluate_volume(elevated_bearish, "bullish")["signal"], "bearish")
+
+    def test_evaluate_greeks_sweet_spot(self):
+        from .confirmation import _evaluate_greeks
+
+        self.assertEqual(_evaluate_greeks(0.5)["signal"], "favorable")
+        self.assertEqual(_evaluate_greeks(0.1)["signal"], "unfavorable")
+        self.assertEqual(_evaluate_greeks(None)["signal"], "unavailable")
+
+    def test_evaluate_liquidity_and_risk_reward(self):
+        from .confirmation import _evaluate_liquidity, _evaluate_risk_reward
+
+        self.assertEqual(_evaluate_liquidity(0.8)["signal"], "favorable")
+        self.assertEqual(_evaluate_liquidity(0.3)["signal"], "unfavorable")
+        self.assertEqual(_evaluate_risk_reward(2.0)["signal"], "favorable")
+        self.assertEqual(_evaluate_risk_reward(0.8)["signal"], "unfavorable")
+
+    def test_detect_signal_conflict_levels(self):
+        from .confirmation import detect_signal_conflict
+
+        all_agree = {
+            "trend": {"signal": "bullish"}, "momentum": {"signal": "bullish"},
+            "oi": {"signal": "neutral"}, "volume": {"signal": "unavailable"}, "skew": {"signal": "bullish"},
+        }
+        level, _ = detect_signal_conflict(all_agree, "bullish")
+        self.assertEqual(level, "CONFLICT_LOW")
+
+        one_disagrees = {
+            "trend": {"signal": "bullish"}, "momentum": {"signal": "bullish"},
+            "oi": {"signal": "bearish"}, "volume": {"signal": "neutral"}, "skew": {"signal": "neutral"},
+        }
+        level, _ = detect_signal_conflict(one_disagrees, "bullish")
+        self.assertEqual(level, "CONFLICT_MEDIUM")
+
+        majority_disagree = {
+            "trend": {"signal": "bearish"}, "momentum": {"signal": "bearish"},
+            "oi": {"signal": "bearish"}, "volume": {"signal": "bullish"}, "skew": {"signal": "neutral"},
+        }
+        level, _ = detect_signal_conflict(majority_disagree, "bullish")
+        self.assertEqual(level, "CONFLICT_HIGH")
+
+        all_unavailable = {k: {"signal": "unavailable"} for k in ("trend", "momentum", "oi", "volume", "skew")}
+        level, detail = detect_signal_conflict(all_unavailable, "bullish")
+        self.assertEqual(level, "CONFLICT_LOW")
+        self.assertIn("No directional factors available", detail)
+
+    def test_evaluate_multi_signal_confirmation_structure_with_real_fixture(self):
+        from apps.market_data.models import HistoricalData
+
+        from .confirmation import evaluate_multi_signal_confirmation
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="CE",
+            symbol_token="tok_conf_ce", tradingsymbol="NIFTY24400CECONF", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=contract, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+
+        ind = {"close": 24500, "ema9_slope": 5.0, "ema21_slope": 3.0, "macd_hist": 2.0, "relative_volume": 1.5}
+        result = evaluate_multi_signal_confirmation(
+            "NIFTY", expiry, "bullish", ind, 24500, delta=0.5, liquidity_score=0.7, risk_reward=1.8,
+        )
+        self.assertEqual(set(result["directional_factors"].keys()), {"trend", "momentum", "oi", "volume", "skew"})
+        self.assertEqual(set(result["setup_quality_factors"].keys()), {"greeks", "liquidity", "expected_move", "risk_reward"})
+        self.assertIn(result["conflict_level"], ("CONFLICT_LOW", "CONFLICT_MEDIUM", "CONFLICT_HIGH"))
+        self.assertEqual(result["setup_quality_factors"]["greeks"]["signal"], "favorable")
+        self.assertEqual(result["setup_quality_factors"]["risk_reward"]["signal"], "favorable")
+
+
+class AnomalyDetectionTests(TestCase):
+    """apps.options.anomaly_detection -- z-score vs. rolling historical baseline, hand-verified arithmetic."""
+
+    def test_z_score_anomaly_hand_computed(self):
+        from .anomaly_detection import _z_score_anomaly
+
+        # baseline mean=10, std=sqrt(2)=1.4142; current=20 -> z=7.07
+        result = _z_score_anomaly(20, [10, 12, 8, 11, 9])
+        self.assertAlmostEqual(result["z_score"], 7.07, places=2)
+        self.assertTrue(result["is_anomaly"])
+
+        result = _z_score_anomaly(10.5, [10, 12, 8, 11, 9])
+        self.assertFalse(result["is_anomaly"])
+
+    def test_z_score_anomaly_insufficient_history(self):
+        from .anomaly_detection import _z_score_anomaly
+
+        result = _z_score_anomaly(20, [10, 12])
+        self.assertIsNone(result["z_score"])
+        self.assertFalse(result["is_anomaly"])
+
+    def test_z_score_anomaly_zero_variance_baseline(self):
+        from .anomaly_detection import _z_score_anomaly
+
+        result = _z_score_anomaly(50, [10, 10, 10, 10, 10])
+        self.assertIsNone(result["z_score"])
+        self.assertFalse(result["is_anomaly"])
+
+    def test_detect_volume_and_oi_and_iv_and_premium_anomaly_with_real_fixture(self):
+        from .anomaly_detection import (
+            detect_iv_anomaly, detect_oi_change_anomaly, detect_premium_anomaly, detect_volume_anomaly,
+        )
+
+        expiry = date.today() + timedelta(days=7)
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24500, option_type="CE",
+            symbol_token="tok_anomaly", tradingsymbol="NIFTY24500CEA", lot_size=25,
+        )
+        base = timezone.now() - timedelta(minutes=50)
+        # 5 normal baseline readings, then one clear volume/OI-change/IV outlier as "current".
+        for i, (vol, oi_chg, iv) in enumerate([(500, 100, 15.0), (520, 90, 15.2), (480, 110, 14.8), (510, 95, 15.1), (490, 105, 14.9)]):
+            OptionChainSnapshot.objects.create(
+                contract=contract, timestamp=base + timedelta(minutes=5 * i),
+                ltp=Decimal("100.0"), open_interest=5000, change_in_oi=oi_chg, volume=vol, iv=iv,
+            )
+        OptionChainSnapshot.objects.create(
+            contract=contract, timestamp=base + timedelta(minutes=30),
+            ltp=Decimal("100.0"), open_interest=5000, change_in_oi=5000, volume=50000, iv=60.0,
+        )
+
+        self.assertTrue(detect_volume_anomaly(contract)["is_anomaly"])
+        self.assertTrue(detect_oi_change_anomaly(contract)["is_anomaly"])
+        self.assertTrue(detect_iv_anomaly(contract)["is_anomaly"])
+
+    def test_detect_premium_anomaly_uses_change_series_not_raw_levels(self):
+        from .anomaly_detection import detect_premium_anomaly
+
+        expiry = date.today() + timedelta(days=7)
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24600, option_type="CE",
+            symbol_token="tok_prem_anomaly", tradingsymbol="NIFTY24600CEA", lot_size=25,
+        )
+        base = timezone.now() - timedelta(minutes=60)
+        # Steady +2% moves each step (normal drift), then one huge +40% jump.
+        price = 100.0
+        for i in range(6):
+            OptionChainSnapshot.objects.create(
+                contract=contract, timestamp=base + timedelta(minutes=5 * i),
+                ltp=Decimal(str(round(price, 2))), open_interest=5000, change_in_oi=0, volume=500,
+            )
+            price *= 1.02
+        OptionChainSnapshot.objects.create(
+            contract=contract, timestamp=base + timedelta(minutes=35),
+            ltp=Decimal(str(round(price * 1.40, 2))), open_interest=5000, change_in_oi=0, volume=500,
+        )
+
+        result = detect_premium_anomaly(contract)
+        self.assertTrue(result["is_anomaly"])
+
+    def test_bid_ask_imbalance_anomaly_is_honestly_unavailable(self):
+        from .anomaly_detection import detect_bid_ask_imbalance_anomaly
+
+        result = detect_bid_ask_imbalance_anomaly()
+        self.assertFalse(result["available"])
+        self.assertIn("reason", result)
+
+
+class OrderFlowStubTests(TestCase):
+    """apps.options.order_flow -- every function honestly unavailable, no fabricated numbers."""
+
+    def test_every_function_reports_unavailable(self):
+        from . import order_flow
+
+        for fn_name in (
+            "calculate_bid_ask_imbalance", "detect_aggressive_buying", "detect_aggressive_selling",
+            "calculate_volume_acceleration", "detect_order_flow_shift", "detect_liquidity_withdrawal",
+        ):
+            result = getattr(order_flow, fn_name)()
+            self.assertFalse(result["available"])
+            self.assertIn("reason", result)
+
+
+class StrategySelectorTests(TestCase):
+    """apps.options.strategy_selector -- classification only, only LONG_CALL/LONG_PUT/NO_TRADE are ever executable."""
+
+    def test_no_direction_is_no_trade(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy(None, "TRENDING", 40.0)
+        self.assertEqual(result["strategy"], "NO_TRADE")
+        self.assertTrue(result["executable"])
+
+    def test_high_conflict_is_no_trade(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "TRENDING", 40.0, conflict_level="CONFLICT_HIGH")
+        self.assertEqual(result["strategy"], "NO_TRADE")
+
+    def test_trending_moderate_iv_gives_executable_long_option(self):
+        from .strategy_selector import classify_strategy
+
+        bullish = classify_strategy("bullish", "TRENDING", 40.0, expected_move_position="inside_range")
+        self.assertEqual(bullish["strategy"], "LONG_CALL")
+        self.assertTrue(bullish["executable"])
+
+        bearish = classify_strategy("bearish", "TRENDING_BEARISH", 40.0, expected_move_position="inside_range")
+        self.assertEqual(bearish["strategy"], "LONG_PUT")
+        self.assertTrue(bearish["executable"])
+
+    def test_trending_high_iv_is_spread_not_executable(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "TRENDING", 85.0, expected_move_position="inside_range")
+        self.assertEqual(result["strategy"], "BULL_CALL_SPREAD")
+        self.assertFalse(result["executable"])
+
+    def test_move_already_extended_avoids_long_option_even_low_iv(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "TRENDING", 40.0, expected_move_position="outside_upper_range")
+        self.assertNotEqual(result["strategy"], "LONG_CALL")
+        self.assertFalse(result["executable"])
+
+    def test_non_trending_high_iv_is_iron_condor(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "SIDEWAYS", 85.0)
+        self.assertEqual(result["strategy"], "IRON_CONDOR")
+        self.assertFalse(result["executable"])
+
+    def test_non_trending_low_iv_is_straddle(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "SIDEWAYS", 10.0)
+        self.assertEqual(result["strategy"], "STRADDLE")
+        self.assertFalse(result["executable"])
+
+    def test_fallback_is_no_trade(self):
+        from .strategy_selector import classify_strategy
+
+        result = classify_strategy("bullish", "SIDEWAYS", 50.0)  # neither high nor low IV, non-trending
+        self.assertEqual(result["strategy"], "NO_TRADE")
+        self.assertTrue(result["executable"])
+
+    def test_executable_strategies_constant_matches_actual_execution_capability(self):
+        from .strategy_selector import EXECUTABLE_STRATEGIES
+
+        self.assertEqual(EXECUTABLE_STRATEGIES, frozenset({"LONG_CALL", "LONG_PUT", "NO_TRADE"}))
+
+
+class SignalScoringTests(TestCase):
+    """apps.options.signal_scoring -- hand-verified weighted arithmetic, unavailable factors excluded and re-normalized."""
+
+    def test_calculate_signal_score_hand_computed(self):
+        from .signal_scoring import calculate_signal_score
+
+        weights = {
+            "trend": 0.18, "momentum": 0.12, "oi": 0.15, "volume": 0.07, "skew": 0.08,
+            "greeks": 0.10, "liquidity": 0.13, "expected_move": 0.08, "risk_reward": 0.09,
+        }
+        confirmation_result = {
+            "directional_factors": {
+                "trend": {"signal": "bullish"}, "momentum": {"signal": "bearish"},
+                "oi": {"signal": "neutral"}, "volume": {"signal": "unavailable"}, "skew": {"signal": "unavailable"},
+            },
+            "setup_quality_factors": {
+                "greeks": {"signal": "favorable"}, "liquidity": {"signal": "favorable"},
+                "expected_move": {"signal": "neutral"}, "risk_reward": {"signal": "unfavorable"},
+            },
+        }
+        result = calculate_signal_score(confirmation_result, weights=weights)
+        self.assertAlmostEqual(result["total_score"], 0.6176, places=3)
+        self.assertEqual(set(result["factors_excluded"]), {"volume", "skew"})
+
+    def test_all_unavailable_gives_none_not_zero(self):
+        from .signal_scoring import calculate_signal_score
+
+        confirmation_result = {
+            "directional_factors": {k: {"signal": "unavailable"} for k in ("trend", "momentum", "oi", "volume", "skew")},
+            "setup_quality_factors": {k: {"signal": "unavailable"} for k in ("greeks", "liquidity", "expected_move", "risk_reward")},
+        }
+        result = calculate_signal_score(confirmation_result)
+        self.assertIsNone(result["total_score"])
+
+    def test_uses_db_backed_weights_by_default(self):
+        from .models import get_scoring_weights
+        from .signal_scoring import calculate_signal_score
+
+        confirmation_result = {
+            "directional_factors": {"trend": {"signal": "bullish"}},
+            "setup_quality_factors": {},
+        }
+        result = calculate_signal_score(confirmation_result)
+        self.assertEqual(result["weights_used"], get_scoring_weights().as_dict())
+        self.assertEqual(result["total_score"], 1.0)  # only factor available is bullish=1.0
+
+
+class SignalExplanationTests(TestCase):
+    """apps.options.signal_explanation -- itemized positive/negative/risk-flag lists, neutral/unavailable omitted."""
+
+    def test_build_signal_explanation_itemizes_correctly(self):
+        from .signal_explanation import build_signal_explanation
+
+        confirmation_result = {
+            "directional_factors": {
+                "trend": {"signal": "bullish", "detail": "EMA9/21 rising"},
+                "momentum": {"signal": "bearish", "detail": "MACD histogram negative"},
+                "oi": {"signal": "neutral", "detail": "no strong OI signal"},
+            },
+            "setup_quality_factors": {
+                "liquidity": {"signal": "favorable", "detail": "liquidity score 0.85"},
+            },
+            "conflict_level": "CONFLICT_MEDIUM", "conflict_detail": "1/2 factors disagree.",
+        }
+        result = build_signal_explanation(confirmation_result)
+        self.assertEqual(result["positive_factors"], ["Trend: EMA9/21 rising", "Liquidity: liquidity score 0.85"])
+        self.assertEqual(result["negative_factors"], ["Momentum: MACD histogram negative"])
+        self.assertEqual(len(result["risk_flags"]), 1)
+        self.assertIn("Conflict Medium", result["risk_flags"][0])
+
+    def test_anomalies_surface_only_when_flagged(self):
+        from .signal_explanation import build_signal_explanation
+
+        confirmation_result = {"directional_factors": {}, "setup_quality_factors": {}}
+        anomalies = [
+            {"is_anomaly": True, "detail": "volume z=4.2"},
+            {"is_anomaly": False, "detail": "iv z=0.5"},
+        ]
+        result = build_signal_explanation(confirmation_result, anomalies=anomalies)
+        self.assertEqual(len(result["risk_flags"]), 1)
+        self.assertIn("volume z=4.2", result["risk_flags"][0])
+
+
+class FinalSignalTests(TestCase):
+    """apps.options.final_signal.resolve_final_signal -- the Section-43-style assembled object, real contract identity or explicit None throughout."""
+
+    def test_rejected_signal_with_no_contract_is_data_invalid(self):
+        from .final_signal import resolve_final_signal
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type="no_trade", entry_price=Decimal("24500"), stop_loss=Decimal("24500"),
+            total_score=0, technical_score=0, sentiment_score=0, risk_score=0, options_score=0,
+            regime="sideways", status="rejected", rejection_stage="data_quality",
+            reason="OPTION DATA UNAVAILABLE: test",
+        )
+        result = resolve_final_signal(signal)
+        self.assertEqual(result["status"], "DATA_INVALID")
+        self.assertIsNone(result["tradingSymbol"])
+        self.assertIsNone(result["instrumentToken"])
+        self.assertIsNone(result["strike"])
+        self.assertEqual(result["decision"], "NO_TRADE")
+
+    def test_approved_signal_with_real_contract_is_signal_ready(self):
+        from apps.market_data.models import HistoricalData
+
+        from .final_signal import resolve_final_signal
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="CE",
+            symbol_token="tok_final_ce", tradingsymbol="NIFTY24400CEFINAL", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=contract, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type="buy", entry_price=Decimal("313.73"), stop_loss=Decimal("280.0"),
+            target_1=Decimal("360.0"), target_2=Decimal("400.0"), position_size=25,
+            option_side="CE", strike_price=Decimal("24400"), option_contract=contract,
+            total_score=0.7, technical_score=0.7, sentiment_score=0.1, risk_score=1.0, options_score=0.6,
+            regime="trending", status="approved", reason="test approved signal",
+        )
+        result = resolve_final_signal(signal)
+        self.assertEqual(result["status"], "SIGNAL_READY")
+        self.assertEqual(result["tradingSymbol"], "NIFTY24400CEFINAL")
+        self.assertEqual(result["instrumentToken"], "tok_final_ce")
+        self.assertEqual(result["strike"], 24400.0)
+        self.assertEqual(result["optionType"], "CE")
+        self.assertEqual(result["direction"], "bullish")
+        self.assertEqual(result["decision"], "BUY")
+        self.assertIsNotNone(result["delta"])
+        self.assertIsNotNone(result["riskReward"])
+        self.assertIsInstance(result["support"], list)
+        self.assertIsInstance(result["resistance"], list)
+        self.assertIn("expected_move", result["expectedMove"])
+        self.assertIn(result["strategy"], ("LONG_CALL", "NO_TRADE", "BULL_CALL_SPREAD"))
+
+
+class FinalSignalViewTests(APITestCase):
+    """GET /api/options/final-signal/ -- 404 with no signals, 200 with the assembled object otherwise."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="trader_final", password="pw")
+        self.client.force_authenticate(self.user)
+
+    def test_404_when_no_signals_exist(self):
+        response = self.client.get("/api/options/final-signal/", {"underlying": "NIFTY"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_200_with_latest_signal(self):
+        TradingSignal.objects.create(
+            symbol="NIFTY", signal_type="no_trade", entry_price=Decimal("24500"), stop_loss=Decimal("24500"),
+            total_score=0, technical_score=0, sentiment_score=0, risk_score=0, options_score=0,
+            regime="sideways", status="rejected", reason="test",
+        )
+        response = self.client.get("/api/options/final-signal/", {"underlying": "NIFTY"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("status", response.data)
+        self.assertIn("decision", response.data)
+
+
+class FeatureStoreTests(TestCase):
+    """apps.options.feature_store.build_feature_vector -- real contract fixture populates scores/greeks, no contract leaves them None."""
+
+    def test_no_contract_leaves_scores_and_greeks_none(self):
+        from .feature_store import build_feature_vector
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type="no_trade", entry_price=Decimal("24500"), stop_loss=Decimal("24500"),
+            total_score=0, technical_score=0, sentiment_score=0, risk_score=0, options_score=0,
+            regime="sideways", status="rejected", reason="test",
+        )
+        vector = build_feature_vector(signal)
+        self.assertIsNone(vector["delta"])
+        self.assertIsNone(vector["trendScore"])
+        self.assertIsNone(vector["orderFlowScore"])  # always None -- honest stub, no data source
+        self.assertEqual(vector["marketRegime"], "sideways")
+        self.assertIn(vector["timeOfDay"], ("opening", "morning", "midday", "afternoon", "closing", "closed", "unknown"))
+
+    def test_real_contract_populates_greeks_and_scores(self):
+        from apps.market_data.models import HistoricalData
+
+        from .feature_store import build_feature_vector
+
+        expiry = date.today() + timedelta(days=7)
+        HistoricalData.objects.create(
+            symbol="NIFTY", timeframe="5m", timestamp=timezone.now(),
+            open=24500, high=24510, low=24490, close=24500, volume=100000, source="test",
+        )
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=expiry, strike=24400, option_type="CE",
+            symbol_token="tok_fs_ce", tradingsymbol="NIFTY24400CEFS", lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(contract=contract, timestamp=timezone.now(), ltp=Decimal("313.73"), open_interest=5000, change_in_oi=0, volume=1000)
+
+        signal = TradingSignal.objects.create(
+            symbol="NIFTY", signal_type="buy", entry_price=Decimal("313.73"), stop_loss=Decimal("280.0"),
+            target_1=Decimal("360.0"), position_size=25, option_side="CE", strike_price=Decimal("24400"),
+            option_contract=contract,
+            total_score=0.7, technical_score=0.7, sentiment_score=0.1, risk_score=1.0, options_score=0.6,
+            regime="trending", status="approved", reason="test",
+        )
+        vector = build_feature_vector(signal)
+        self.assertIsNotNone(vector["delta"])
+        self.assertIsNotNone(vector["gamma"])
+        self.assertEqual(vector["expiry"], expiry.isoformat())
+        self.assertEqual(vector["strikeDistance"], 100.0)
+        self.assertIsNotNone(vector["riskRewardScore"])

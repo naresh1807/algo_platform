@@ -71,11 +71,19 @@ export const endpoints = {
   riskEvents: (params) => api.get("/risk/events/", { params: { page_size: 500, ...params } }),
   killSwitch: () => api.get("/risk/kill-switch/"),
   equity: () => api.get("/risk/equity/"),
+  // apps.risk.views.EquityCurveView -- the raw EquitySnapshot time series
+  // for the performance dashboard's equity curve chart.
+  equityCurve: (lookback_days = 30) => api.get("/risk/equity/curve/", { params: { lookback_days } }),
   performance: () => api.get("/analytics/performance/", { params: { page_size: 500 } }),
   // apps.analytics.views.DailyPnLReportView -- today's row is always
   // refreshed live server-side (today isn't over yet), past days read
   // straight from the stored PerformanceMetrics table.
   dailyPnLReport: (days = 30) => api.get("/analytics/daily-pnl/", { params: { days } }),
+  // apps.analytics.views.SharpeRatioView / PerformanceBreakdownView --
+  // Phase G of the Options Intelligence Engine's performance dashboard.
+  sharpeRatio: (lookback_days = 30) => api.get("/analytics/sharpe-ratio/", { params: { lookback_days } }),
+  performanceBreakdown: (lookback_days = 30) =>
+    api.get("/analytics/performance-breakdown/", { params: { lookback_days } }),
   dailyReviews: () => api.get("/learning/daily-reviews/", { params: { page_size: 500 } }),
   driftEvents: () => api.get("/learning/drift-events/", { params: { page_size: 500 } }),
   strategyVersions: () => api.get("/learning/strategy-versions/", { params: { page_size: 500 } }),

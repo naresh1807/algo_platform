@@ -97,3 +97,26 @@ def broadcast_new_signal(sender, instance: TradingSignal, created: bool, **kwarg
             "Failed to broadcast TradingSignal %s to signals_live -- signal was still saved.",
             instance.pk,
         )
+
+
+@receiver(post_save, sender=TradingSignal)
+def save_feature_snapshot(sender, instance: TradingSignal, created: bool, **kwargs):
+    """
+    Feature Store / Signal Audit Trail (apps.signals.models.
+    SignalFeatureSnapshot): a SEPARATE receiver from broadcast_new_signal
+    above, on purpose -- a feature-snapshot failure must never affect
+    the WebSocket broadcast (or vice versa), same independent-receiver
+    pattern Django's signal dispatch already supports natively. Lazy,
+    function-local import of apps.options (not at this module's top
+    level) -- apps.signals must not depend on apps.options at Django
+    app-registry load time, the same reasoning apps.signals.models'
+    own OptionSide TextChoices duplication documents; this runs at
+    request/task time, well after every app is already loaded, so the
+    import here is safe.
+    """
+    if not created:
+        return
+
+    from apps.options.feature_store import save_signal_feature_snapshot
+
+    save_signal_feature_snapshot(instance)

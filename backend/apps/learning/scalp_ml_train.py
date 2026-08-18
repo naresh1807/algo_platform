@@ -110,8 +110,16 @@ def train_scalp_win_probability_model() -> dict:
     metrics["sample_count"] = len(rows)
     metrics["baseline_win_rate"] = round(win_rate, 4)
     metrics["feature_columns"] = feature_names
+    # `pipeline` is a WinProbabilityEnsemble (apps.learning.ml_train's
+    # LogisticRegression+GradientBoosting ensemble, reused as-is here --
+    # see this module's own docstring on why it shares _fit_and_evaluate
+    # rather than a second training implementation) -- both sub-models'
+    # own "which feature mattered" reporting kept, not just one.
     metrics["feature_coefficients"] = dict(
-        zip(feature_names, pipeline.named_steps["clf"].coef_[0].round(4).tolist())
+        zip(feature_names, pipeline.logistic_pipeline.named_steps["clf"].coef_[0].round(4).tolist())
+    )
+    metrics["feature_importances_gbm"] = dict(
+        zip(feature_names, pipeline.gbm_pipeline.feature_importances_.round(4).tolist())
     )
 
     champion = ModelRegistry.objects.filter(model_name=MODEL_NAME, active_flag=True).first()

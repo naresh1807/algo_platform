@@ -282,3 +282,179 @@ def walk_forward_backtest(
             "here, see this module's docstring."
         ),
     }
+
+
+def _aggregate_r_multiples(r_multiples: list[float]) -> dict:
+    """
+    Pool statistics over a list of trade R-multiples (e.g. every
+    out-of-sample trade across every fold of rolling_walk_forward_
+    backtest below) -- win_rate/profit_factor/expectancy_r match
+    BacktestResult's own definitions; sharpe_r/sortino_r/calmar_r are
+    the TRADE-SEQUENCE analogues of apps.analytics.services'
+    equity-curve versions (mean/downside-deviation/drawdown computed
+    over R-multiples directly, since a backtest has no daily equity
+    curve of its own, only a sequence of trade outcomes) -- named with
+    an "_r" suffix specifically so they're never confused with the
+    equity-curve Sharpe/Sortino/Calmar apps.analytics.services reports
+    for LIVE trading.
+    """
+    import statistics
+
+    if not r_multiples:
+        return {
+            "trade_count": 0, "win_rate": None, "profit_factor": None, "expectancy_r": None,
+            "sharpe_r": None, "sortino_r": None, "calmar_r": None, "max_drawdown_r": None,
+        }
+
+    wins = [r for r in r_multiples if r > 0]
+    losses = [r for r in r_multiples if r <= 0]
+    win_rate = round(len(wins) / len(r_multiples), 4)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    profit_factor = round(gross_win / gross_loss, 4) if gross_loss > 0 else None
+    expectancy_r = round(sum(r_multiples) / len(r_multiples), 4)
+
+    sharpe_r = None
+    sortino_r = None
+    if len(r_multiples) >= 2:
+        mean_r = statistics.mean(r_multiples)
+        stdev_r = statistics.pstdev(r_multiples)
+        if stdev_r > 0:
+            sharpe_r = round(mean_r / stdev_r, 4)
+        downside = [r for r in r_multiples if r < 0]
+        if downside:
+            downside_dev = statistics.pstdev(downside) if len(downside) > 1 else abs(downside[0])
+            if downside_dev > 0:
+                sortino_r = round(mean_r / downside_dev, 4)
+
+    # Max drawdown over the CUMULATIVE r-multiple curve -- treats each
+    # trade as adding r_multiple "R units" to a running total, the same
+    # peak-to-trough measurement apps.analytics.services.
+    # compute_max_drawdown_for_day uses for a real equity curve, just in
+    # R-units instead of currency.
+    cumulative = 0.0
+    peak = 0.0
+    max_dd_r = 0.0
+    for r in r_multiples:
+        cumulative += r
+        peak = max(peak, cumulative)
+        max_dd_r = max(max_dd_r, peak - cumulative)
+
+    calmar_r = round(expectancy_r * len(r_multiples) / max_dd_r, 4) if max_dd_r > 0 else None
+
+    return {
+        "trade_count": len(r_multiples), "win_rate": win_rate, "profit_factor": profit_factor,
+        "expectancy_r": expectancy_r, "sharpe_r": sharpe_r, "sortino_r": sortino_r,
+        "calmar_r": calmar_r, "max_drawdown_r": round(max_dd_r, 4),
+    }
+
+
+def rolling_walk_forward_backtest(
+    symbol: str, timeframe: str = "5m",
+    technical_score_thresholds: list[float] | None = None,
+    atr_stop_multipliers: list[float] | None = None,
+    n_folds: int = 5,
+    min_trades_to_rank: int = 5,
+) -> dict:
+    """
+    A REAL rolling multi-fold walk-forward: Train -> Test -> Move the
+    window forward -> Repeat -- distinct from walk_forward_backtest()
+    above, which despite its name is a SINGLE train/test split (that
+    function is unchanged and still available for a faster one-shot
+    check; existing callers of it are unaffected by this addition).
+
+    The candle range is divided into n_folds+1 equal-sized chronological
+    segments. Fold i's TRAIN window is an EXPANDING window (every
+    segment up to and including fold i) -- more history only ever helps
+    expectancy estimation here, and NSE index data doesn't have the
+    kind of regime non-stationarity (e.g. a stock post-restructuring)
+    that would make discarding older data actively necessary. Fold i's
+    TEST window is the segment immediately after, strictly later in
+    time than anything the fold's own combo-selection ever saw -- no
+    future information leaks into a fold's own selection, the same
+    anti-look-ahead discipline walk_forward_backtest already applies to
+    its own single split.
+
+    Returns per-fold results PLUS an aggregate_out_of_sample_metrics
+    dict pooling every fold's TEST-window trades together -- that pooled
+    number, not any single fold's, is the one that should actually
+    inform a decision: it's the closest available proxy to "how would
+    this selection PROCESS have performed, repeated over time," which
+    is a stronger claim than any one fold's often-noisy result alone.
+    """
+    technical_score_thresholds = technical_score_thresholds or [0.5, 0.6, 0.7, 0.8]
+    atr_stop_multipliers = atr_stop_multipliers or [1.2, 1.5, 1.8]
+
+    if n_folds < 2:
+        raise ValueError("n_folds must be >= 2 -- need at least one train segment and one test segment.")
+
+    df = load_full_indicator_frame(symbol, timeframe)
+    if df.empty:
+        return {"error": "insufficient_historical_data", "symbol": symbol, "timeframe": timeframe}
+
+    n = len(df)
+    segment_size = n // (n_folds + 1)
+    if segment_size < 10:
+        return {
+            "error": "insufficient_candles_for_requested_fold_count",
+            "symbol": symbol, "timeframe": timeframe, "total_candles": n, "n_folds": n_folds,
+        }
+
+    fold_results = []
+    all_test_r_multiples: list[float] = []
+
+    for fold in range(n_folds):
+        train_end = segment_size * (fold + 1)
+        test_start = train_end
+        test_end = min(segment_size * (fold + 2), n) - 1
+
+        train_candidates = []
+        for threshold, multiplier in itertools.product(technical_score_thresholds, atr_stop_multipliers):
+            result = run_backtest(
+                symbol, timeframe, technical_score_threshold=threshold,
+                atr_stop_multiplier=multiplier, start_index=1, end_index=train_end - 1,
+            )
+            if result.total_trades >= min_trades_to_rank:
+                train_candidates.append(result)
+
+        if not train_candidates:
+            fold_results.append({
+                "fold": fold, "error": "no_combo_reached_min_trades_on_train_window", "train_candles": train_end,
+            })
+            continue
+
+        train_candidates.sort(key=lambda r: (r.expectancy_r if r.expectancy_r is not None else -999), reverse=True)
+        best = train_candidates[0]
+
+        test_result = run_backtest(
+            symbol, timeframe, technical_score_threshold=best.technical_score_threshold,
+            atr_stop_multiplier=best.atr_stop_multiplier, start_index=test_start, end_index=test_end,
+        )
+        all_test_r_multiples.extend(t.r_multiple for t in test_result.trades)
+
+        fold_results.append({
+            "fold": fold, "train_candles": train_end,
+            "test_start_index": test_start, "test_end_index": test_end,
+            "selected_technical_score_threshold": best.technical_score_threshold,
+            "selected_atr_stop_multiplier": best.atr_stop_multiplier,
+            "train_metrics": best.as_dict(), "test_metrics": test_result.as_dict(),
+        })
+
+    valid_folds = [f for f in fold_results if "error" not in f]
+    if not valid_folds:
+        return {
+            "error": "no_fold_produced_a_valid_result",
+            "symbol": symbol, "timeframe": timeframe, "fold_results": fold_results,
+        }
+
+    return {
+        "symbol": symbol, "timeframe": timeframe, "n_folds": n_folds, "total_candles": n,
+        "fold_results": fold_results,
+        "aggregate_out_of_sample_metrics": _aggregate_r_multiples(all_test_r_multiples),
+        "note": (
+            "aggregate_out_of_sample_metrics pools every fold's TEST-window trades -- "
+            "this is the number that should actually inform a decision, not any single "
+            "fold's own result. Same scope reminder as walk_forward_backtest: technical "
+            "layer only, sentiment/options-chain/live-risk-engine state not replayed."
+        ),
+    }

@@ -264,3 +264,34 @@ class EvaluateNowView(APIView):
 
         signal = evaluate_index_direction_trade(underlying, timeframe)
         return Response(TradingSignalSerializer(signal).data)
+
+
+class FinalSignalView(APIView):
+    """
+    GET /api/options/final-signal/?underlying=NIFTY -- apps.options.
+    final_signal.resolve_final_signal for the LATEST TradingSignal on
+    this underlying, assembled into this platform's full structured
+    "final signal" shape (exact contract identity, greeks, support/
+    resistance, expected move, scored confirmation factors, itemized
+    explanation, strategy classification). Read-only view builder --
+    never re-runs the trading decision itself; see that module's own
+    docstring.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        underlying = request.query_params.get("underlying", "NIFTY")
+
+        from apps.signals.models import TradingSignal
+
+        from .final_signal import resolve_final_signal
+
+        signal = (
+            TradingSignal.objects.filter(symbol=underlying).select_related("option_contract")
+            .order_by("-created_at").first()
+        )
+        if signal is None:
+            return Response({"error": f"No signals generated yet for {underlying}."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(resolve_final_signal(signal))

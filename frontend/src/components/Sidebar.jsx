@@ -9,7 +9,7 @@ const LINKS = [
   { to: "/investing", label: "Stock Investing" },
   { to: "/positions", label: "Positions" },
   { to: "/scalping", label: "Scalping Strategies" },
-  { to: "/reports", label: "Daily P&L Report" },
+  { to: "/reports", label: "Performance" },
   { to: "/risk", label: "Risk Log" },
   { to: "/learning", label: "Learning / Review" },
 ];

@@ -277,7 +277,7 @@ def _check_combined_open_risk(
     "Risk amount" here is each position's own price-based risk (qty x
     |entry - stop|), the same quantity apps.risk.engine already sizes
     new trades against -- not notional exposure (that's what
-    _check_single_symbol_exposure already covers separately). Returns
+    _cap_qty_to_single_symbol_exposure already covers separately). Returns
     True (does not block) if the correlation matrix can't be computed
     yet (insufficient historical data) -- same "unknown is not a hard
     block" stance the rest of this module uses for missing data.
@@ -457,16 +457,49 @@ def _compute_position_size(
     return max(qty, 0), "; ".join(notes)
 
 
-def _check_single_symbol_exposure(symbol: str, entry_price: Decimal, qty: int, equity: AccountEquity) -> tuple[bool, str]:
+def _cap_qty_to_single_symbol_exposure(
+    symbol: str, entry_price: Decimal, qty: int, equity: AccountEquity,
+) -> tuple[int, str]:
+    """
+    manual section 13's "Exposure rules" single-symbol cap, applied as a
+    SIZE CAP rather than a pass/fail veto on the risk-based qty
+    _compute_position_size already produced. The two constraints
+    (risk % per trade, max % notional in one symbol) are independent
+    budgets -- a trade whose risk-based qty happens to cost more than
+    the exposure cap can still be taken at a SMALLER size that fits both
+    budgets at once; rejecting it outright (the previous behavior of
+    this check, back when it was named _check_single_symbol_exposure)
+    throws away a perfectly good trade for no reason a real risk desk
+    would recognize. This mirrors _compute_position_size's own
+    "reduce size" posture for drawdown/expiry-day, applied to the
+    exposure budget too, instead of being the one constraint in this
+    module that vetoes instead of sizing down.
+
+    Only returns qty=0 (a genuine rejection, not just a smaller size)
+    when even ONE unit at `entry_price` already costs more than the
+    exposure budget -- that trade truly cannot be taken at any size.
+    """
     limits = settings.RISK_HARD_LIMITS
-    notional = entry_price * qty
-    exposure_pct = float(notional / equity.current_equity * 100) if equity.current_equity else 0.0
-    if exposure_pct > limits["MAX_ONE_SYMBOL_EXPOSURE_PCT"]:
-        return False, (
-            f"{symbol} exposure would be {exposure_pct:.1f}% of equity, "
-            f"over the {limits['MAX_ONE_SYMBOL_EXPOSURE_PCT']}% single-symbol limit."
+    if entry_price <= 0 or not equity.current_equity:
+        return qty, ""
+
+    max_notional = equity.current_equity * (Decimal(str(limits["MAX_ONE_SYMBOL_EXPOSURE_PCT"])) / Decimal(100))
+    max_affordable_qty = int(max_notional / entry_price)
+
+    if max_affordable_qty <= 0:
+        return 0, (
+            f"{symbol} entry price {entry_price} alone exceeds the "
+            f"{limits['MAX_ONE_SYMBOL_EXPOSURE_PCT']}% single-symbol exposure limit of the "
+            f"current {equity.current_equity} equity -- cannot buy even one unit within budget."
         )
-    return True, ""
+
+    if max_affordable_qty < qty:
+        return max_affordable_qty, (
+            f"Position size capped to {max_affordable_qty} (from {qty}) by the "
+            f"{limits['MAX_ONE_SYMBOL_EXPOSURE_PCT']}% single-symbol exposure limit for {symbol}."
+        )
+
+    return qty, ""
 
 
 def check_pre_trade(symbol: str, entry_price: Decimal, stop_loss: Decimal) -> RiskDecision:
@@ -507,17 +540,20 @@ def check_pre_trade(symbol: str, entry_price: Decimal, stop_loss: Decimal) -> Ri
             reasons=[sizing_note or "Computed position size was zero."],
         )
 
-    exposure_ok, exposure_reason = _check_single_symbol_exposure(symbol, entry_price, qty, equity)
-    if not exposure_ok:
-        return RiskDecision(approved=False, risk_score=0.0, reasons=[exposure_reason])
+    qty, exposure_note = _cap_qty_to_single_symbol_exposure(symbol, entry_price, qty, equity)
+    if qty <= 0:
+        return RiskDecision(approved=False, risk_score=0.0, reasons=[exposure_note])
 
+    # Combined open risk is evaluated against the FINAL (possibly
+    # exposure-capped) qty above, not the pre-cap risk-based qty -- it
+    # must judge the actual size this trade would be taken at.
     combined_risk_ok, combined_risk_reason = _check_combined_open_risk(
         symbol, entry_price, stop_loss, qty, equity,
     )
     if not combined_risk_ok:
         return RiskDecision(approved=False, risk_score=0.0, reasons=[combined_risk_reason])
 
-    reasons_for_approval = [sizing_note] if sizing_note else []
+    reasons_for_approval = [n for n in (sizing_note, exposure_note) if n]
     return RiskDecision(
         approved=True, risk_score=1.0, reasons=reasons_for_approval, position_size=qty,
     )

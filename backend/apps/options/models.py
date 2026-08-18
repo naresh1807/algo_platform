@@ -155,3 +155,67 @@ def get_options_strategy_settings() -> "OptionsStrategySetting":
     """
     row, _ = OptionsStrategySetting.objects.get_or_create(pk=1)
     return row
+
+
+class ScoringWeights(models.Model):
+    """
+    Singleton (same enforced-pk=1 pattern as OptionsStrategySetting/
+    ExecutionModeSetting) holding the RUNTIME-CONFIGURABLE weights
+    apps.options.signal_scoring.calculate_signal_score combines apps.
+    options.confirmation's per-factor breakdown with -- per this
+    platform's own instruction that fixed scoring weights "MUST NOT be
+    treated as universal." Deliberately DB-backed, not a settings.py
+    constant, so weights can be tuned/validated against historical
+    performance (apps.analytics) without a redeploy, the same
+    "operator-controlled override" reasoning ExecutionModeSetting's own
+    docstring gives.
+
+    Field set matches apps.options.confirmation.evaluate_multi_signal_
+    confirmation's ACTUAL 9 factors (trend, momentum, oi, volume, skew,
+    greeks, liquidity, expected_move, risk_reward) -- not a literal
+    match to any illustrative example weight list, since this build's
+    confirmation engine doesn't compute separate standalone
+    "market_structure"/"oi_change"/"iv" factors distinct from what's
+    already folded into trend/oi/skew above. Defaults sum to 1.0, but
+    apps.options.signal_scoring.calculate_signal_score renormalizes
+    over whatever weight is actually available on a given signal (some
+    factors are routinely unavailable, e.g. skew before enough
+    contracts are synced), so an operator changing weights doesn't need
+    to manually keep them summing to exactly 1.0 either.
+    """
+
+    trend_weight = models.FloatField(default=0.18)
+    momentum_weight = models.FloatField(default=0.12)
+    oi_weight = models.FloatField(default=0.15)
+    volume_weight = models.FloatField(default=0.07)
+    skew_weight = models.FloatField(default=0.08)
+    greeks_weight = models.FloatField(default=0.10)
+    liquidity_weight = models.FloatField(default=0.13)
+    expected_move_weight = models.FloatField(default=0.08)
+    risk_reward_weight = models.FloatField(default=0.09)
+    changed_at = models.DateTimeField(auto_now=True)
+    changed_by = models.CharField(max_length=150, blank=True)
+
+    class Meta:
+        db_table = "options_scoring_weights"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1  # enforce singleton
+        super().save(*args, **kwargs)
+
+    def as_dict(self) -> dict:
+        return {
+            "trend": self.trend_weight, "momentum": self.momentum_weight, "oi": self.oi_weight,
+            "volume": self.volume_weight, "skew": self.skew_weight, "greeks": self.greeks_weight,
+            "liquidity": self.liquidity_weight, "expected_move": self.expected_move_weight,
+            "risk_reward": self.risk_reward_weight,
+        }
+
+    def __str__(self):
+        return f"trend={self.trend_weight} oi={self.oi_weight} liquidity={self.liquidity_weight} ..."
+
+
+def get_scoring_weights() -> "ScoringWeights":
+    """Live, DB-backed weights -- see ScoringWeights' own docstring for why this stays DB-backed, not a settings.py constant."""
+    row, _ = ScoringWeights.objects.get_or_create(pk=1)
+    return row
