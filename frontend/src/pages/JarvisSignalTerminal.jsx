@@ -14,6 +14,7 @@ import StatusBadge from "../components/StatusBadge.jsx";
 import TimeframeSelector from "../components/TimeframeSelector.jsx";
 import Watchlist from "../components/Watchlist.jsx";
 import { DEFAULT_TIMEFRAME, TIMEFRAMES } from "../constants/market.js";
+import { useExpiryStatus } from "../hooks/useExpiryStatus.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 import { useThemeStore } from "../store/themeStore.js";
@@ -57,8 +58,15 @@ export default function JarvisSignalTerminal() {
   const [evaluating, setEvaluating] = useState(false);
   const [evaluateError, setEvaluateError] = useState(null);
 
-  const [expiries, setExpiries] = useState([]);
-  const [expiry, setExpiry] = useState("");
+  // Single shared source of truth for expiry selection (apps.options.
+  // expiry_service via /api/options/expiry-status/) -- see
+  // hooks/useExpiryStatus.js's own docstring for why this replaced this
+  // page's own "fetch expiries, auto-select first, never re-validate"
+  // effect.
+  const {
+    expiry, setExpiry, availableExpiries: expiries, lastSuccessfulSync,
+    rolloverRequired, unavailable: expiryUnavailable, error: expiryError,
+  } = useExpiryStatus(underlying);
   const [chainRows, setChainRows] = useState([]);
   const [spot, setSpot] = useState(null);
   const chainContainerRef = useRef(null);
@@ -116,19 +124,11 @@ export default function JarvisSignalTerminal() {
     endpoints.optionsStrategySettings().then((res) => setStrategySettings(res.data));
   }, []);
 
+  // Chain rows reset whenever the underlying changes -- the expiry
+  // itself is now owned by useExpiryStatus above (it re-defaults on
+  // underlying change too, see that hook's own effect).
   useEffect(() => {
-    let cancelled = false;
-    setExpiry("");
     setChainRows([]);
-    endpoints.optionExpiries(underlying).then((res) => {
-      if (cancelled) return;
-      const list = res.data.expiries ?? [];
-      setExpiries(list);
-      if (list.length > 0) setExpiry(list[0]);
-    });
-    return () => {
-      cancelled = true;
-    };
   }, [underlying]);
 
   useEffect(() => {
@@ -342,8 +342,25 @@ export default function JarvisSignalTerminal() {
           </div>
 
           <div className="panel">
-            <h3>Option Chain — {underlying} {expiry && `· ${expiry}`}</h3>
-            {expiries.length === 0 ? (
+            <h3 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span>Option Chain — {underlying} {expiry && `· ${expiry}`}</span>
+              {rolloverRequired && !expiryUnavailable && (
+                <StatusBadge tone="warn">Rollover pending</StatusBadge>
+              )}
+              {lastSuccessfulSync && (
+                <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)", textTransform: "none", letterSpacing: 0 }}>
+                  Contracts synced {new Date(lastSuccessfulSync).toLocaleString()}
+                </span>
+              )}
+            </h3>
+            {expiryError ? (
+              <EmptyState title="Could not load expiry information" detail={expiryError} />
+            ) : expiryUnavailable ? (
+              <EmptyState
+                title="Contract sync temporarily unavailable"
+                detail={`No valid, non-expired expiry is available for ${underlying} right now -- a rollover resync is required and should complete automatically shortly.`}
+              />
+            ) : expiries.length === 0 ? (
               <EmptyState title={`No expiries synced yet for ${underlying}`} />
             ) : (
               <OptionChainTable

@@ -121,6 +121,16 @@ export const endpoints = {
   optionsAnalytics: (underlying, expiry) =>
     api.get("/options/analytics/", { params: { underlying, expiry } }),
   optionExpiries: (underlying) => api.get("/options/expiries/", { params: { underlying } }),
+  // apps.options.views.OptionExpiryStatusView -- current_expiry/
+  // next_expiry/available_expiries/last_successful_sync/rollover_required
+  // in one call, backend-computed via apps.options.expiry_service (the
+  // single source of truth for expiry rollover -- the frontend never
+  // guesses an expiry weekday itself). 503 when no valid expiry exists
+  // and sync can't recover; axios resolves 503 as a normal response
+  // here (not a thrown error) since callers need the body (rollover_required)
+  // to render a real message, not just a caught exception.
+  optionExpiryStatus: (underlying) =>
+    api.get("/options/expiry-status/", { params: { underlying }, validateStatus: (s) => s === 200 || s === 503 }),
   optionChain: (underlying, expiry) => api.get("/options/chain/", { params: { underlying, expiry } }),
   bestStrike: (underlying, expiry, direction) =>
     api.get("/options/best-strike/", { params: { underlying, expiry, direction } }),

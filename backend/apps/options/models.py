@@ -46,12 +46,27 @@ class OptionContract(models.Model):
         default=0,
         help_text="Contract's minimum tradeable quantity -- real orders must be a whole multiple of this.",
     )
+    is_active = models.BooleanField(
+        default=True, db_index=True,
+        help_text=(
+            "Whether this contract is currently eligible to be traded/quoted -- maintained by "
+            "apps.options.contract_sync using apps.options.expiry_service.is_expiry_eligible "
+            "(cutoff-aware: a contract expiring TODAY stays active until "
+            "settings.OPTIONS_EXPIRY_CUTOFF_TIME, not just until midnight). Never a reason to "
+            "delete a row -- historical/expired contracts stay in the table (is_active=False) so "
+            "past OptionChainSnapshot data remains attached for backtesting/analytics; live-trading "
+            "code should filter on this instead of re-deriving expiry eligibility itself."
+        ),
+    )
 
     class Meta:
         db_table = "option_contracts"
         unique_together = ("underlying", "expiry", "strike", "option_type")
         ordering = ["underlying", "expiry", "strike"]
-        indexes = [models.Index(fields=["underlying", "expiry"])]
+        indexes = [
+            models.Index(fields=["underlying", "expiry"]),
+            models.Index(fields=["underlying", "is_active"]),
+        ]
 
     def __str__(self):
         return f"{self.underlying} {self.strike} {self.option_type} {self.expiry}"
@@ -213,6 +228,46 @@ class ScoringWeights(models.Model):
 
     def __str__(self):
         return f"trend={self.trend_weight} oi={self.oi_weight} liquidity={self.liquidity_weight} ..."
+
+
+class OptionSyncStatus(models.Model):
+    """
+    One row per underlying, maintained by apps.options.contract_sync on
+    every sync attempt (success or failure) -- this is what makes the
+    instrument-master/contract sync's health OBSERVABLE and survivable
+    across process restarts: the in-process instrument-master cache
+    (apps.options.instrument_master's own module-level dict) is real and
+    useful for avoiding repeat downloads within one process's lifetime,
+    but it can't answer "when did this last actually succeed" from a
+    fresh Django shell, the API, or a Celery worker that just restarted
+    -- that's what this table is for.
+
+    Read by apps.options.expiry_service.expiry_status (the
+    last_successful_sync the API/frontend surface) and by
+    apps.options.tasks.options_sync_health_check (deciding whether a
+    self-healing resync is needed) -- never written to by anything
+    except apps.options.contract_sync.sync_underlying_contracts, so
+    there is exactly one place that can make this table say something
+    that didn't actually happen.
+    """
+
+    underlying = models.CharField(max_length=32, unique=True, db_index=True)
+    last_successful_sync = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+    last_result = models.JSONField(
+        null=True, blank=True,
+        help_text="Most recent sync_underlying_contracts() summary: expiries synced, "
+                  "inserted/updated/deactivated/skipped counts -- same shape the management "
+                  "command prints and the health check reads.",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "option_sync_status"
+
+    def __str__(self):
+        return f"{self.underlying}: last_successful_sync={self.last_successful_sync}"
 
 
 def get_scoring_weights() -> "ScoringWeights":

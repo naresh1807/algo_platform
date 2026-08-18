@@ -9,6 +9,7 @@ from .views import (
     OptionChainView,
     OptionContractViewSet,
     OptionExpiriesView,
+    OptionExpiryStatusView,
     OptionsAnalyticsView,
     OptionsStrategySettingView,
 )
@@ -20,6 +21,7 @@ router.register("snapshots", OptionChainSnapshotViewSet, basename="option-snapsh
 urlpatterns = router.urls + [
     path("analytics/", OptionsAnalyticsView.as_view(), name="options-analytics"),
     path("expiries/", OptionExpiriesView.as_view(), name="options-expiries"),
+    path("expiry-status/", OptionExpiryStatusView.as_view(), name="options-expiry-status"),
     path("chain/", OptionChainView.as_view(), name="options-chain"),
     path("best-strike/", BestStrikeView.as_view(), name="options-best-strike"),
     path("strategy-settings/", OptionsStrategySettingView.as_view(), name="options-strategy-settings"),

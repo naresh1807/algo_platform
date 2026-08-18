@@ -1,8 +1,9 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -12,6 +13,195 @@ from apps.signals.models import TradingSignal
 from .data_quality import DataQualityReport
 from .metrics import compute_max_pain, compute_pcr, strike_support_resistance
 from .models import OptionChainSnapshot, OptionContract
+
+
+def _ist(year, month, day, hour=10, minute=0):
+    """
+    Builds an aware Asia/Kolkata datetime for expiry-service tests --
+    same "accept an explicit `at` for deterministic testing" convention
+    apps.market_data.market_hours.is_market_open already established
+    (see that module's own docstring), so none of these tests depend on
+    when they're actually run and no time-freezing library is needed
+    (none is installed in this project).
+    """
+    return timezone.make_aware(datetime(year, month, day, hour, minute), timezone.get_default_timezone())
+
+
+class ExpiryServiceTests(TestCase):
+    """
+    apps.options.expiry_service -- the single shared expiry-resolution
+    service. Covers the platform's real expiry-lifecycle requirements:
+    cutoff-aware rollover on expiry day itself, weekend/holiday
+    handling, month/year boundaries, multi-expiry selection, and the
+    UTC/IST timezone boundary (settings.OPTIONS_EXPIRY_CUTOFF_TIME
+    defaults to 15:30 IST, confirmed via config/settings.py).
+    """
+
+    UNDERLYING = "TESTIDX"
+
+    def _make_contract(self, expiry, strike=100, symbol_token=None):
+        return OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=expiry, strike=strike, option_type="CE",
+            symbol_token=symbol_token or f"tok_{expiry.isoformat()}_{strike}",
+        )
+
+    # 1. Normal non-expiry trading day.
+    def test_normal_trading_day_expiry_in_future_is_eligible(self):
+        from .expiry_service import is_expiry_eligible
+
+        at = _ist(2026, 8, 18, 11, 0)  # a Tuesday
+        self.assertTrue(is_expiry_eligible(date(2026, 8, 21), at=at))
+
+    # 2. Expiry day before market close.
+    def test_expiry_day_before_cutoff_is_still_eligible(self):
+        from .expiry_service import is_expiry_eligible
+
+        at = _ist(2026, 8, 21, 14, 59)
+        self.assertTrue(is_expiry_eligible(date(2026, 8, 21), at=at))
+
+    # 3. Expiry day immediately after market close.
+    def test_expiry_day_after_cutoff_rolls_over(self):
+        from .expiry_service import is_expiry_eligible, resolve_current_expiry
+
+        at = _ist(2026, 8, 21, 15, 31)
+        self.assertFalse(is_expiry_eligible(date(2026, 8, 21), at=at))
+
+        self._make_contract(date(2026, 8, 21))
+        self._make_contract(date(2026, 8, 28))
+        self.assertEqual(resolve_current_expiry(self.UNDERLYING, at=at), date(2026, 8, 28))
+
+    # 4. Day after expiry.
+    def test_day_after_expiry_is_never_eligible_regardless_of_time(self):
+        from .expiry_service import is_expiry_eligible
+
+        at_morning = _ist(2026, 8, 22, 9, 0)
+        at_evening = _ist(2026, 8, 22, 20, 0)
+        self.assertFalse(is_expiry_eligible(date(2026, 8, 21), at=at_morning))
+        self.assertFalse(is_expiry_eligible(date(2026, 8, 21), at=at_evening))
+
+    # 5. Weekend.
+    def test_weekend_resolves_to_nearest_future_expiry(self):
+        from .expiry_service import resolve_current_expiry
+
+        saturday = _ist(2026, 8, 22, 11, 0)  # Aug 22 2026 is a Saturday
+        self._make_contract(date(2026, 8, 27))  # next Thursday
+        self.assertEqual(resolve_current_expiry(self.UNDERLYING, at=saturday), date(2026, 8, 27))
+
+    # 6. Month-end and year-end rollover.
+    def test_month_end_rollover(self):
+        from .expiry_service import is_expiry_eligible
+
+        at = _ist(2026, 8, 31, 16, 0)  # after cutoff, last day of August
+        self.assertFalse(is_expiry_eligible(date(2026, 8, 31), at=at))
+        self.assertTrue(is_expiry_eligible(date(2026, 9, 1), at=at))
+
+    def test_year_end_rollover(self):
+        from .expiry_service import is_expiry_eligible
+
+        at = _ist(2027, 1, 1, 9, 0)  # New Year's Day
+        self.assertFalse(is_expiry_eligible(date(2026, 12, 31), at=at))
+        self.assertTrue(is_expiry_eligible(date(2027, 1, 7), at=at))
+
+    # 7. Exchange-holiday-adjusted expiry supplied by the instrument master.
+    def test_non_thursday_holiday_shifted_expiry_handled_by_real_date_only(self):
+        """
+        No weekday assumption anywhere in the service -- a real NSE
+        holiday can shift a weekly expiry off its usual day (e.g. to a
+        Wednesday); this must be handled purely by comparing the actual
+        date given, never by asserting/expecting a specific weekday.
+        """
+        from .expiry_service import is_expiry_eligible
+
+        wednesday_expiry = date(2026, 8, 19)
+        self.assertEqual(wednesday_expiry.weekday(), 2)  # sanity: this really is a Wednesday
+        self.assertTrue(is_expiry_eligible(wednesday_expiry, at=_ist(2026, 8, 18, 12, 0)))
+        self.assertTrue(is_expiry_eligible(wednesday_expiry, at=_ist(2026, 8, 19, 10, 0)))
+        self.assertFalse(is_expiry_eligible(wednesday_expiry, at=_ist(2026, 8, 19, 16, 0)))
+        self.assertFalse(is_expiry_eligible(wednesday_expiry, at=_ist(2026, 8, 20, 9, 0)))
+
+    # 8. Multiple upcoming expiries.
+    def test_multiple_expiries_next_week_mode(self):
+        from .expiry_service import list_eligible_expiries, resolve_current_expiry
+
+        at = _ist(2026, 8, 18, 11, 0)
+        for offset in (3, 10, 17, 24):
+            self._make_contract(date(2026, 8, 18) + timedelta(days=offset))
+
+        eligible = list_eligible_expiries(self.UNDERLYING, at=at)
+        self.assertEqual(len(eligible), 4)
+        self.assertEqual(eligible, sorted(eligible))
+        self.assertEqual(resolve_current_expiry(self.UNDERLYING, mode="current_week", at=at), eligible[0])
+        self.assertEqual(resolve_current_expiry(self.UNDERLYING, mode="next_week", at=at), eligible[1])
+
+    # 9. Only one expiry initially stored.
+    def test_only_one_expiry_stored_next_week_mode_returns_none(self):
+        from .expiry_service import resolve_current_expiry
+
+        at = _ist(2026, 8, 18, 11, 0)
+        self._make_contract(date(2026, 8, 21))
+        self.assertEqual(resolve_current_expiry(self.UNDERLYING, mode="current_week", at=at), date(2026, 8, 21))
+        self.assertIsNone(resolve_current_expiry(self.UNDERLYING, mode="next_week", at=at))
+
+    # 10 (empty-database case belongs to ContractSyncTests below, but the
+    # service's own "nothing synced" behavior is covered here too).
+    def test_no_contracts_synced_returns_none(self):
+        from .expiry_service import resolve_current_expiry
+
+        self.assertIsNone(resolve_current_expiry("NEVER_SYNCED", at=_ist(2026, 8, 18)))
+
+    def test_rollover_required_true_when_buffer_thin(self):
+        from .expiry_service import rollover_required
+
+        at = _ist(2026, 8, 18, 11, 0)
+        self._make_contract(date(2026, 8, 21))
+        with override_settings(OPTIONS_EXPIRY_SYNC_COUNT=4):
+            self.assertTrue(rollover_required(self.UNDERLYING, at=at))
+
+    def test_rollover_required_false_when_enough_eligible_expiries(self):
+        from .expiry_service import rollover_required
+
+        at = _ist(2026, 8, 18, 11, 0)
+        for offset in (3, 10, 17, 24):
+            self._make_contract(date(2026, 8, 18) + timedelta(days=offset))
+        with override_settings(OPTIONS_EXPIRY_SYNC_COUNT=4):
+            self.assertFalse(rollover_required(self.UNDERLYING, at=at))
+
+    def test_validate_requested_expiry_falls_back_when_expired(self):
+        from .expiry_service import validate_requested_expiry
+
+        at = _ist(2026, 8, 22, 11, 0)
+        self._make_contract(date(2026, 8, 21))  # already expired relative to `at`
+        self._make_contract(date(2026, 8, 28))
+        resolved, substituted = validate_requested_expiry(self.UNDERLYING, date(2026, 8, 21), at=at)
+        self.assertEqual(resolved, date(2026, 8, 28))
+        self.assertTrue(substituted)
+
+    def test_validate_requested_expiry_honors_still_valid_request(self):
+        from .expiry_service import validate_requested_expiry
+
+        at = _ist(2026, 8, 18, 11, 0)
+        self._make_contract(date(2026, 8, 21))
+        self._make_contract(date(2026, 8, 28))
+        resolved, substituted = validate_requested_expiry(self.UNDERLYING, date(2026, 8, 28), at=at)
+        self.assertEqual(resolved, date(2026, 8, 28))
+        self.assertFalse(substituted)
+
+    # 20. Timezone boundary between UTC and Asia/Kolkata.
+    def test_utc_ist_boundary_crosses_calendar_date(self):
+        """
+        2026-08-20 19:00 UTC is 2026-08-21 00:30 IST -- the SAME instant
+        falls on two different calendar dates depending on which
+        timezone you ask in. is_expiry_eligible must use the IST date
+        (Asia/Kolkata, settings.TIME_ZONE), not the UTC date, or a
+        contract would flip eligibility 5.5 hours "early" by UTC clocks.
+        """
+        from .expiry_service import is_expiry_eligible
+
+        utc_moment = timezone.make_aware(datetime(2026, 8, 20, 19, 0), timezone.UTC)
+        # In IST this is already 2026-08-21 00:30 -- Aug 20 is now a
+        # fully past date in IST terms, Aug 21 is "today."
+        self.assertFalse(is_expiry_eligible(date(2026, 8, 20), at=utc_moment))
+        self.assertTrue(is_expiry_eligible(date(2026, 8, 21), at=utc_moment))  # early morning, well before cutoff
 
 
 class OptionsMetricsTests(TestCase):
@@ -607,6 +797,572 @@ class SyncWatchlistOptionContractsTests(TestCase):
             result = sync_watchlist_option_contracts()
         self.assertTrue(result.get("skipped"))
         self.assertIn("BROKER_MODE", result.get("reason", ""))
+
+
+def _fake_contract(strike, option_type, expiry, token_suffix=""):
+    """Same shape apps.options.instrument_master.options_for_expiry/broker_client.OptionChainClient.fetch_contract_list really return."""
+    return {
+        "strike": float(strike), "option_type": option_type,
+        "symbol_token": f"tok_{expiry.isoformat()}_{strike}_{option_type}{token_suffix}",
+        "tradingsymbol": f"TESTIDX{expiry.strftime('%d%b%y').upper()}{int(strike)}{option_type}",
+        "lot_size": 75,
+    }
+
+
+class _FakeOptionChainClient:
+    """
+    Mocked apps.options.broker_client.OptionChainClient -- unit tests
+    must not call the live Angel One API (per this platform's own
+    testing rule), so every ContractSyncTests scenario configures this
+    fake's per-expiry contract lists / raised exceptions directly rather
+    than hitting the network.
+    """
+
+    def __init__(self, contracts_by_expiry=None, raise_on_expiry=None):
+        self.contracts_by_expiry = contracts_by_expiry or {}
+        self.raise_on_expiry = raise_on_expiry or {}
+        self.calls = []
+
+    def fetch_contract_list(self, underlying, expiry):
+        self.calls.append((underlying, expiry))
+        if expiry in self.raise_on_expiry:
+            raise self.raise_on_expiry[expiry]
+        return self.contracts_by_expiry.get(expiry, [])
+
+
+class ContractSyncTests(TestCase):
+    """
+    apps.options.contract_sync.sync_underlying_contracts -- the one
+    idempotent sync routine used by both `sync_option_contracts` and
+    apps.options.tasks' Celery jobs. Every scenario here mocks
+    apps.options.broker_client.get_option_chain_client and
+    apps.options.instrument_master.list_expiries/get_instrument_master
+    directly (no real Angel One or network call).
+    """
+
+    UNDERLYING = "TESTIDX"
+
+    def setUp(self):
+        # sync_underlying_contracts locks per-underlying via Redis
+        # (apps.options.sync_lock) -- real Redis is available in this
+        # dev/test environment (same REDIS_URL Celery's own broker
+        # already requires), so these tests exercise the real lock
+        # rather than mocking it away, proving the whole path actually
+        # works end-to-end. A unique underlying name per test class
+        # keeps lock keys from colliding across parallel test runs.
+        pass
+
+    def _patch_client(self, client):
+        return patch("apps.options.broker_client.get_option_chain_client", return_value=client)
+
+    def _patch_expiries(self, expiries):
+        return patch("apps.options.instrument_master.list_expiries", return_value=expiries)
+
+    # 10. Empty database recovery.
+    def test_empty_database_recovery_creates_contracts(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({
+            expiry: [_fake_contract(24000, "CE", expiry), _fake_contract(24000, "PE", expiry)],
+        })
+        self.assertEqual(OptionContract.objects.count(), 0)
+        with self._patch_client(client), self._patch_expiries([expiry]):
+            result = sync_underlying_contracts(self.UNDERLYING)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.inserted, 2)
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 2)
+        self.assertTrue(OptionContract.objects.get(underlying=self.UNDERLYING, option_type="CE").is_active)
+
+    # 11. Stale cached instrument master -- force_refresh busts it.
+    def test_force_refresh_busts_instrument_master_cache(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+        with self._patch_client(client), self._patch_expiries([expiry]) as mocked_list, \
+             patch("apps.options.instrument_master.get_instrument_master") as mocked_master:
+            sync_underlying_contracts(self.UNDERLYING, force_refresh=True)
+            mocked_master.assert_called_once_with(force_refresh=True)
+
+    # 12. Network timeout.
+    def test_network_timeout_is_caught_and_recorded_not_raised(self):
+        from .contract_sync import sync_underlying_contracts
+        from .instrument_master import InstrumentMasterError
+        from .models import OptionSyncStatus
+
+        with patch("apps.options.instrument_master.list_expiries", side_effect=InstrumentMasterError("timed out after 4 attempts")):
+            result = sync_underlying_contracts(self.UNDERLYING)
+
+        self.assertFalse(result.ok)
+        self.assertIn("timed out", result.error)
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 0)
+        status_row = OptionSyncStatus.objects.get(underlying=self.UNDERLYING)
+        self.assertIn("timed out", status_row.last_error)
+        self.assertIsNone(status_row.last_successful_sync)
+
+    # 13. Invalid or partial master response (per-contract malformed records).
+    def test_malformed_contract_records_are_skipped_not_fatal(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry = date.today() + timedelta(days=3)
+        good = _fake_contract(24000, "CE", expiry)
+        malformed = {"strike": 24100.0, "option_type": "PE"}  # missing symbol_token/tradingsymbol/lot_size
+        client = _FakeOptionChainClient({expiry: [good, malformed]})
+        with self._patch_client(client), self._patch_expiries([expiry]):
+            result = sync_underlying_contracts(self.UNDERLYING)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.invalid_skipped, 1)
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 1)
+
+    # 14. Transaction rollback after failure.
+    def test_failure_on_second_expiry_rolls_back_the_whole_sync(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry_1 = date.today() + timedelta(days=3)
+        expiry_2 = date.today() + timedelta(days=10)
+        client = _FakeOptionChainClient(
+            contracts_by_expiry={expiry_1: [_fake_contract(24000, "CE", expiry_1)]},
+            raise_on_expiry={expiry_2: RuntimeError("simulated broker failure mid-sync")},
+        )
+        with self._patch_client(client), self._patch_expiries([expiry_1, expiry_2]):
+            result = sync_underlying_contracts(self.UNDERLYING)
+
+        self.assertFalse(result.ok)
+        # Nothing committed -- not even expiry_1's contract, which
+        # succeeded BEFORE the failure -- because the whole underlying's
+        # sync is one transaction.
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 0)
+
+    # 15. Duplicate synchronization runs.
+    def test_duplicate_sync_runs_are_idempotent(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry), _fake_contract(24000, "PE", expiry)]})
+        with self._patch_client(client), self._patch_expiries([expiry]):
+            first = sync_underlying_contracts(self.UNDERLYING)
+            second = sync_underlying_contracts(self.UNDERLYING)
+
+        self.assertEqual(first.inserted, 2)
+        self.assertEqual(second.inserted, 0)
+        self.assertEqual(second.updated, 2)
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 2)
+
+    def test_dry_run_writes_nothing(self):
+        from .contract_sync import sync_underlying_contracts
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+        with self._patch_client(client), self._patch_expiries([expiry]):
+            result = sync_underlying_contracts(self.UNDERLYING, dry_run=True)
+
+        self.assertTrue(result.dry_run)
+        self.assertEqual(result.inserted, 1)  # reported...
+        self.assertEqual(OptionContract.objects.filter(underlying=self.UNDERLYING).count(), 0)  # ...but never committed
+        from .models import OptionSyncStatus
+
+        self.assertFalse(OptionSyncStatus.objects.filter(underlying=self.UNDERLYING).exists())
+
+    def test_deactivates_contracts_that_rolled_past_cutoff(self):
+        """
+        A contract from a PREVIOUSLY-synced expiry that has since rolled
+        past the cutoff must flip to is_active=False even if the
+        current sync's expiry window no longer includes it.
+        """
+        from .contract_sync import sync_underlying_contracts
+
+        rolled_over = OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=date.today() - timedelta(days=1),
+            strike=100, option_type="CE", symbol_token="tok_old", is_active=True,
+        )
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+        with self._patch_client(client), self._patch_expiries([expiry]):
+            result = sync_underlying_contracts(self.UNDERLYING)
+
+        rolled_over.refresh_from_db()
+        self.assertFalse(rolled_over.is_active)
+        self.assertGreaterEqual(result.deactivated, 1)
+
+
+class InstrumentMasterValidationTests(TestCase):
+    """
+    apps.options.instrument_master's download validation/retry/backoff --
+    mocked HTTP responses only, no real network call. `time.sleep` is
+    patched to a no-op so retry-backoff tests run instantly rather than
+    actually waiting several seconds.
+    """
+
+    def test_empty_list_response_raises_and_is_not_cached(self):
+        from . import instrument_master
+        from .instrument_master import InstrumentMasterError, get_instrument_master
+
+        instrument_master._cache["data"] = None
+        instrument_master._cache["fetched_at"] = 0.0
+        fake_response = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: []})()
+        with patch("apps.options.instrument_master.requests.get", return_value=fake_response), \
+             patch("apps.options.instrument_master.time.sleep"):
+            with self.assertRaises(InstrumentMasterError):
+                get_instrument_master(force_refresh=True)
+        self.assertIsNone(instrument_master._cache["data"])
+
+    def test_malformed_rows_missing_required_keys_raises(self):
+        from . import instrument_master
+        from .instrument_master import InstrumentMasterError, get_instrument_master
+
+        instrument_master._cache["data"] = None
+        instrument_master._cache["fetched_at"] = 0.0
+        bad_rows = [{"token": "1", "symbol": "X", "instrumenttype": "OPTIDX"}] * 5  # missing expiry/exch_seg/strike/name
+        fake_response = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: bad_rows})()
+        with patch("apps.options.instrument_master.requests.get", return_value=fake_response), \
+             patch("apps.options.instrument_master.time.sleep"):
+            with self.assertRaises(InstrumentMasterError):
+                get_instrument_master(force_refresh=True)
+
+    def test_retries_then_succeeds(self):
+        import requests
+
+        from . import instrument_master
+        from .instrument_master import get_instrument_master
+
+        instrument_master._cache["data"] = None
+        instrument_master._cache["fetched_at"] = 0.0
+        good_row = {
+            "token": "1", "symbol": "TESTIDX21AUG26CE", "name": "TESTIDX", "expiry": "21AUG2026",
+            "instrumenttype": "OPTIDX", "exch_seg": "NFO", "strike": "2400000.000000",
+        }
+        good_response = type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: [good_row] * 5})()
+        call_count = {"n": 0}
+
+        def flaky_get(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] < 3:
+                raise requests.exceptions.Timeout("simulated timeout")
+            return good_response
+
+        with patch("apps.options.instrument_master.requests.get", side_effect=flaky_get), \
+             patch("apps.options.instrument_master.time.sleep") as mocked_sleep:
+            data = get_instrument_master(force_refresh=True)
+
+        self.assertEqual(len(data), 5)
+        self.assertEqual(call_count["n"], 3)
+        self.assertEqual(mocked_sleep.call_count, 2)  # backed off before attempts 2 and 3
+
+    def test_exhausted_retries_serves_stale_cache_if_one_exists(self):
+        from . import instrument_master
+        from .instrument_master import get_instrument_master
+
+        good_row = {
+            "token": "1", "symbol": "TESTIDX21AUG26CE", "name": "TESTIDX", "expiry": "21AUG2026",
+            "instrumenttype": "OPTIDX", "exch_seg": "NFO", "strike": "2400000.000000",
+        }
+        instrument_master._cache["data"] = [good_row] * 5
+        instrument_master._cache["fetched_at"] = 0.0  # stale (older than _CACHE_TTL_SECONDS)
+
+        import requests
+
+        with patch("apps.options.instrument_master.requests.get", side_effect=requests.exceptions.ConnectionError("down")), \
+             patch("apps.options.instrument_master.time.sleep"):
+            data = get_instrument_master()  # not force_refresh -- stale cache triggers a refresh attempt that fails
+
+        self.assertEqual(len(data), 5)  # fell back to the stale-but-real cached copy, not an exception
+
+
+class SyncLockTests(TestCase):
+    """
+    apps.options.sync_lock -- a real Redis lock (this dev/test
+    environment already has Redis up for Celery's own broker, same
+    REDIS_URL). Proves two concurrent holders of the same key can never
+    both acquire, and that release lets a subsequent acquire succeed.
+    """
+
+    def setUp(self):
+        from .sync_lock import release_lock
+
+        self.key = "options:sync_lock_test:16"
+        self._release = release_lock
+        # Defensive cleanup in case a previous failed run left this key set.
+        try:
+            import redis
+
+            redis.Redis.from_url("redis://127.0.0.1:6379/0").delete(self.key)
+        except Exception:
+            pass
+
+    def tearDown(self):
+        try:
+            import redis
+
+            redis.Redis.from_url("redis://127.0.0.1:6379/0").delete(self.key)
+        except Exception:
+            pass
+
+    def test_second_concurrent_acquire_fails_while_first_holds_it(self):
+        from .sync_lock import acquire_lock
+
+        token_a = acquire_lock(self.key, timeout=30)
+        token_b = acquire_lock(self.key, timeout=30)
+        self.assertIsNotNone(token_a)
+        self.assertIsNone(token_b)
+        self._release(self.key, token_a)
+
+    def test_release_then_reacquire_succeeds(self):
+        from .sync_lock import acquire_lock
+
+        token_a = acquire_lock(self.key, timeout=30)
+        self._release(self.key, token_a)
+        token_c = acquire_lock(self.key, timeout=30)
+        self.assertIsNotNone(token_c)
+        self._release(self.key, token_c)
+
+    def test_release_with_wrong_token_does_not_release_someone_elses_lock(self):
+        from .sync_lock import acquire_lock
+
+        token_a = acquire_lock(self.key, timeout=30)
+        self._release(self.key, "not-the-real-token")  # must be a safe no-op
+        token_b = acquire_lock(self.key, timeout=30)
+        self.assertIsNone(token_b)  # token_a's lock is still held -- wrong-token release didn't clear it
+        self._release(self.key, token_a)
+
+    def test_sync_underlying_contracts_skips_when_already_locked(self):
+        """
+        End-to-end: a manual sync call for an underlying that's already
+        locked (simulating a concurrent Celery task/another worker/a
+        second manual command run) must skip cleanly, not race.
+        """
+        from .contract_sync import SYNC_LOCK_KEY_PREFIX, sync_underlying_contracts
+        from .sync_lock import acquire_lock, release_lock
+
+        underlying = "LOCKTESTIDX"
+        lock_key = f"{SYNC_LOCK_KEY_PREFIX}:{underlying}"
+        token = acquire_lock(lock_key, timeout=30)
+        try:
+            result = sync_underlying_contracts(underlying)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.skipped_reason, "sync_already_in_progress")
+        finally:
+            release_lock(lock_key, token)
+
+
+class RolloverSelfHealTests(TestCase):
+    """
+    apps.options.tasks.options_sync_health_check / rollover_expiries --
+    the self-healing path for "Celery Beat was stopped across the
+    scheduled rollover." options_sync_health_check itself must never
+    call Angel One (rollover_required is DB-only); rollover_expiries
+    (the thing it triggers) is what actually resyncs, mocked here.
+    """
+
+    def test_health_check_triggers_resync_when_no_eligible_expiry(self):
+        from .tasks import options_sync_health_check
+
+        with override_settings(OPTIONS_PIPELINE_UNDERLYINGS=["HEALTHCHECKIDX"]), \
+             patch("apps.options.tasks.rollover_expiries.delay") as mocked_delay:
+            result = options_sync_health_check()
+
+        self.assertIn("HEALTHCHECKIDX", result["unhealthy"])
+        self.assertTrue(result["rollover_triggered"])
+        mocked_delay.assert_called_once()
+
+    def test_health_check_does_not_trigger_when_healthy(self):
+        from .tasks import options_sync_health_check
+
+        underlying = "HEALTHYIDX"
+        for offset in (3, 10, 17, 24, 31, 38):
+            OptionContract.objects.create(
+                underlying=underlying, expiry=date.today() + timedelta(days=offset),
+                strike=100, option_type="CE", symbol_token=f"tok_health_{offset}",
+            )
+        with override_settings(OPTIONS_PIPELINE_UNDERLYINGS=[underlying], OPTIONS_EXPIRY_SYNC_COUNT=4), \
+             patch("apps.options.tasks.rollover_expiries.delay") as mocked_delay:
+            result = options_sync_health_check()
+
+        self.assertEqual(result["unhealthy"], [])
+        self.assertFalse(result["rollover_triggered"])
+        mocked_delay.assert_not_called()
+
+    def test_rollover_expiries_resyncs_only_underlyings_that_need_it(self):
+        from .tasks import rollover_expiries
+
+        needs_rollover = "NEEDSROLLOVERIDX"
+        already_fine = "ALREADYFINEIDX"
+        for offset in (3, 10, 17, 24, 31, 38):
+            OptionContract.objects.create(
+                underlying=already_fine, expiry=date.today() + timedelta(days=offset),
+                strike=100, option_type="CE", symbol_token=f"tok_fine_{offset}",
+            )
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+
+        with override_settings(
+            OPTIONS_PIPELINE_UNDERLYINGS=[needs_rollover, already_fine], OPTIONS_EXPIRY_SYNC_COUNT=4, BROKER_MODE="live",
+        ), patch("apps.options.broker_client.get_option_chain_client", return_value=client), \
+           patch("apps.options.instrument_master.list_expiries", return_value=[expiry]):
+            results = rollover_expiries()
+
+        self.assertTrue(results[already_fine]["skipped"])
+        self.assertEqual(results[already_fine]["reason"], "rollover_not_required")
+        self.assertTrue(results[needs_rollover]["ok"])
+        self.assertEqual(OptionContract.objects.filter(underlying=needs_rollover).count(), 1)
+
+
+class OptionExpiryStatusViewTests(APITestCase):
+    """GET /api/options/expiry-status/ -- apps.options.views.OptionExpiryStatusView."""
+
+    UNDERLYING = "STATUSTESTIDX"
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="trader1", password="pw")
+        self.client.force_authenticate(self.user)
+
+    def test_returns_current_and_next_expiry_chronologically(self):
+        # 6 expiries -- exactly settings.OPTIONS_EXPIRY_SYNC_COUNT's
+        # default, so rollover_required (< sync count) is deterministically
+        # false here rather than incidentally true/false depending on
+        # how many offsets happen to be listed.
+        for offset in (3, 10, 17, 24, 31, 38):
+            OptionContract.objects.create(
+                underlying=self.UNDERLYING, expiry=date.today() + timedelta(days=offset),
+                strike=100, option_type="CE", symbol_token=f"tok_status_{offset}",
+            )
+        response = self.client.get("/api/options/expiry-status/", {"underlying": self.UNDERLYING})
+        self.assertEqual(response.status_code, 200)
+        expiries = response.data["available_expiries"]
+        self.assertEqual(expiries, sorted(expiries))
+        self.assertEqual(response.data["current_expiry"], expiries[0])
+        self.assertEqual(response.data["next_expiry"], expiries[1])
+        self.assertFalse(response.data["rollover_required"])
+
+    def test_503_when_only_expired_contract_exists(self):
+        OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=date.today() - timedelta(days=1),
+            strike=100, option_type="CE", symbol_token="tok_status_expired",
+        )
+        response = self.client.get("/api/options/expiry-status/", {"underlying": self.UNDERLYING})
+        self.assertEqual(response.status_code, 503)
+        self.assertIsNone(response.data["current_expiry"])
+        self.assertTrue(response.data["rollover_required"])
+
+    def test_iso_format_and_last_successful_sync_surfaced(self):
+        from .models import OptionSyncStatus
+
+        OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=date.today() + timedelta(days=3),
+            strike=100, option_type="CE", symbol_token="tok_status_iso",
+        )
+        synced_at = timezone.now()
+        OptionSyncStatus.objects.create(underlying=self.UNDERLYING, last_successful_sync=synced_at)
+
+        response = self.client.get("/api/options/expiry-status/", {"underlying": self.UNDERLYING})
+        self.assertRegex(response.data["current_expiry"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(
+            date.fromisoformat(response.data["last_successful_sync"][:10]), synced_at.date(),
+        )
+
+
+class OptionChainViewFallbackTests(APITestCase):
+    """
+    GET /api/options/chain/ -- apps.options.views.OptionChainView's new
+    expired-expiry fallback (never silently serves a stale chain).
+    """
+
+    UNDERLYING = "CHAINFALLBACKIDX"
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="trader1", password="pw")
+        self.client.force_authenticate(self.user)
+        self.expired = date.today() - timedelta(days=1)
+        self.current = date.today() + timedelta(days=3)
+        OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=self.expired, strike=100,
+            option_type="CE", symbol_token="tok_chain_expired",
+        )
+        OptionContract.objects.create(
+            underlying=self.UNDERLYING, expiry=self.current, strike=100,
+            option_type="CE", symbol_token="tok_chain_current",
+        )
+
+    # 18. API request containing an expired expiry.
+    def test_expired_expiry_request_falls_back_to_current(self):
+        response = self.client.get(
+            "/api/options/chain/", {"underlying": self.UNDERLYING, "expiry": self.expired.isoformat()},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["expiry"], self.current.isoformat())
+        self.assertTrue(response.data["substituted_expiry"])
+
+    def test_still_valid_expiry_request_is_honored_unchanged(self):
+        response = self.client.get(
+            "/api/options/chain/", {"underlying": self.UNDERLYING, "expiry": self.current.isoformat()},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["expiry"], self.current.isoformat())
+        self.assertFalse(response.data["substituted_expiry"])
+
+    def test_no_valid_expiry_at_all_returns_503(self):
+        OptionContract.objects.filter(underlying=self.UNDERLYING, expiry=self.current).delete()
+        response = self.client.get(
+            "/api/options/chain/", {"underlying": self.UNDERLYING, "expiry": self.expired.isoformat()},
+        )
+        self.assertEqual(response.status_code, 503)
+
+
+class SyncOptionContractsCommandTests(TestCase):
+    """python manage.py sync_option_contracts -- expanded flags, dry-run, exit codes."""
+
+    def test_dry_run_all_reports_but_writes_nothing(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+        out = StringIO()
+        with override_settings(OPTIONS_PIPELINE_UNDERLYINGS=["CMDTESTIDX"]), \
+             patch("apps.options.broker_client.get_option_chain_client", return_value=client), \
+             patch("apps.options.instrument_master.list_expiries", return_value=[expiry]):
+            call_command("sync_option_contracts", "--all", "--dry-run", stdout=out)
+
+        self.assertIn("DRY RUN", out.getvalue())
+        self.assertEqual(OptionContract.objects.filter(underlying="CMDTESTIDX").count(), 0)
+
+    def test_underlying_flag_syncs_just_that_one(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        expiry = date.today() + timedelta(days=3)
+        client = _FakeOptionChainClient({expiry: [_fake_contract(24000, "CE", expiry)]})
+        out = StringIO()
+        with patch("apps.options.broker_client.get_option_chain_client", return_value=client), \
+             patch("apps.options.instrument_master.list_expiries", return_value=[expiry]):
+            call_command("sync_option_contracts", "--underlying", "CMDONEIDX", stdout=out)
+
+        self.assertEqual(OptionContract.objects.filter(underlying="CMDONEIDX").count(), 1)
+        self.assertIn("inserted=1", out.getvalue())
+
+    def test_failure_exits_nonzero(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        from .instrument_master import InstrumentMasterError
+
+        with patch("apps.options.instrument_master.list_expiries", side_effect=InstrumentMasterError("down")):
+            with self.assertRaises(SystemExit) as ctx:
+                call_command("sync_option_contracts", "--underlying", "CMDFAILIDX")
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_no_arguments_raises_command_error(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("sync_option_contracts")
 
 
 class DataQualityValidatorTests(TestCase):

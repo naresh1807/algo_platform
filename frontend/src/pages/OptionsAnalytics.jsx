@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import OptionChainTable from "../components/OptionChainTable.jsx";
 import OptionContractChartModal from "../components/OptionContractChartModal.jsx";
+import StatusBadge from "../components/StatusBadge.jsx";
+import EmptyState from "../components/EmptyState.jsx";
+import { useExpiryStatus } from "../hooks/useExpiryStatus.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 
@@ -34,8 +37,16 @@ const selectStyle = {
  */
 export default function OptionsAnalytics() {
   const [underlying, setUnderlying] = useState("NIFTY");
-  const [expiries, setExpiries] = useState([]);
-  const [expiry, setExpiry] = useState("");
+  // Single shared source of truth for expiry selection (apps.options.
+  // expiry_service via /api/options/expiry-status/) -- see
+  // hooks/useExpiryStatus.js's own docstring for why this replaced this
+  // page's own "fetch expiries, auto-select first, never re-validate"
+  // effect (the same duplicated logic JarvisSignalTerminal.jsx used to
+  // carry independently).
+  const {
+    expiry, setExpiry, availableExpiries: expiries, lastSuccessfulSync,
+    rolloverRequired, unavailable: expiryUnavailable, error: expiryError,
+  } = useExpiryStatus(underlying);
   const [chainRows, setChainRows] = useState([]);
   const [spot, setSpot] = useState(null);
   const [chainLoading, setChainLoading] = useState(false);
@@ -71,28 +82,12 @@ export default function OptionsAnalytics() {
   // Live sockets are connected once at the AppShell level (App.jsx),
   // not per-page -- see liveStore.js's module docstring for why.
 
-  // Load which expiries actually have synced contracts for this
-  // underlying, instead of a blind date-picker the user has to guess
-  // a valid value for.
+  // Chain/analytics reset whenever the underlying changes -- the expiry
+  // itself is now owned by useExpiryStatus above (it re-defaults on
+  // underlying change too, see that hook's own effect).
   useEffect(() => {
-    let cancelled = false;
-    setExpiry("");
     setChainRows([]);
     setAnalytics(null);
-    endpoints.optionExpiries(underlying).then((res) => {
-      // Guards against a slow response for a PREVIOUS underlying landing
-      // after the user has already switched again -- without this, a
-      // stale NIFTY expiries list could overwrite the BANKNIFTY one just
-      // requested, offering expiries that don't belong to what's
-      // actually selected.
-      if (cancelled) return;
-      const list = res.data.expiries ?? [];
-      setExpiries(list);
-      if (list.length > 0) setExpiry(list[0]);
-    });
-    return () => {
-      cancelled = true;
-    };
   }, [underlying]);
 
   useEffect(() => {
@@ -235,11 +230,19 @@ export default function OptionsAnalytics() {
     <div>
       <div className="panel">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0 }}>
-            Option Chain — {underlying}
-            {spot != null && (
-              <span style={{ fontSize: 13, fontWeight: 400, color: "var(--muted)", marginLeft: 10 }}>
-                Spot {spot.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span>
+              Option Chain — {underlying}
+              {spot != null && (
+                <span style={{ fontSize: 13, fontWeight: 400, color: "var(--muted)", marginLeft: 10 }}>
+                  Spot {spot.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </span>
+              )}
+            </span>
+            {rolloverRequired && !expiryUnavailable && <StatusBadge tone="warn">Rollover pending</StatusBadge>}
+            {lastSuccessfulSync && (
+              <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>
+                Contracts synced {new Date(lastSuccessfulSync).toLocaleString()}
               </span>
             )}
           </h3>
@@ -263,7 +266,16 @@ export default function OptionsAnalytics() {
           </div>
         </div>
 
-        {expiries.length === 0 && (
+        {expiryError && (
+          <EmptyState title="Could not load expiry information" detail={expiryError} />
+        )}
+        {!expiryError && expiryUnavailable && (
+          <EmptyState
+            title="Contract sync temporarily unavailable"
+            detail={`No valid, non-expired expiry is available for ${underlying} right now -- a rollover resync is required and should complete automatically shortly.`}
+          />
+        )}
+        {!expiryError && !expiryUnavailable && expiries.length === 0 && (
           <p style={{ color: "var(--muted)", marginTop: 12 }}>
             No expiries synced yet for {underlying}. Run{" "}
             <code>python manage.py sync_option_contracts --underlying {underlying} --list-expiries</code>{" "}

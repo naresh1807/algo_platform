@@ -56,16 +56,49 @@ app.conf.beat_schedule = {
         "task": "apps.options.tasks.ingest_option_chain_snapshots",
         "schedule": 300.0,
     },
-    # manual intro's options-analytics promise depends on OptionContract
-    # rows actually existing -- this is the automated version of
-    # `python manage.py sync_option_contracts`, run weekly (contracts
-    # for an already-listed expiry rarely change; what changes weekly
-    # is which expiry is nearest -- see apps.options.tasks docstring).
-    # Monday pre-market so the week's nearest expiry is synced before
-    # ingest-option-chain-every-5-minutes needs contracts to snapshot.
-    "sync-watchlist-option-contracts-weekly": {
+    # Expiry-rollover lifecycle (apps.options.expiry_service /
+    # apps.options.contract_sync) -- four cooperating jobs, replacing
+    # the old single weekly-Monday sync, which proved too infrequent:
+    # a mid-week expiry rollover (or a single failed Monday run) could
+    # leave the platform offering an already-expired contract for days
+    # with nothing to notice or recover. See apps.options.expiry_service's
+    # own module docstring for the root-cause incident this fixes.
+    #
+    # 1) Force a fresh instrument-master download before market open,
+    #    so today's sync always sees today's listing (including any
+    #    exchange-holiday-shifted expiry Angel One published overnight).
+    "refresh-instrument-master-before-market-open": {
+        "task": "apps.options.tasks.refresh_instrument_master",
+        "schedule": crontab(hour=8, minute=45, day_of_week="1-5"),
+    },
+    # 2) Daily (not weekly) contract sync, right after the master
+    #    refresh above -- an already-listed expiry's own strikes/tokens
+    #    rarely change mid-week (see OptionContract's docstring), but
+    #    which expiry counts as "nearest"/"current" changes every time
+    #    one expires, so this needs to run daily to catch that reliably.
+    "sync-option-contracts-daily": {
         "task": "apps.options.tasks.sync_watchlist_option_contracts",
-        "schedule": crontab(hour=8, minute=0, day_of_week="1"),
+        "schedule": crontab(hour=8, minute=50, day_of_week="1-5"),
+    },
+    # 3) Shortly after settings.OPTIONS_EXPIRY_CUTOFF_TIME (default
+    #    15:30 IST) -- re-syncs only the underlyings that actually need
+    #    it (apps.options.expiry_service.rollover_required), so today's
+    #    just-expired contract stops being offered the same afternoon
+    #    it expires, not at the next day's pre-market sync.
+    "expiry-rollover-after-cutoff": {
+        "task": "apps.options.tasks.rollover_expiries",
+        "schedule": crontab(hour=15, minute=35, day_of_week="1-5"),
+    },
+    # 4) Lightweight, DB-only health check (apps.options.expiry_service.
+    #    rollover_required -- no Angel One call) every 15 minutes,
+    #    around the clock every day (not just market hours/weekdays) --
+    #    this is the SELF-HEAL path: if Celery Beat was stopped across
+    #    the scheduled rollover above (or the pre-market sync failed),
+    #    the very next tick after Beat comes back notices and triggers
+    #    a real resync on its own, no human intervention required.
+    "options-sync-health-check-every-15-minutes": {
+        "task": "apps.options.tasks.options_sync_health_check",
+        "schedule": crontab(minute="*/15"),
     },
     "poll-news-every-5-minutes": {
         "task": "apps.news.tasks.poll_news_sources",

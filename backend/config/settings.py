@@ -19,6 +19,7 @@ Design notes (why things are set up this way):
 """
 
 import os
+from datetime import time as _time
 from datetime import timedelta
 from pathlib import Path
 
@@ -265,6 +266,35 @@ WATCHLIST = os.environ.get("WATCHLIST", "NIFTY,BANKNIFTY").split(",")
 OPTIONS_PIPELINE_UNDERLYINGS = os.environ.get(
     "OPTIONS_PIPELINE_UNDERLYINGS", "NIFTY,BANKNIFTY"
 ).split(",")
+
+# apps.options.expiry_service: the single, shared cutoff used to decide
+# whether TODAY's expiry is still eligible to be "the current expiry"
+# (before this time) or must roll over to the next listed expiry (at/
+# after this time). Defaults to apps.market_data.market_hours.
+# MARKET_CLOSE_TIME's own value (15:30 IST, NSE's regular session
+# close) but is intentionally its OWN setting, not an import of that
+# constant -- an options-specific rollover cutoff is a distinct policy
+# decision from "is the equity market open" even though they start out
+# equal, and this must be configurable without touching market_hours.py.
+# Format: "HH:MM", 24-hour, interpreted in Asia/Kolkata (settings.TIME_ZONE).
+_OPTIONS_EXPIRY_CUTOFF_RAW = os.environ.get("OPTIONS_EXPIRY_CUTOFF_TIME", "15:30")
+OPTIONS_EXPIRY_CUTOFF_TIME = _time(*(int(p) for p in _OPTIONS_EXPIRY_CUTOFF_RAW.split(":")))
+
+# How many upcoming expiries apps.options.contract_sync keeps synced per
+# underlying -- covers signals_engine.select_expiry's CURRENT_WEEK/
+# NEXT_WEEK/MONTHLY/CUSTOM modes with real headroom (a monthly expiry
+# can be several weekly expiries out). Minimum of 4 per the platform's
+# own expiry-lifecycle requirement; defaults to 6 to match this
+# codebase's existing SYNC_EXPIRY_COUNT convention.
+OPTIONS_EXPIRY_SYNC_COUNT = max(4, int(os.environ.get("OPTIONS_EXPIRY_SYNC_COUNT", "6")))
+
+# Redis distributed-lock TTL (apps.options.sync_lock) guarding contract
+# sync/rollover -- long enough to cover a real multi-underlying,
+# multi-expiry sync (each expiry is its own Angel One instrument-master
+# filter pass, cheap once cached, plus one contract-list fetch per
+# expiry), short enough that a crashed holder doesn't wedge the lock for
+# an entire trading day.
+OPTIONS_SYNC_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OPTIONS_SYNC_LOCK_TIMEOUT_SECONDS", "300"))
 
 # Where apps.learning.ml_train serializes trained win-probability model
 # artifacts (joblib files) -- kept out of the DB / git on purpose, same

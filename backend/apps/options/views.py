@@ -15,10 +15,25 @@ from .signals_engine import _latest_underlying_ltp, evaluate_options_signals
 
 
 class OptionContractViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Defaults to is_active=True (excludes expired/rolled-over contracts)
+    -- this is the "live-trading APIs must not return expired contracts
+    by default" requirement. Historical/backtesting callers that need
+    expired rows too (they're never deleted, see OptionContract's own
+    docstring) can still get them explicitly via ?is_active=false or
+    ?is_active=true (django-filter's BooleanFilter), which bypasses the
+    default below.
+    """
     queryset = OptionContract.objects.all()
     serializer_class = OptionContractSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ["underlying", "expiry", "option_type"]
+    filterset_fields = ["underlying", "expiry", "option_type", "is_active"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if "is_active" not in self.request.query_params:
+            qs = qs.filter(is_active=True)
+        return qs
 
 
 class OptionChainSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
@@ -41,33 +56,59 @@ class OptionChainSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
 
 class OptionExpiriesView(APIView):
     """
-    Distinct CURRENT-OR-FUTURE expiries already synced into
-    OptionContract for one underlying (via `python manage.py
-    sync_option_contracts`), nearest first -- backs the frontend's
-    expiry dropdown so it only ever offers a date that actually has
-    contracts to query, instead of a blind date-picker that 404s on a
-    not-yet-synced expiry.
+    Cutoff-eligible expiries already synced into OptionContract for one
+    underlying (via `python manage.py sync_option_contracts`), nearest
+    first -- backs the frontend's expiry dropdown so it only ever offers
+    a date that actually has contracts to query, instead of a blind
+    date-picker that 404s on a not-yet-synced expiry.
 
-    expiry__gte filters out already-expired rows -- without it, a
-    past expiry that's still in the DB (this app deliberately never
-    deletes expired OptionContract rows, so historical
-    OptionChainSnapshot data stays available for backtesting/analytics,
-    see OptionContract's own docstring) would sort first and get
-    offered as a live choice. The frontend (OptionsAnalytics.jsx)
-    auto-selects this list's FIRST entry as the default expiry on load,
-    so an unfiltered list here meant the page defaulted to showing a
-    dead, expired option chain -- same underlying bug apps.options.
-    signals_engine.nearest_expiry() had, fixed there for the same reason.
+    Delegates entirely to apps.options.expiry_service.list_eligible_expiries
+    now (kept as its own view/response-shape for backward compatibility
+    with existing callers) -- this used to carry its own
+    `expiry__gte=today` filter, the same bug apps.options.signals_engine.
+    nearest_expiry() had (see that function's docstring): a pure date
+    comparison stays True all day on expiry day itself, hours after that
+    contract's own tradeable life ended at market close. New code should
+    prefer OptionExpiryStatusView below, which also reports
+    current_expiry/next_expiry/sync health in one call.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .expiry_service import list_eligible_expiries
+
         underlying = request.query_params.get("underlying", "NIFTY")
-        expiries = (
-            OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
-            .order_by("expiry").values_list("expiry", flat=True).distinct()
-        )
+        expiries = list_eligible_expiries(underlying)
         return Response({"underlying": underlying, "expiries": [e.isoformat() for e in expiries]})
+
+
+class OptionExpiryStatusView(APIView):
+    """
+    GET /api/options/expiry-status/?underlying=NIFTY -- the single call
+    the frontend needs for the full expiry-lifecycle picture: which
+    expiry is current, which rolls in next, every eligible expiry to
+    offer in a dropdown, when contract sync last actually succeeded, and
+    whether a rollover is currently overdue. Entirely backed by
+    apps.options.expiry_service.expiry_status -- this view contains no
+    expiry-selection logic of its own.
+
+    Returns 503 (not 200 with an empty/misleading body) when there is no
+    valid current expiry AND rollover_required is true -- i.e. sync
+    genuinely cannot serve real contracts right now -- so the frontend
+    can show an honest "temporarily unavailable" state instead of
+    silently rendering nothing or, worse, an expired chain.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .expiry_service import expiry_status
+
+        underlying = request.query_params.get("underlying", "NIFTY")
+        status_obj = expiry_status(underlying)
+        body = status_obj.as_dict()
+        if status_obj.current_expiry is None and status_obj.rollover_required:
+            return Response(body, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(body)
 
 
 class OptionChainView(APIView):
@@ -83,11 +124,28 @@ class OptionChainView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .expiry_service import validate_requested_expiry
+
         underlying = request.query_params.get("underlying", "NIFTY")
         expiry_str = request.query_params.get("expiry")
         if not expiry_str:
             return Response({"error": "expiry query param (YYYY-MM-DD) is required."}, status=400)
-        expiry = date.fromisoformat(expiry_str)
+        try:
+            requested_expiry = date.fromisoformat(expiry_str)
+        except ValueError:
+            return Response({"error": f"expiry {expiry_str!r} is not a valid YYYY-MM-DD date."}, status=400)
+
+        # Never silently serve a stale/expired chain just because the
+        # caller asked for a date that used to be valid (e.g. a browser
+        # tab left open since before today's rollover) -- falls back to
+        # the real current expiry and reports the substitution instead.
+        expiry, was_substituted = validate_requested_expiry(underlying, requested_expiry)
+        if expiry is None:
+            return Response(
+                {"error": f"No valid (non-expired) expiry available for {underlying} right now.", "rollover_required": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        expiry_str = expiry.isoformat()
 
         contracts = OptionContract.objects.filter(underlying=underlying, expiry=expiry)
         # metrics._latest_snapshots already does exactly this -- one
@@ -135,6 +193,7 @@ class OptionChainView(APIView):
         return Response({
             "underlying": underlying,
             "expiry": expiry_str,
+            "substituted_expiry": was_substituted,
             "spot": spot,
             "rows": sorted(rows.values(), key=lambda r: r["strike"]),
         })

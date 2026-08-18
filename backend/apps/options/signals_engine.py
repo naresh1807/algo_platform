@@ -193,94 +193,58 @@ def evaluate_options_signals(underlying: str, expiry: date) -> dict:
 
 def nearest_expiry(underlying: str) -> date | None:
     """
-    Earliest CURRENT-OR-FUTURE expiry synced for this underlying --
-    used by apps.signals.engine so the composite signal engine doesn't
-    need its own copy of "which expiry does the options confirmation
-    apply to" logic. Returns None if apps.options.tasks hasn't synced
-    any contracts yet (fresh install / options sync hasn't run), OR if
-    every synced expiry has already passed (sync_watchlist_option_
-    contracts hasn't run since the last one expired -- e.g. BROKER_MODE
-    isn't "live", or Celery beat isn't running) -- either way, callers
-    treat "no usable options data right now" the same "not an error,
-    just not there yet" way compute_indicators() does.
+    Earliest ELIGIBLE (cutoff-aware, see apps.options.expiry_service)
+    expiry synced for this underlying -- used by apps.signals.engine so
+    the composite signal engine doesn't need its own copy of "which
+    expiry does the options confirmation apply to" logic. Returns None
+    if apps.options.tasks hasn't synced any contracts yet, OR if every
+    synced expiry has already rolled past the cutoff -- either way,
+    callers treat "no usable options data right now" the same "not an
+    error, just not there yet" way compute_indicators() does.
 
-    The expiry__gte filter matters: without it, a stale DB whose only
-    synced expiry already passed would silently return that dead
-    expiry as "nearest," and every caller (options_confluence_score
-    below, apps.options.strike_selector, apps.jarvis) would then score/
-    suggest strikes against contracts that can no longer actually be
-    traded -- a real bug this exact shape surfaced in practice (a
-    single 2026-08-11 expiry synced once, still being read as "nearest"
-    a day after it expired).
+    A thin wrapper around apps.options.expiry_service.resolve_current_expiry
+    -- kept as its own named function (not inlined at every call site)
+    since apps.signals.engine, apps.options.strike_selector, and
+    apps.jarvis all already call it by this name; the actual eligibility
+    rule lives in expiry_service now, not here, so this and
+    apps.options.signals_engine.select_expiry below can never drift
+    apart the way the two independent `expiry__gte=timezone.localdate()`
+    filters they used to each carry eventually did (see expiry_service's
+    own module docstring for the incident that caused).
     """
-    return (
-        OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
-        .order_by("expiry").values_list("expiry", flat=True).first()
-    )
+    from .expiry_service import resolve_current_expiry
+
+    return resolve_current_expiry(underlying)
 
 
 def select_expiry(underlying: str, mode: str | None = None) -> date | None:
     """
-    The configurable counterpart to nearest_expiry() above (which stays
-    untouched -- other callers, e.g. apps.jarvis, keep using it exactly
-    as before). mode: "current_week"/"next_week"/"monthly"/"custom"
-    (case-insensitive), or None to read apps.options.models.
-    OptionsStrategySetting.expiry_mode.
+    The configurable counterpart to nearest_expiry() above. mode:
+    "current_week"/"next_week"/"monthly"/"custom" (case-insensitive), or
+    None to read apps.options.models.OptionsStrategySetting.expiry_mode.
 
     Every mode still only ever returns an expiry that ALREADY has synced
-    OptionContract rows for this underlying -- "what the correct expiry
-    is" (a live-data question, answered from the real broker instrument
-    master for MONTHLY) is kept separate from "have we synced it yet" (a
+    OptionContract rows for this underlying AND is still cutoff-eligible
+    (apps.options.expiry_service) -- "what the correct expiry is" (a
+    live-data question, answered from the real broker instrument master
+    for MONTHLY) is kept separate from "have we synced it yet" (a
     local-data question), so a not-yet-synced correct expiry returns
     None (an honest "not there yet") rather than silently falling back
     to nearest_expiry's answer and trading the wrong expiry.
+
+    A thin wrapper around apps.options.expiry_service.resolve_current_expiry
+    -- see that module's own docstring for why the actual eligibility
+    filter used to live here (and in nearest_expiry, and in
+    apps.options.views.OptionExpiriesView) as three separate, silently
+    diverging copies.
     """
+    from .expiry_service import resolve_current_expiry
     from .models import get_options_strategy_settings
 
     if mode is None:
         mode = get_options_strategy_settings().expiry_mode
-    mode = mode.lower()
 
-    synced = list(
-        OptionContract.objects.filter(underlying=underlying, expiry__gte=timezone.localdate())
-        .order_by("expiry").values_list("expiry", flat=True).distinct()
-    )
-    if not synced:
-        return None
-
-    if mode == "current_week":
-        return synced[0]
-
-    if mode == "next_week":
-        return synced[1] if len(synced) > 1 else None
-
-    if mode == "monthly":
-        # "Monthly" isn't a flag Angel One's instrument master exposes
-        # directly -- it's the LAST weekly expiry that falls within the
-        # earliest calendar month among the underlying's real listed
-        # expiries (NSE's actual monthly-expiry convention). Determined
-        # from live broker data (list_expiries), not merely from
-        # whatever happens to already be synced, so the answer doesn't
-        # depend on how many expiries a past sync run happened to pull.
-        from .instrument_master import list_expiries
-
-        listed = list_expiries(underlying, limit=12)
-        if not listed:
-            return None
-        earliest_month = (listed[0].year, listed[0].month)
-        in_month = [e for e in listed if (e.year, e.month) == earliest_month]
-        monthly_expiry = max(in_month)
-        return monthly_expiry if monthly_expiry in synced else None
-
-    if mode == "custom":
-        from .models import get_options_strategy_settings
-
-        custom = get_options_strategy_settings().custom_expiry
-        if custom is None or custom not in synced:
-            return None
-        return custom
-
-    return None
+    return resolve_current_expiry(underlying, mode=mode)
 
 
 # How many of the *directional* options-flow signals (buildup/covering/
