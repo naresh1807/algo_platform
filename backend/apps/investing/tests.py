@@ -1,6 +1,8 @@
 from datetime import date
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.test import TestCase
 
 from .fundamental_score import score_stock
@@ -84,6 +86,7 @@ class FundamentalScoreTests(TestCase):
 class StockWatchlistAPITests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="a-real-password-123")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.client.force_login(self.user)
 
     def test_create_watchlist_entry_by_symbol(self):
@@ -289,28 +292,56 @@ class TrackedStocksQuerysetTests(TestCase):
 
 
 class SyncIndexPricesTaskTests(TestCase):
-    def test_bse_sensex_now_attempts_real_sync(self):
-        """
-        BSE support (this pass) means SENSEX is no longer silently
-        skipped -- it goes through _sync_bse_indices, which calls the
-        real (network) BSEDataClient. No network access in this test
-        sandbox, so BSEDataClient's own exception handling degrades
-        gracefully (returns None/[] rather than raising) -- this test
-        only asserts that graceful-degradation path, not real synced
-        data (that needs an actual BSE session, same caveat as every
-        other network-dependent piece of this codebase).
-        """
+    def test_closed_market_skips_before_any_sync_or_external_client(self):
         from .tasks import sync_index_constituents_and_prices
 
         Index.objects.create(name="SENSEX", symbol="SENSEX", exchange="BSE")
-        result = sync_index_constituents_and_prices()
+
+        with (
+            patch("apps.investing.tasks.is_market_open", return_value=(False, "market closed")),
+            patch("apps.investing.tasks._sync_index_prices_via_angelone") as sync_prices,
+            patch("apps.investing.tasks._sync_nse_indices") as sync_nse,
+            patch("apps.investing.tasks._sync_bse_indices") as sync_bse,
+        ):
+            result = sync_index_constituents_and_prices()
+
+        self.assertEqual(result, {"skipped": True, "reason": "market closed"})
+        sync_prices.assert_not_called()
+        sync_nse.assert_not_called()
+        sync_bse.assert_not_called()
+
+    def test_bse_sensex_sync_is_hermetic(self):
+        """SENSEX dispatch is covered without making a real BSE request."""
+        from .tasks import sync_index_constituents_and_prices
+
+        Index.objects.create(name="SENSEX", symbol="SENSEX", exchange="BSE")
+        with (
+            patch("apps.investing.tasks.is_market_open", return_value=(True, "")),
+            patch("apps.investing.tasks._sync_index_prices_via_angelone", return_value={}),
+            patch(
+                "apps.investing.bse_client.BSEDataClient.get_sensex_snapshot",
+                return_value=None,
+            ) as get_snapshot,
+            patch(
+                "apps.investing.bse_client.BSEDataClient.get_sensex_constituents",
+                return_value=[],
+            ) as get_constituents,
+        ):
+            result = sync_index_constituents_and_prices()
+
         self.assertIn("SENSEX", result)
-        self.assertEqual(result["SENSEX"].get("members_synced"), 0)  # no network -> nothing came back, but no crash either
+        self.assertEqual(result["SENSEX"].get("members_synced"), 0)
+        get_snapshot.assert_called_once_with()
+        get_constituents.assert_called_once_with()
 
     def test_unsupported_bse_index_is_explicitly_skipped(self):
         """A BSE index other than SENSEX has no client support yet -- should say so, not silently no-op or crash."""
         from .tasks import sync_index_constituents_and_prices
 
         Index.objects.create(name="BSE 500", symbol="BSE500", exchange="BSE")
-        result = sync_index_constituents_and_prices()
+        with (
+            patch("apps.investing.tasks.is_market_open", return_value=(True, "")),
+            patch("apps.investing.tasks._sync_index_prices_via_angelone", return_value={}),
+        ):
+            result = sync_index_constituents_and_prices()
         self.assertTrue(result["BSE 500"].get("skipped"))

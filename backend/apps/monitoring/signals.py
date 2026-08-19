@@ -9,12 +9,16 @@ liveStore.js branches on msg.type == "feed_health" specifically for
 this.
 """
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
+import logging
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from common.websockets import broadcast_group
+
 from .models import FeedHealthCheck
+
+logger = logging.getLogger(__name__)
 
 
 @receiver(post_save, sender=FeedHealthCheck)
@@ -22,11 +26,7 @@ def broadcast_feed_health(sender, instance: FeedHealthCheck, created: bool, **kw
     if not created:
         return
 
-    channel_layer = get_channel_layer()
-    if channel_layer is None:
-        return
-
-    async_to_sync(channel_layer.group_send)(
+    broadcast_group(
         "risk_live",
         {
             "type": "risk_alert",
@@ -37,4 +37,5 @@ def broadcast_feed_health(sender, instance: FeedHealthCheck, created: bool, **kw
                 "latency_ms": instance.latency_ms,
             },
         },
+        log=logger,
     )

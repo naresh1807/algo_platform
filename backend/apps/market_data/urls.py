@@ -3,6 +3,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import HistoricalDataViewSet, IndicatorSeriesView
 
+app_name = "market_data"
+
 router = DefaultRouter()
 router.register("candles", HistoricalDataViewSet, basename="historical-data")
 

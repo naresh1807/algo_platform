@@ -22,6 +22,8 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import AccountEquity, KillSwitchState, RiskEvent
@@ -62,15 +64,49 @@ def get_equity() -> AccountEquity:
     fresh install -- but this default is only ever a *starting point*;
     apps.execution must keep it updated once real trades happen.
     """
-    equity, created = AccountEquity.objects.get_or_create(
-        pk=1,
-        defaults={
-            "current_equity": settings.STARTING_EQUITY,
-            "daily_start_equity": settings.STARTING_EQUITY,
-            "peak_equity": settings.STARTING_EQUITY,
-            "trading_day": timezone.localdate(),
-        },
-    )
+    today = timezone.localdate()
+    from apps.execution.models import ExecutionModeSetting, get_execution_mode
+
+    execution_mode = get_execution_mode()
+    with transaction.atomic():
+        equity, created = AccountEquity.objects.select_for_update().get_or_create(
+            pk=1,
+            defaults={
+                "current_equity": settings.STARTING_EQUITY,
+                "daily_start_equity": settings.STARTING_EQUITY,
+                "peak_equity": settings.STARTING_EQUITY,
+                "trading_day": today,
+                "source_mode": ExecutionModeSetting.Mode.PAPER,
+            },
+        )
+        if (
+            not created
+            and execution_mode == ExecutionModeSetting.Mode.PAPER
+            and equity.source_mode != ExecutionModeSetting.Mode.PAPER
+        ):
+            # Paper simulation starts a fresh risk baseline when leaving a
+            # broker-synchronized live session; it must not mutate live risk
+            # history while live execution is armed.
+            equity.source_mode = ExecutionModeSetting.Mode.PAPER
+            equity.daily_start_equity = equity.current_equity
+            equity.peak_equity = equity.current_equity
+            equity.consecutive_losses = 0
+            equity.trading_day = today
+            equity.last_broker_sync_at = None
+            equity.save(update_fields=[
+                "source_mode", "daily_start_equity", "peak_equity",
+                "consecutive_losses", "trading_day", "last_broker_sync_at",
+            ])
+        if not created and equity.trading_day < today:
+            previous_day = equity.trading_day
+            equity.daily_start_equity = equity.current_equity
+            equity.trading_day = today
+            equity.save(update_fields=["daily_start_equity", "trading_day"])
+            _log_event(
+                "daily_equity_rollover",
+                f"Daily equity baseline rolled from {previous_day} to {today}.",
+                severity="info",
+            )
     if created:
         _log_event(
             "equity_initialized",
@@ -80,6 +116,91 @@ def get_equity() -> AccountEquity:
             severity="warning",
         )
     return equity
+
+
+def validate_signal_for_execution(signal) -> tuple[bool, str]:
+    """Repeat every volatile hard-risk check immediately before execution."""
+    reasons: list[str] = []
+    now = timezone.now()
+    max_age = timedelta(minutes=getattr(settings, "MAX_SIGNAL_AGE_MINUTES", 10))
+    if now - signal.created_at > max_age:
+        reasons.append(
+            f"Signal is stale ({(now - signal.created_at).total_seconds() / 60:.1f} minutes old)."
+        )
+
+    from apps.market_data.market_hours import is_market_open
+
+    market_open, market_reason = is_market_open(at=now)
+    if not market_open:
+        reasons.append(f"Market is closed: {market_reason}")
+
+    equity = get_equity()
+    from apps.execution.models import ExecutionModeSetting, get_execution_mode
+
+    if get_execution_mode() == ExecutionModeSetting.Mode.LIVE:
+        if equity.source_mode != ExecutionModeSetting.Mode.LIVE or equity.last_broker_sync_at is None:
+            reasons.append("Live account equity has not been synchronized with the broker.")
+        elif timezone.localdate(equity.last_broker_sync_at) != timezone.localdate(now):
+            reasons.append("Live broker equity synchronization is from a prior trading day.")
+    for check in (
+        lambda: _check_kill_switch(),
+        lambda: _check_feed_freshness(signal.symbol),
+        lambda: _check_drawdown(equity, signal.symbol),
+        lambda: _check_daily_loss(equity, signal.symbol),
+        lambda: _check_consecutive_losses(equity, signal.symbol),
+        lambda: _check_exposure(signal.symbol),
+    ):
+        ok, reason = check()
+        if not ok:
+            reasons.append(reason)
+
+    qty = int(signal.position_size or 0)
+    if qty <= 0:
+        reasons.append("Signal quantity is not positive.")
+    elif signal.entry_price <= 0 or signal.stop_loss <= 0:
+        reasons.append("Signal entry and stop prices must be positive.")
+    else:
+        capped_qty, cap_reason = _cap_qty_to_single_symbol_exposure(
+            signal.symbol, signal.entry_price, qty, equity,
+        )
+        if capped_qty < qty:
+            reasons.append(cap_reason or "Position exceeds the current single-symbol exposure limit.")
+        combined_ok, combined_reason = _check_combined_open_risk(
+            signal.symbol, signal.entry_price, signal.stop_loss, qty, equity,
+        )
+        if not combined_ok:
+            reasons.append(combined_reason)
+
+    if signal.option_contract_id is not None:
+        from apps.options.expiry_service import is_expiry_eligible
+
+        contract = signal.option_contract
+        if not contract.is_active or not is_expiry_eligible(contract.expiry, at=now):
+            reasons.append(f"Option contract {contract.tradingsymbol} is no longer eligible for entry.")
+        if not contract.tradingsymbol or not contract.symbol_token or contract.lot_size <= 0:
+            reasons.append("Option contract lacks complete broker instrument metadata.")
+        elif qty % contract.lot_size:
+            reasons.append(
+                f"Quantity {qty} is not a whole multiple of lot size {contract.lot_size}."
+            )
+
+        snapshot = contract.snapshots.order_by("-timestamp").first()
+        if snapshot is None:
+            reasons.append("No option quote snapshot exists for execution-time liquidity validation.")
+        elif now - snapshot.timestamp > timedelta(minutes=FEED_STALENESS_THRESHOLD_MINUTES):
+            reasons.append("The option quote snapshot is stale.")
+        else:
+            liquidity_ok, liquidity_reason = check_option_contract_liquidity(
+                contract,
+                float(snapshot.bid) if snapshot.bid is not None else None,
+                float(snapshot.ask) if snapshot.ask is not None else None,
+                snapshot.open_interest,
+                snapshot.volume,
+            )
+            if not liquidity_ok:
+                reasons.append(liquidity_reason)
+
+    return not reasons, "; ".join(reasons)
 
 
 def is_kill_switch_active() -> bool:
@@ -132,6 +253,10 @@ def _check_feed_freshness(symbol: str) -> tuple[bool, str]:
             "No FeedHealthCheck row exists yet -- feed freshness cannot be verified.",
             severity="warning", symbol=symbol,
         )
+        from apps.execution.models import get_execution_mode
+
+        if get_execution_mode() == "live":
+            return False, "Feed freshness is unknown -- live entries are blocked until a health check succeeds."
         return True, ""
 
     age = timezone.now() - latest.checked_at
@@ -199,6 +324,34 @@ def _check_daily_loss(equity: AccountEquity, symbol: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _check_equity_provenance(equity: AccountEquity) -> tuple[bool, str]:
+    """Live sizing must use a broker-synchronized, same-day baseline."""
+    from apps.execution.models import ExecutionModeSetting, get_execution_mode
+
+    if get_execution_mode() != ExecutionModeSetting.Mode.LIVE:
+        return True, ""
+    if equity.source_mode != ExecutionModeSetting.Mode.LIVE or equity.last_broker_sync_at is None:
+        return False, "Live account equity has not been synchronized with the broker."
+    if timezone.localdate(equity.last_broker_sync_at) != timezone.localdate():
+        return False, "Live broker equity synchronization is from a prior trading day."
+    return True, ""
+
+
+def enforce_account_risk_limits() -> tuple[bool, str]:
+    """Evaluate account-wide limits even when no new signal is pending."""
+    equity = get_equity()
+    reasons = []
+    for check in (
+        lambda: _check_drawdown(equity, ""),
+        lambda: _check_daily_loss(equity, ""),
+        lambda: _check_consecutive_losses(equity, ""),
+    ):
+        ok, reason = check()
+        if not ok:
+            reasons.append(reason)
+    return not reasons, "; ".join(reasons)
+
+
 def _check_consecutive_losses(equity: AccountEquity, symbol: str) -> tuple[bool, str]:
     limits = settings.RISK_HARD_LIMITS
     if equity.consecutive_losses >= limits["MAX_CONSECUTIVE_LOSSES"]:
@@ -242,15 +395,21 @@ def _check_exposure(symbol: str) -> tuple[bool, str]:
     happened yet at this point in check_pre_trade.
     """
     limits = settings.RISK_HARD_LIMITS
-    open_positions = OpenPosition.objects.filter(closed_at__isnull=True)
+    open_positions = OpenPosition.objects.filter(closed_at__isnull=True).select_related("signal")
+    from apps.signals.models import TradingSignal
 
-    if open_positions.count() >= limits["MAX_OPEN_POSITIONS"]:
+    executing_signals = TradingSignal.objects.filter(status="executing")
+
+    if open_positions.count() + executing_signals.count() >= limits["MAX_OPEN_POSITIONS"]:
         return False, (
             f"Already at max open positions ({limits['MAX_OPEN_POSITIONS']})."
         )
 
-    if open_positions.filter(symbol=symbol).exists():
+    if open_positions.filter(Q(symbol=symbol) | Q(signal__symbol=symbol)).exists():
         return False, f"A position in {symbol} is already open (max one at a time per symbol)."
+
+    if executing_signals.filter(symbol=symbol).exists():
+        return False, f"An order for {symbol} is already executing."
 
     return True, ""
 
@@ -285,7 +444,7 @@ def _check_combined_open_risk(
     from apps.market_data.correlation import compute_correlation_matrix
 
     limits = settings.RISK_HARD_LIMITS
-    open_positions = OpenPosition.objects.filter(closed_at__isnull=True)
+    open_positions = OpenPosition.objects.filter(closed_at__isnull=True).select_related("signal")
 
     new_risk_amount = float(qty) * float(abs(entry_price - stop_loss))
     combined_risk_amount = new_risk_amount
@@ -298,10 +457,11 @@ def _check_combined_open_risk(
     weighted_detail = []
     if matrix is not None and not matrix.empty and symbol in matrix.columns:
         for position in open_positions:
-            if position.symbol == symbol:
+            exposure_symbol = position.signal.symbol
+            if exposure_symbol == symbol:
                 weight = 1.0  # shouldn't normally happen (one-position-per-symbol), but fully count if it does
-            elif position.symbol in matrix.columns:
-                corr = matrix.at[symbol, position.symbol]
+            elif exposure_symbol in matrix.columns:
+                corr = matrix.at[symbol, exposure_symbol]
                 weight = abs(float(corr)) if corr == corr else 0.0  # corr==corr is a NaN guard
             else:
                 weight = 0.0  # no correlation data for this open symbol -- don't assume correlated
@@ -312,7 +472,7 @@ def _check_combined_open_risk(
             contribution = weight * position_risk_amount
             combined_risk_amount += contribution
             if weight >= 0.3:  # only mention meaningfully-correlated contributors in the reason text
-                weighted_detail.append(f"{position.symbol} (weight {weight:.2f})")
+                weighted_detail.append(f"{exposure_symbol} (weight {weight:.2f})")
     # else: no usable correlation data yet -- combined_risk_amount stays
     # at just the new trade's own risk, i.e. this check can't add a
     # rejection beyond what MAX_RISK_PER_TRADE_PCT already covers.
@@ -516,6 +676,7 @@ def check_pre_trade(symbol: str, entry_price: Decimal, stop_loss: Decimal) -> Ri
 
     for check in (
         lambda: _check_kill_switch(),
+        lambda: _check_equity_provenance(equity),
         lambda: _check_feed_freshness(symbol),
         lambda: _check_drawdown(equity, symbol),
         lambda: _check_daily_loss(equity, symbol),

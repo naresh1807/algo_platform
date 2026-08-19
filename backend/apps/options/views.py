@@ -1,11 +1,16 @@
 from datetime import date, datetime
 
+from django.conf import settings
 from django.core.cache import cache
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from common.permissions import IsAdminGroup, IsTraderOrAdmin
+
+from apps.admin_tools.audit import log_action
 
 from . import metrics
 from .greeks import compute_greeks_for_contract
@@ -26,7 +31,7 @@ class OptionContractViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = OptionContract.objects.all()
     serializer_class = OptionContractSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["underlying", "expiry", "option_type", "is_active"]
 
     def get_queryset(self):
@@ -50,7 +55,7 @@ class OptionChainSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = OptionChainSnapshot.objects.select_related("contract").all()
     serializer_class = OptionChainSnapshotSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["contract__underlying", "contract__expiry", "contract__strike", "contract__option_type"]
 
 
@@ -72,7 +77,7 @@ class OptionExpiriesView(APIView):
     prefer OptionExpiryStatusView below, which also reports
     current_expiry/next_expiry/sync health in one call.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         from .expiry_service import list_eligible_expiries
@@ -98,7 +103,7 @@ class OptionExpiryStatusView(APIView):
     can show an honest "temporarily unavailable" state instead of
     silently rendering nothing or, worse, an expired chain.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         from .expiry_service import expiry_status
@@ -121,7 +126,7 @@ class OptionChainView(APIView):
     from the flatter OptionContractViewSet/OptionChainSnapshotViewSet
     list endpoints.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         from .expiry_service import validate_requested_expiry
@@ -243,7 +248,7 @@ class OptionCandlesView(APIView):
     showing an empty chart for a contract that no longer exists.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         from .candle_service import (
@@ -313,14 +318,17 @@ class OptionsAnalyticsView(APIView):
     (manual section 6) is meant to call this once rather than stitching
     together several separate metric endpoints itself.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         underlying = request.query_params.get("underlying", "NIFTY")
         expiry_str = request.query_params.get("expiry")
         if not expiry_str:
             return Response({"error": "expiry query param (YYYY-MM-DD) is required."}, status=400)
-        expiry = date.fromisoformat(expiry_str)
+        try:
+            expiry = date.fromisoformat(expiry_str)
+        except ValueError:
+            return Response({"error": "expiry must use YYYY-MM-DD format."}, status=400)
 
         # Fetched once and reused across the three calls below --
         # compute_pcr/compute_max_pain/strike_support_resistance each
@@ -345,7 +353,7 @@ class BestStrikeView(APIView):
     Strike." See apps.options.strike_selector.suggest_best_strike for
     the actual scoring.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         underlying = request.query_params.get("underlying", "NIFTY")
@@ -355,7 +363,10 @@ class BestStrikeView(APIView):
             return Response({"error": "expiry query param (YYYY-MM-DD) is required."}, status=400)
         if direction not in ("bullish", "bearish"):
             return Response({"error": "direction must be 'bullish' or 'bearish'."}, status=400)
-        expiry = date.fromisoformat(expiry_str)
+        try:
+            expiry = date.fromisoformat(expiry_str)
+        except ValueError:
+            return Response({"error": "expiry must use YYYY-MM-DD format."}, status=400)
 
         from .strike_selector import suggest_best_strike
 
@@ -371,23 +382,43 @@ class OptionsStrategySettingView(APIView):
     expiry/strike mode preferences apps.options.index_direction_strategy
     reads via select_expiry()/suggest_best_strike() on every scheduled
     evaluation. Same DB-backed-singleton pattern as apps.execution.
-    views.ExecutionModeView, minus that view's LIVE-mode confirmation
-    phrase -- changing a strategy preference isn't a real-money-risk
-    action the way flipping to live execution is, so no extra friction.
+    views.ExecutionModeView. Reading is available to dashboard roles;
+    changing a platform-wide strategy preference is an Admin-only,
+    audited governance action.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAdminGroup()]
+        return [IsTraderOrAdmin()]
 
     def get(self, request):
-        row, _ = OptionsStrategySetting.objects.get_or_create(pk=1)
+        # A GET must remain read-only.  Serialize an unsaved default when
+        # this singleton has not been configured yet; the first durable
+        # row is created only by the Admin-only POST below.
+        row = OptionsStrategySetting.objects.filter(pk=1).first() or OptionsStrategySetting(pk=1)
         return Response(OptionsStrategySettingSerializer(row).data)
 
     def post(self, request):
-        row, _ = OptionsStrategySetting.objects.get_or_create(pk=1)
-        serializer = OptionsStrategySettingSerializer(row, data=request.data, partial=True)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        serializer.save(changed_by=request.user.get_username())
+        with transaction.atomic():
+            row, _ = OptionsStrategySetting.objects.select_for_update().get_or_create(pk=1)
+            serializer = OptionsStrategySettingSerializer(row, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            row = serializer.save(changed_by=request.user.get_username())
+
+        log_action(
+            action="options_strategy_settings_changed",
+            actor=request.user,
+            target=row,
+            details={
+                "expiry_mode": row.expiry_mode,
+                "strike_mode": row.strike_mode,
+                "itm_otm_steps": row.itm_otm_steps,
+                "custom_expiry": row.custom_expiry.isoformat() if row.custom_expiry else None,
+            },
+        )
         return Response(serializer.data)
 
 
@@ -409,11 +440,27 @@ class EvaluateNowView(APIView):
     just calls it synchronously and returns the resulting signal.
     """
 
-    permission_classes = [IsAuthenticated]
+    # This creates a system TradingSignal that the execution loop may
+    # consume in live mode.  It is therefore a platform-level trading
+    # action, not an ordinary dashboard read or a personal watch-list
+    # mutation.
+    permission_classes = [IsAdminGroup]
 
     def post(self, request):
-        underlying = request.data.get("underlying", "NIFTY")
-        timeframe = request.data.get("timeframe", "5m")
+        from .index_direction_strategy import INDEX_UNDERLYINGS, evaluate_index_direction_trade
+
+        underlying = str(request.data.get("underlying", "NIFTY")).strip().upper()
+        timeframe = str(request.data.get("timeframe", "5m")).strip()
+        if underlying not in INDEX_UNDERLYINGS:
+            return Response(
+                {"error": f"Unsupported underlying. Choose one of: {sorted(INDEX_UNDERLYINGS)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if timeframe not in settings.CHART_TIMEFRAMES:
+            return Response(
+                {"error": f"Unsupported timeframe. Choose one of: {settings.CHART_TIMEFRAMES}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         cache_key = f"options:evaluate_now:{underlying}"
         if cache.get(cache_key):
@@ -425,9 +472,13 @@ class EvaluateNowView(APIView):
 
         from apps.signals.serializers import TradingSignalSerializer
 
-        from .index_direction_strategy import evaluate_index_direction_trade
-
         signal = evaluate_index_direction_trade(underlying, timeframe)
+        log_action(
+            action="options_evaluation_requested",
+            actor=request.user,
+            target=signal,
+            details={"underlying": underlying, "timeframe": timeframe},
+        )
         return Response(TradingSignalSerializer(signal).data)
 
 
@@ -443,7 +494,7 @@ class FinalSignalView(APIView):
     docstring.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         underlying = request.query_params.get("underlying", "NIFTY")

@@ -1,5 +1,6 @@
 from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
+
+from common.permissions import IsTraderOrAdmin
 
 from .models import TradingSignal
 from .serializers import TradingSignalSerializer
@@ -14,5 +15,5 @@ class TradingSignalViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = TradingSignal.objects.select_related("strategy_version", "option_contract").all()
     serializer_class = TradingSignalSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["symbol", "status", "signal_type"]

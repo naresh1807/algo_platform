@@ -6,15 +6,10 @@ sync concurrently (which would otherwise let two processes both
 download/parse/upsert at once and race on the same OptionContract rows).
 
 Uses the `redis` package directly (already an installed dependency --
-Celery's own broker/result backend and Django Channels' channel layer
-both already require it, see config/settings.py's CELERY_BROKER_URL/
-CHANNEL_LAYERS) rather than Django's cache framework: this project has
-no CACHES setting today (django.core.cache.cache defaults to the
-per-process LocMemCache), and a lock that only works within one process
-would defeat the entire point -- adding a project-wide Redis cache
-backend just to get a lock is a bigger, unrelated change than this
-needs. Reuses the exact same REDIS_URL env-var convention config/
-settings.py already uses for CELERY_BROKER_URL/CHANNEL_LAYERS.
+Celery, Channels, and Django's shared cache all use it) because safe lock
+release needs an ownership token checked atomically by Lua; the generic
+cache API does not expose that compare-and-delete operation. Reuses the
+same REDIS_URL convention as the other Redis-backed services.
 
 Standard safe-Redis-lock pattern: SET key token NX PX ttl to acquire
 (atomic -- only succeeds if the key doesn't already exist), and a

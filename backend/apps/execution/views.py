@@ -1,9 +1,14 @@
+from django.db import transaction
 from rest_framework import status, viewsets
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ExecutionModeSetting, OpenPosition
+from common.constants import SignalStatus
+from common.permissions import IsAdminGroup, IsTraderOrAdmin
+
+from apps.signals.models import TradingSignal
+
+from .models import BrokerOrder, ExecutionModeSetting, OpenPosition
 from .serializers import ExecutionModeSettingSerializer, OpenPositionSerializer
 
 
@@ -15,7 +20,7 @@ class OpenPositionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = OpenPosition.objects.select_related("signal").all()
     serializer_class = OpenPositionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["symbol", "side"]
 
 
@@ -47,7 +52,14 @@ class ExecutionModeView(APIView):
     by itself.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
+
+    def get_permissions(self):
+        # Reading the mode is harmless dashboard state; changing the global
+        # real-money switch is a governance action and requires Admin RBAC.
+        if self.request.method == "POST":
+            return [IsAdminGroup()]
+        return super().get_permissions()
 
     def get(self, request):
         row, _ = ExecutionModeSetting.objects.get_or_create(pk=1)
@@ -62,6 +74,18 @@ class ExecutionModeView(APIView):
             )
 
         if mode == ExecutionModeSetting.Mode.LIVE:
+            from django.conf import settings
+
+            if not settings.LIVE_TRADING_ENABLED:
+                return Response(
+                    {
+                        "error": (
+                            "Live trading is disabled by server configuration. "
+                            "Set LIVE_TRADING_ENABLED=1 only after deployment checks and broker reconciliation are ready."
+                        )
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             if request.data.get("confirm_phrase") != LIVE_MODE_CONFIRMATION_PHRASE:
                 return Response(
                     {
@@ -73,24 +97,57 @@ class ExecutionModeView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        row, _ = ExecutionModeSetting.objects.get_or_create(pk=1)
-        previous_mode = row.mode
-        row.mode = mode
-        row.changed_by = request.user.get_username()
-        row.save()
+        with transaction.atomic():
+            row, _ = ExecutionModeSetting.objects.select_for_update().get_or_create(pk=1)
+            previous_mode = row.mode
+            if previous_mode != mode:
+                has_open_positions = OpenPosition.objects.filter(closed_at__isnull=True).exists()
+                has_unresolved_orders = BrokerOrder.objects.filter(status__in=[
+                    BrokerOrder.Status.CREATED,
+                    BrokerOrder.Status.SUBMITTED,
+                    BrokerOrder.Status.UNKNOWN,
+                ]).exists()
+                has_executing_signals = TradingSignal.objects.filter(
+                    status=SignalStatus.EXECUTING,
+                ).exists()
+                if has_open_positions or has_unresolved_orders or has_executing_signals:
+                    return Response(
+                        {
+                            "error": (
+                                "Execution mode cannot change while positions, executing signals, "
+                                "or unresolved broker orders exist."
+                            )
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
-        if previous_mode != mode:
-            from common.constants import RiskEventSeverity
+                # Never carry an approval across venue boundaries. A signal
+                # approved for paper must not become a real-money order merely
+                # because the operator subsequently armed live mode.
+                for stale in TradingSignal.objects.filter(status=SignalStatus.APPROVED):
+                    stale.status = SignalStatus.EXPIRED
+                    stale.reason += " [expired by execution-mode change]"
+                    stale.save(update_fields=["status", "reason"])
 
-            from apps.risk.models import RiskEvent
+                row.mode = mode
+                row.changed_by = request.user.get_username()
+                row.save()
 
-            RiskEvent.objects.create(
-                event_type="execution_mode_changed",
-                message=(
-                    f"Execution mode changed from {previous_mode.upper()} to {mode.upper()} "
-                    f"by {row.changed_by}."
-                ),
-                severity=RiskEventSeverity.CRITICAL if mode == ExecutionModeSetting.Mode.LIVE else RiskEventSeverity.INFO,
-            )
+                from common.constants import RiskEventSeverity
+
+                from apps.risk.models import RiskEvent
+
+                RiskEvent.objects.create(
+                    event_type="execution_mode_changed",
+                    message=(
+                        f"Execution mode changed from {previous_mode.upper()} to {mode.upper()} "
+                        f"by {row.changed_by}."
+                    ),
+                    severity=(
+                        RiskEventSeverity.CRITICAL
+                        if mode == ExecutionModeSetting.Mode.LIVE
+                        else RiskEventSeverity.INFO
+                    ),
+                )
 
         return Response(ExecutionModeSettingSerializer(row).data)

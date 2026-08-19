@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { endpoints } from "../services/api.js";
+import { createAuthenticatedWebSocket } from "../utils/websocket.js";
 
 const MAX_RETAINED_CANDLES = 2000;
 const RECONNECT_BASE_DELAY_MS = 1000;
@@ -144,7 +145,13 @@ export function useOptionCandles({ underlying, expiry, strike, optionType, timef
     let cancelled = false;
     const openSocket = (attempt = 0) => {
       if (cancelled) return;
-      const socket = new WebSocket(`${wsBase()}/ws/options/candles/${contract.id}/${timeframe}/`);
+      const socket = createAuthenticatedWebSocket(
+        `${wsBase()}/ws/options/candles/${contract.id}/${timeframe}/`
+      );
+      if (!socket) {
+        setStale(true);
+        return;
+      }
       wsRef.current = socket;
       socket.onopen = () => setStale(false);
       socket.onmessage = (event) => {

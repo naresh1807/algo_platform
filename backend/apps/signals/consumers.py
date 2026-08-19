@@ -7,18 +7,14 @@ broadcast into one shared group, matching the frontend's fixed
 
 import json
 
-from channels.generic.websocket import AsyncWebsocketConsumer
+from common.websockets import AuthenticatedWebsocketConsumer
 
 GROUP_NAME = "signals_live"
 
 
-class LiveSignalConsumer(AsyncWebsocketConsumer):
+class LiveSignalConsumer(AuthenticatedWebsocketConsumer):
     async def connect(self):
-        await self.channel_layer.group_add(GROUP_NAME, self.channel_name)
-        await self.accept()
-
-    async def disconnect(self, code):
-        await self.channel_layer.group_discard(GROUP_NAME, self.channel_name)
+        await self.join_group_and_accept(GROUP_NAME)
 
     async def signal_update(self, event):
         await self.send(text_data=json.dumps(event["data"]))

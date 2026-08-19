@@ -19,21 +19,72 @@ Design notes (why things are set up this way):
 """
 
 import os
+import sys
 from datetime import time as _time
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+# Available early because cache/rate-limit configuration must be isolated in
+# tests. DJANGO_TESTING supports runners that do not put test/pytest in argv.
+TESTING = (
+    os.environ.get("DJANGO_TESTING", "0") == "1"
+    or os.environ.get("DJANGO_ENVIRONMENT", "").strip().lower() == "test"
+    or (len(sys.argv) > 1 and sys.argv[1] == "test")
+    or any(Path(arg).name.lower() in {"pytest", "pytest.exe", "py.test"} for arg in sys.argv)
+)
+
 # ---------------------------------------------------------------------------
 # Core / security
 # ---------------------------------------------------------------------------
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-insecure-key-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+    if host.strip()
+]
+ENVIRONMENT = os.environ.get("DJANGO_ENVIRONMENT", "development").strip().lower()
+_VALID_ENVIRONMENTS = frozenset({"development", "test", "staging", "production"})
+
+if ENVIRONMENT not in _VALID_ENVIRONMENTS:
+    raise RuntimeError(
+        "DJANGO_ENVIRONMENT must be one of: development, test, staging, production."
+    )
+
+if ENVIRONMENT == "production" and (
+    not SECRET_KEY.strip()
+    or len(SECRET_KEY) < 50
+    or len(set(SECRET_KEY)) < 5
+    or SECRET_KEY == "dev-only-insecure-key-change-me"
+    or SECRET_KEY.startswith("django-insecure-")
+):
+    raise RuntimeError("DJANGO_SECRET_KEY must be a strong secret of at least 50 characters in production.")
+if ENVIRONMENT == "production" and DEBUG:
+    raise RuntimeError("DJANGO_DEBUG must be 0 in production.")
+if ENVIRONMENT == "production" and (
+    "DJANGO_ALLOWED_HOSTS" not in os.environ or not ALLOWED_HOSTS
+):
+    raise RuntimeError("DJANGO_ALLOWED_HOSTS must be explicitly configured in production.")
+
+# Transport/cookie hardening is automatic in production while local HTTP
+# development remains usable. Proxy deployments must send X-Forwarded-Proto.
+SECURE_SSL_REDIRECT = ENVIRONMENT == "production"
+SESSION_COOKIE_SECURE = ENVIRONMENT == "production"
+CSRF_COOKIE_SECURE = ENVIRONMENT == "production"
+SECURE_HSTS_SECONDS = 31536000 if ENVIRONMENT == "production" else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = ENVIRONMENT == "production"
+SECURE_HSTS_PRELOAD = ENVIRONMENT == "production"
+SECURE_PROXY_SSL_HEADER = (
+    ("HTTP_X_FORWARDED_PROTO", "https")
+    if os.environ.get("TRUST_X_FORWARDED_PROTO", "0") == "1"
+    else None
+)
 
 # ---------------------------------------------------------------------------
 # Applications
@@ -148,6 +199,43 @@ CHANNEL_LAYERS = {
     },
 }
 
+# DRF throttling and the option-fetch/cooldown locks must be shared by
+# every web process. Django's built-in Redis backend uses the already
+# required redis-py dependency; database 2 keeps cache keys isolated from
+# the Channels/Celery databases even when REDIS_URL names database 0/1.
+def _redis_cache_url() -> str:
+    explicit_url = os.environ.get("CACHE_REDIS_URL")
+    if explicit_url:
+        return explicit_url
+
+    parsed = urlsplit(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"))
+    if parsed.scheme not in {"redis", "rediss"} or not parsed.netloc:
+        raise RuntimeError("REDIS_URL must be a valid redis:// or rediss:// URL.")
+    return urlunsplit(parsed._replace(path="/2"))
+
+
+CACHES = (
+    {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "algo-platform-tests",
+        }
+    }
+    if TESTING
+    else {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _redis_cache_url(),
+            "KEY_PREFIX": os.environ.get("CACHE_KEY_PREFIX", "algo_platform"),
+            "TIMEOUT": 300,
+            "OPTIONS": {
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+            },
+        },
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Celery -- background jobs (daily review, drift detection, indicator
 # recompute, news polling -- anything that must not block a request/response
@@ -162,6 +250,14 @@ CELERY_TIMEZONE = "Asia/Kolkata"
 # ---------------------------------------------------------------------------
 # DRF
 # ---------------------------------------------------------------------------
+try:
+    _DRF_NUM_PROXIES = int(os.environ.get("DRF_NUM_PROXIES", "0"))
+except ValueError as exc:
+    raise RuntimeError("DRF_NUM_PROXIES must be a non-negative integer.") from exc
+if _DRF_NUM_PROXIES < 0:
+    raise RuntimeError("DRF_NUM_PROXIES must be a non-negative integer.")
+
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         # TokenAuthentication first: DRF's APIView.get_authenticate_header()
@@ -172,7 +268,7 @@ REST_FRAMEWORK = {
         # apps.auth_app.tests.test_protected_endpoint_rejects_missing_token
         # is what this platform actually expects (401), and frontend code
         # that treats 401 as "redirect to login" silently broke on 403.
-        "rest_framework.authentication.TokenAuthentication",
+        "common.authentication.ExpiringTokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
@@ -181,14 +277,26 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 100,
     "DEFAULT_FILTER_BACKENDS": ["django_filters.rest_framework.DjangoFilterBackend"],
+    "DEFAULT_THROTTLE_RATES": {
+        "login": os.environ.get("LOGIN_THROTTLE_RATE", "5/minute"),
+    },
+    # Zero is the safe default: use REMOTE_ADDR and do not trust a
+    # spoofable X-Forwarded-For header. Set this to the exact number of
+    # trusted reverse proxies only when that deployment topology exists.
+    "NUM_PROXIES": _DRF_NUM_PROXIES,
 }
+AUTH_TOKEN_TTL_HOURS = max(1, int(os.environ.get("AUTH_TOKEN_TTL_HOURS", "12")))
 
 # ---------------------------------------------------------------------------
 # CORS -- React dev server origin only; tighten before any real deployment
 # ---------------------------------------------------------------------------
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
-).split(",")
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",")
+    if origin.strip()
+]
 
 # ---------------------------------------------------------------------------
 # Password validation
@@ -238,6 +346,11 @@ RISK_HARD_LIMITS = {
     # meaningful liquidity proxy for a single 5-minute index-option snapshot;
     # raise this if a specific underlying/expiry needs a volume floor too.
 }
+
+# Execution rejects approvals that have gone stale while waiting in the
+# queue. This is deliberately time-bounded even when a worker was offline;
+# it is never safe to submit an old market decision after service recovery.
+MAX_SIGNAL_AGE_MINUTES = max(1, int(os.environ.get("MAX_SIGNAL_AGE_MINUTES", "10")))
 
 # Placeholder starting balance for a fresh AccountEquity row (see
 # apps/risk/engine.py:get_equity). This is NOT read anywhere else --
@@ -337,6 +450,15 @@ CHART_TIMEFRAMES = os.environ.get(
 # model before ever considering EXECUTION_MODE=live.
 # ---------------------------------------------------------------------------
 BROKER_MODE = os.environ.get("BROKER_MODE", "paper")
+if BROKER_MODE not in {"paper", "live"}:
+    raise RuntimeError("BROKER_MODE must be 'paper' or 'live'.")
+
+# Broker rate limits must coordinate across web/Celery processes in real
+# operation, while unit tests should stay deterministic and must not wait on
+# Redis-backed timing windows.
+SMARTAPI_DISTRIBUTED_RATE_LIMIT = os.environ.get(
+    "SMARTAPI_DISTRIBUTED_RATE_LIMIT", "0" if TESTING else "1"
+) == "1"
 
 # Separate from BROKER_MODE on purpose (see note above) -- this is the
 # ONLY flag that controls whether apps.execution.tasks.run_trading_cycle
@@ -347,6 +469,32 @@ BROKER_MODE = os.environ.get("BROKER_MODE", "paper")
 # placement -- that must always be a second, explicit opt-in, on top of
 # the kill switch and real STARTING_EQUITY already required.
 EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "paper")
+if EXECUTION_MODE not in {"paper", "live"}:
+    raise RuntimeError("EXECUTION_MODE must be 'paper' or 'live'.")
+
+# A second, deployment-owned arming gate above the database/UI mode. A user
+# cannot turn on real-money execution unless the server operator explicitly
+# enabled this environment switch as well.
+LIVE_TRADING_ENABLED = os.environ.get("LIVE_TRADING_ENABLED", "0") == "1"
+
+# Deterministic paper-fill friction. These values are snapshotted onto each
+# paper OpenPosition when it opens, so changing deployment configuration never
+# rewrites an in-flight trade's economics. Option premiums normally have wider
+# percentage spreads than liquid cash/underlying prices, hence their separate,
+# more conservative defaults. Set both values for a venue to 0 only when an
+# explicit frictionless comparison is required.
+PAPER_CASH_SLIPPAGE_BPS_PER_SIDE = os.environ.get(
+    "PAPER_CASH_SLIPPAGE_BPS_PER_SIDE", "5.0",
+)
+PAPER_CASH_FEES_BPS_PER_SIDE = os.environ.get(
+    "PAPER_CASH_FEES_BPS_PER_SIDE", "5.0",
+)
+PAPER_OPTION_SLIPPAGE_BPS_PER_SIDE = os.environ.get(
+    "PAPER_OPTION_SLIPPAGE_BPS_PER_SIDE", "25.0",
+)
+PAPER_OPTION_FEES_BPS_PER_SIDE = os.environ.get(
+    "PAPER_OPTION_FEES_BPS_PER_SIDE", "10.0",
+)
 
 ANGEL_ONE_API_KEY = os.environ.get("ANGEL_ONE_API_KEY", "")
 ANGEL_ONE_CLIENT_ID = os.environ.get("ANGEL_ONE_CLIENT_ID", "")

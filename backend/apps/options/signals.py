@@ -7,22 +7,22 @@ any code path that creates a snapshot (the recurring task, a manual
 shell one-off) automatically pushes a live update.
 """
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
+import logging
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from common.websockets import broadcast_group
+
 from .models import OptionChainSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @receiver(post_save, sender=OptionChainSnapshot)
 def broadcast_new_snapshot(sender, instance: OptionChainSnapshot, created: bool, **kwargs):
     if not created:
         return
-
-    channel_layer = get_channel_layer()
-    if channel_layer is None:
-        return  # Channels not configured (e.g. some test environments) -- no-op, don't crash
 
     contract = instance.contract
 
@@ -43,7 +43,7 @@ def broadcast_new_snapshot(sender, instance: OptionChainSnapshot, created: bool,
         except Exception:
             greeks_payload = None  # never let a Greeks calc failure block the live price push
 
-    async_to_sync(channel_layer.group_send)(
+    broadcast_group(
         "options_live",
         {
             "type": "chain_update",  # must match the consumer method name exactly
@@ -63,4 +63,5 @@ def broadcast_new_snapshot(sender, instance: OptionChainSnapshot, created: bool,
                 "greeks": greeks_payload,
             },
         },
+        log=logger,
     )

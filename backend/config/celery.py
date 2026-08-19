@@ -44,6 +44,8 @@ if platform.system() == "Windows":
 # queue over.
 app.conf.task_routes = {
     "apps.options.tasks.ingest_option_chain_snapshots": {"queue": "priority"},
+    "apps.execution.tasks.flatten_open_positions": {"queue": "priority"},
+    "apps.execution.tasks.square_off_intraday_positions": {"queue": "priority"},
 }
 
 # Scheduled jobs (Celery beat). Times are IST (settings.CELERY_TIMEZONE).
@@ -58,6 +60,11 @@ app.conf.beat_schedule = {
     "ingest-watchlist-candles-every-5-minutes": {
         "task": "apps.market_data.tasks.ingest_watchlist_candles",
         "schedule": 300.0,
+        # The dedicated every-minute entry below owns 1m ingestion.
+        # Excluding it here prevents two copies of the same broker
+        # request whenever the schedules coincide, while retaining the
+        # normal five-minute refresh for every higher timeframe.
+        "kwargs": {"exclude_timeframes": ["1m"]},
     },
     "ingest-watchlist-1m-every-minute": {
         "task": "apps.market_data.tasks.ingest_watchlist_candles",
@@ -143,6 +150,19 @@ app.conf.beat_schedule = {
     "trading-cycle-every-5-minutes": {
         "task": "apps.execution.tasks.run_trading_cycle",
         "schedule": 300.0,
+    },
+    # Two idempotent attempts before NSE closes. This avoids relying on a
+    # five-minute polling boundary (or broker auto-square-off) to close
+    # intraday paper and live exposure.
+    "intraday-square-off-before-close": {
+        "task": "apps.execution.tasks.square_off_intraday_positions",
+        "schedule": crontab(hour=15, minute="20,25", day_of_week="1-5"),
+    },
+    # Read-only broker-order reconciliation. The task is a no-op unless
+    # execution mode is explicitly LIVE and never submits a new order.
+    "reconcile-live-broker-orders-every-minute": {
+        "task": "apps.execution.tasks.reconcile_live_broker_orders",
+        "schedule": 60.0,
     },
     # apps.options.index_direction_strategy: NIFTY/BANKNIFTY direction
     # -> CE/PE side -> that side's backtest success rate -> trade.

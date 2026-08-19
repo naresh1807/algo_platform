@@ -33,7 +33,7 @@ class StockWatchlistSerializer(serializers.ModelSerializer):
     # writable-by-symbol field is friendlier than requiring the client
     # to look up the Stock's numeric id first, same reasoning
     # apps.jarvis.responses uses symbol strings everywhere instead of FKs.
-    stock_symbol = serializers.CharField(write_only=True)
+    stock_symbol = serializers.CharField(write_only=True, max_length=32)
 
     class Meta:
         model = StockWatchlist
@@ -43,6 +43,9 @@ class StockWatchlistSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         symbol = validated_data.pop("stock_symbol").strip().upper()
         stock, _ = Stock.objects.get_or_create(symbol=symbol, defaults={"name": symbol})
+        user = validated_data.get("user")
+        if StockWatchlist.objects.filter(user=user, stock=stock).exists():
+            raise serializers.ValidationError({"stock_symbol": "This stock is already on your watchlist."})
         validated_data["stock"] = stock
         return super().create(validated_data)
 

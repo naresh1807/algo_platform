@@ -9,6 +9,8 @@ from .views import (
     MarketOutlookView,
 )
 
+app_name = "jarvis"
+
 urlpatterns = [
     path("command/", JarvisCommandView.as_view(), name="jarvis-command"),
     path("history/", JarvisHistoryListView.as_view(), name="jarvis-history"),

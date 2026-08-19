@@ -2,15 +2,16 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { LogOut } from "lucide-react";
 
 import { NAV_SECTIONS, SETTINGS_ITEM } from "../constants/navigation.js";
+import { logoutSession } from "../services/api.js";
 import { useUiStore } from "../store/uiStore.js";
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
 
-  const handleLogout = () => {
-    localStorage.removeItem("authToken");
-    navigate("/login");
+  const handleLogout = async () => {
+    await logoutSession();
+    navigate("/login", { replace: true });
   };
 
   const linkClass = ({ isActive }) => `sidebar-link${isActive ? " active" : ""}`;

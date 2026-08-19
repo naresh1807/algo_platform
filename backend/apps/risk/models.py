@@ -24,6 +24,13 @@ class AccountEquity(models.Model):
     peak_equity = models.DecimalField(max_digits=16, decimal_places=2)
     consecutive_losses = models.PositiveSmallIntegerField(default=0)
     trading_day = models.DateField(help_text="Which trading day daily_start_equity refers to")
+    source_mode = models.CharField(
+        max_length=8,
+        choices=[("paper", "Paper"), ("live", "Live")],
+        default="paper",
+        help_text="Whether the current risk baseline is simulated or broker-synchronized.",
+    )
+    last_broker_sync_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

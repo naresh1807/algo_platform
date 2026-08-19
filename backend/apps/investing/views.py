@@ -1,7 +1,8 @@
 from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from common.permissions import IsTraderOrAdmin
 
 from .models import (
     FundamentalSnapshot,
@@ -26,21 +27,21 @@ from .serializers import (
 class StockViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Stock.objects.all()
     serializer_class = StockSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["sector", "exchange"]
 
 
 class FundamentalSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = FundamentalSnapshot.objects.select_related("stock").all()
     serializer_class = FundamentalSnapshotSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["stock", "reporting_type"]
 
 
 class StockWatchlistViewSet(viewsets.ModelViewSet):
     """Full CRUD, scoped to the requesting trader's own watchlist -- same pattern as apps.monitoring.PriceAlertViewSet."""
     serializer_class = StockWatchlistSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get_queryset(self):
         return StockWatchlist.objects.filter(user=self.request.user).select_related("stock")
@@ -57,7 +58,7 @@ class StockRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = StockRecommendation.objects.select_related("stock").all()
     serializer_class = StockRecommendationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["stock", "verdict"]
 
     def get_queryset(self):
@@ -75,7 +76,7 @@ class StockRecommendationViewSet(viewsets.ReadOnlyModelViewSet):
 class IPOListingViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = IPOListing.objects.all()
     serializer_class = IPOListingSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["status"]
 
 
@@ -87,7 +88,7 @@ class IndexViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = Index.objects.all()
     serializer_class = IndexSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
 
 class IndexConstituentViewSet(viewsets.ReadOnlyModelViewSet):
@@ -97,7 +98,7 @@ class IndexConstituentViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = IndexConstituent.objects.select_related("stock", "index").all()
     serializer_class = IndexConstituentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["index"]
 
 
@@ -108,7 +109,7 @@ class SectorBreakdownView(APIView):
     apps.investing.sector_analysis.sector_breakdown for the actual
     aggregation.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         from .sector_analysis import sector_breakdown

@@ -188,7 +188,10 @@ def _evaluate_on_holdout(pipeline, X_test: list, y_test: list) -> dict:
 
 def _fit_and_evaluate(X: list, y: list) -> tuple:
     """
-    Returns (fitted_ensemble_on_all_data, metrics_dict). metrics_dict's
+    Returns (fitted_ensemble_on_all_data, metrics_dict), or
+    (None, metrics_dict) when a chronological training fold contains
+    only one outcome class and therefore cannot fit a classifier safely.
+    metrics_dict's
     top-level accuracy/brier_score/eval_type describe the ENSEMBLE
     (the thing actually deployed/gated by _should_promote below) --
     metrics_dict["logistic_metrics"]/["gbm_metrics"] report each
@@ -209,6 +212,20 @@ def _fit_and_evaluate(X: list, y: list) -> tuple:
         split = int(n * (1 - HOLDOUT_FRACTION))
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
+
+        # Checking the full y vector is not enough: it can contain wins and
+        # losses solely because the later holdout introduces the second class,
+        # while the strictly earlier training fold is single-class. Logistic
+        # regression cannot fit that fold, and a one-class probability model
+        # would not be a meaningful challenger even if an estimator accepted
+        # it. Return a structured no-train result for scheduled callers.
+        if len(set(y_train)) < 2:
+            return None, {
+                "eval_type": "chronological_holdout_unavailable",
+                "reason": "single_class_training_fold",
+                "train_size": len(y_train),
+                "holdout_size": len(y_test),
+            }
 
         logistic_eval = _new_logistic_pipeline()
         logistic_eval.fit(X_train, y_train)
@@ -318,6 +335,13 @@ def train_win_probability_model() -> dict:
         return {"trained": False, "reason": "single_class_only", "sample_count": len(rows)}
 
     pipeline, metrics = _fit_and_evaluate(X, y)
+    if pipeline is None:
+        return {
+            "trained": False,
+            "reason": metrics["reason"],
+            "sample_count": len(rows),
+            "metrics": metrics,
+        }
     metrics["sample_count"] = len(rows)
     metrics["baseline_win_rate"] = round(win_rate, 4)
     metrics["feature_columns"] = feature_names

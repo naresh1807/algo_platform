@@ -1,11 +1,42 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .indicators import MIN_CANDLES_REQUIRED, compute_indicators
 from .models import HistoricalData
+
+
+class WatchlistIngestionScheduleTests(TestCase):
+    def test_five_minute_schedule_excludes_one_minute_timeframe(self):
+        from config.celery import app
+
+        entry = app.conf.beat_schedule["ingest-watchlist-candles-every-5-minutes"]
+        self.assertEqual(entry["kwargs"], {"exclude_timeframes": ["1m"]})
+
+    @override_settings(
+        BROKER_MODE="live",
+        WATCHLIST=("NIFTY",),
+        CHART_TIMEFRAMES=("1m", "3m", "5m"),
+    )
+    def test_excluding_one_minute_preserves_all_other_timeframes(self):
+        from .tasks import ingest_watchlist_candles
+
+        with (
+            patch("apps.market_data.tasks.get_broker_client") as get_client,
+            patch("apps.market_data.tasks._upsert_candles", return_value=0),
+            patch("apps.market_data.tasks._record_feed_health"),
+        ):
+            get_client.return_value.fetch_recent_candles.return_value = []
+            ingest_watchlist_candles(exclude_timeframes=["1m"])
+
+        requested_timeframes = [
+            call.args[1]
+            for call in get_client.return_value.fetch_recent_candles.call_args_list
+        ]
+        self.assertEqual(requested_timeframes, ["3m", "5m"])
 
 
 def _make_candle(symbol, timeframe, minutes_ago, close):
@@ -126,6 +157,52 @@ class SmartApiCircuitBreakerTests(TestCase):
 
         self.assertEqual(self._broker_client_module._smartapi_consecutive_rate_limit_exhaustions, 1)
         self.assertEqual(self._broker_client_module._smartapi_cooldown_until, 0.0)
+
+
+class BrokerOrderSubmissionSafetyTests(TestCase):
+    @override_settings(LIVE_TRADING_ENABLED=False)
+    def test_disarmed_order_is_rejected_before_connecting(self):
+        from apps.market_data.broker_client import BrokerClient
+
+        client = BrokerClient()
+        with patch.object(client, "_connect") as connect:
+            with self.assertRaisesRegex(PermissionError, "disarmed"):
+                client.place_order(
+                    "NIFTYTESTCE", "BUY", 25,
+                    symbol_token="token", exchange="NFO",
+                    tradingsymbol="NIFTYTESTCE", order_tag="stable-tag",
+                )
+
+        connect.assert_not_called()
+
+    @override_settings(LIVE_TRADING_ENABLED=True)
+    def test_state_changing_submission_is_called_once_without_rate_limit_retry(self):
+        from apps.market_data.broker_client import BrokerClient
+
+        class FakeConnection:
+            def placeOrder(self, params):
+                raise AssertionError("full-response order method should be preferred")
+
+            def placeOrderFullResponse(self, params):
+                return {"status": True, "data": {"orderid": "ORDER123"}}
+
+        client = BrokerClient()
+        with patch.object(client, "_connect", return_value=FakeConnection()), patch.object(
+            client, "_smartapi_request",
+            return_value={"status": True, "data": {"orderid": "ORDER123"}},
+        ) as request:
+            order_id = client.place_order(
+                "NIFTYTESTCE", "BUY", 25,
+                symbol_token="token", exchange="NFO",
+                tradingsymbol="NIFTYTESTCE", order_tag="stable-tag",
+            )
+
+        self.assertEqual(order_id, "ORDER123")
+        request.assert_called_once()
+        self.assertIs(request.call_args.kwargs["retry_rate_limits"], False)
+        params = request.call_args.args[1]
+        self.assertEqual(params["ordertag"], "stable-tag")
+        self.assertEqual(params["exchange"], "NFO")
 
 
 class VwapTests(TestCase):

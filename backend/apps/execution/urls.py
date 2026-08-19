@@ -3,6 +3,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import ExecutionModeView, OpenPositionViewSet
 
+app_name = "execution"
+
 router = DefaultRouter()
 router.register("positions", OpenPositionViewSet, basename="open-position")
 

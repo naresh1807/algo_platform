@@ -286,13 +286,18 @@ def compute_daily_performance(for_date: date) -> PerformanceMetrics:
         rejected_that_day / all_signals_that_day if all_signals_that_day else None
     )
 
-    # max_drawdown now computed for real from apps.risk.EquitySnapshot
-    # (see compute_max_drawdown_for_day above) -- the equity curve that
-    # used to not exist. slippage stays None: it needs the signal's
-    # intended entry_price compared against the executor's actual fill
-    # price, which live_executor records but paper_executor doesn't
-    # (paper fills are always exactly the intended price by
-    # construction) -- that remains a real, documented gap.
+    # max_drawdown comes from the real EquitySnapshot curve. Paper execution
+    # now persists round-trip slippage separately from fees; report its average
+    # per-unit price drag for closed trades where that data is available.
+    per_unit_slippage = [
+        float(p.slippage_cost) / p.qty
+        for p in closed_positions
+        if p.qty and p.paper_slippage_bps_per_side is not None
+    ]
+    average_slippage = (
+        sum(per_unit_slippage) / len(per_unit_slippage)
+        if per_unit_slippage else None
+    )
     net_pnl = round(gross_profit - gross_loss, 2) if total_trades else None
 
     metrics, _created = PerformanceMetrics.objects.update_or_create(
@@ -305,6 +310,7 @@ def compute_daily_performance(for_date: date) -> PerformanceMetrics:
             "expectancy": expectancy,
             "avg_r": avg_r,
             "max_drawdown": compute_max_drawdown_for_day(for_date),
+            "slippage": average_slippage,
             "false_signal_rate": false_signal_rate,
         },
     )

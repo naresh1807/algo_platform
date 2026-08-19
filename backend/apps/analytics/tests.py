@@ -1,7 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from apps.execution.models import OpenPosition
@@ -220,6 +220,190 @@ class AggregateRMultiplesTests(TestCase):
         result = _aggregate_r_multiples([1.0, 1.0, 1.0])
         self.assertIsNone(result["sortino_r"])
         self.assertIsNone(result["calmar_r"])  # zero drawdown -- undefined, not fabricated
+
+
+class BacktestSliceBoundaryTests(SimpleTestCase):
+    """A train-slice trade must never resolve on a held-out candle."""
+
+    def test_exit_is_capped_at_the_current_slice_end(self):
+        import pandas as pd
+
+        from apps.analytics.backtest import _simulate_exit
+
+        # Candle 2 hits the target, but it belongs to the later holdout slice.
+        # The training slice ends at candle 1, whose close is a small loss.
+        frame = pd.DataFrame([
+            {"low": 99.0, "high": 101.0, "close": 100.0},
+            {"low": 98.0, "high": 102.0, "close": 99.0},
+            {"low": 99.0, "high": 106.0, "close": 105.0},
+        ])
+
+        trade = _simulate_exit(
+            frame,
+            entry_index=0,
+            entry_price=100.0,
+            stop_loss=95.0,
+            target_1=105.0,
+            max_holding_bars=48,
+            end_index=1,
+        )
+
+        self.assertEqual(trade.exit_index, 1)
+        self.assertEqual(trade.exit_reason, "time_stop")
+        self.assertLess(trade.r_multiple, 0)
+
+    def test_slice_with_no_post_entry_bar_is_rejected(self):
+        import pandas as pd
+
+        from apps.analytics.backtest import _simulate_exit
+
+        frame = pd.DataFrame([{"low": 99.0, "high": 101.0, "close": 100.0}])
+        with self.assertRaises(ValueError):
+            _simulate_exit(frame, 0, 100.0, 95.0, 105.0, 48, end_index=0)
+
+
+class BacktestTransactionCostTests(SimpleTestCase):
+    """The simulator reports both gross outcomes and conservative net fills."""
+
+    @staticmethod
+    def _target_frame():
+        import pandas as pd
+
+        return pd.DataFrame([
+            {"low": 99.0, "high": 101.0, "close": 100.0},
+            {"low": 99.0, "high": 106.0, "close": 105.0},
+        ])
+
+    def test_explicit_zero_cost_preserves_original_one_r_target(self):
+        from apps.analytics.backtest import _simulate_exit
+
+        trade = _simulate_exit(
+            self._target_frame(), 0, 100.0, 95.0, 105.0, 48,
+            slippage_bps_per_side=0,
+            fees_bps_per_side=0,
+        )
+
+        self.assertEqual(trade.gross_r_multiple, 1.0)
+        self.assertEqual(trade.r_multiple, 1.0)
+        self.assertEqual(trade.entry_fill_price, 100.0)
+        self.assertEqual(trade.exit_fill_price, 105.0)
+        self.assertEqual(trade.fees_price_units, 0.0)
+        self.assertEqual(trade.cost_r, 0.0)
+
+    def test_default_costs_reduce_a_target_outcome(self):
+        from apps.analytics.backtest import _simulate_exit
+
+        trade = _simulate_exit(self._target_frame(), 0, 100.0, 95.0, 105.0, 48)
+
+        self.assertEqual(trade.gross_r_multiple, 1.0)
+        self.assertLess(trade.r_multiple, trade.gross_r_multiple)
+        self.assertGreater(trade.entry_fill_price, trade.entry_price)
+        self.assertLess(trade.exit_fill_price, trade.exit_price)
+        self.assertGreater(trade.fees_price_units, 0)
+        self.assertGreater(trade.cost_r, 0)
+
+    def test_costs_make_a_stop_worse_than_minus_one_r(self):
+        import pandas as pd
+
+        from apps.analytics.backtest import _simulate_exit
+
+        frame = pd.DataFrame([
+            {"low": 99.0, "high": 101.0, "close": 100.0},
+            {"low": 94.0, "high": 101.0, "close": 95.0},
+        ])
+        trade = _simulate_exit(frame, 0, 100.0, 95.0, 105.0, 48)
+
+        self.assertEqual(trade.gross_r_multiple, -1.0)
+        self.assertLess(trade.r_multiple, -1.0)
+
+    def test_invalid_cost_input_is_rejected(self):
+        from apps.analytics.backtest import _simulate_exit
+
+        with self.assertRaises(ValueError):
+            _simulate_exit(
+                self._target_frame(), 0, 100.0, 95.0, 105.0, 48,
+                slippage_bps_per_side=-0.1,
+            )
+
+    def test_result_dict_discloses_cost_model(self):
+        from apps.analytics.backtest import BacktestResult
+
+        result = BacktestResult(
+            symbol="NIFTY", timeframe="5m", technical_score_threshold=0.7,
+            atr_stop_multiplier=1.5, total_candles=100,
+            slippage_bps_per_side=7.0, fees_bps_per_side=3.0,
+        ).as_dict()
+
+        self.assertEqual(result["cost_model"]["slippage_bps_per_side"], 7.0)
+        self.assertEqual(result["cost_model"]["fees_bps_per_side"], 3.0)
+        self.assertEqual(result["cost_model"]["assumed_round_trip_drag_bps"], 20.0)
+        self.assertTrue(result["cost_model"]["metrics_are_net_of_costs"])
+
+
+class BacktestCommandCostReportingTests(SimpleTestCase):
+    """The management command forwards and visibly reports cost assumptions."""
+
+    def test_formatted_report_labels_gross_and_net_expectancy(self):
+        from io import StringIO
+        from unittest.mock import patch
+
+        from apps.analytics.management.commands.run_backtest import Command
+
+        report = {
+            "symbol": "NIFTY", "timeframe": "5m", "train_candles": 70,
+            "test_candles": 30, "selected_technical_score_threshold": 0.7,
+            "selected_atr_stop_multiplier": 1.5,
+            "cost_model": {
+                "slippage_bps_per_side": 7.0, "fees_bps_per_side": 3.0,
+                "assumed_round_trip_drag_bps": 20.0, "metrics_are_net_of_costs": True,
+            },
+            "train_metrics": {
+                "total_trades": 10, "win_rate": 0.5, "gross_expectancy_r": 0.2,
+                "expectancy_r": 0.1, "profit_factor": 1.2,
+            },
+            "test_metrics": {
+                "total_trades": 4, "win_rate": 0.5, "gross_expectancy_r": 0.1,
+                "expectancy_r": 0.0, "profit_factor": 1.0,
+            },
+            "note": "net of costs",
+        }
+        stdout = StringIO()
+        with patch(
+            "apps.analytics.management.commands.run_backtest.walk_forward_backtest",
+            return_value=report,
+        ) as mocked_backtest:
+            Command(stdout=stdout).handle(
+                symbol="NIFTY", timeframe="5m", thresholds="0.7",
+                atr_multipliers="1.5", test_fraction=0.3,
+                slippage_bps_per_side=7.0, fees_bps_per_side=3.0, json=False,
+            )
+
+        mocked_backtest.assert_called_once_with(
+            "NIFTY", "5m", technical_score_thresholds=[0.7],
+            atr_stop_multipliers=[1.5], test_fraction=0.3,
+            slippage_bps_per_side=7.0, fees_bps_per_side=3.0,
+        )
+        output = stdout.getvalue()
+        self.assertIn("slippage=7.0 bps, fees=3.0 bps", output)
+        self.assertIn("gross_expectancy_r=0.2, net_expectancy_r=0.1", output)
+
+    def test_invalid_cost_assumption_becomes_a_command_error(self):
+        from io import StringIO
+        from unittest.mock import patch
+
+        from django.core.management.base import CommandError
+
+        from apps.analytics.management.commands.run_backtest import Command
+
+        with patch(
+            "apps.analytics.management.commands.run_backtest.walk_forward_backtest",
+            side_effect=ValueError("slippage_bps_per_side must be non-negative"),
+        ), self.assertRaisesMessage(CommandError, "slippage_bps_per_side must be non-negative"):
+            Command(stdout=StringIO()).handle(
+                symbol="NIFTY", timeframe="5m", thresholds="0.7",
+                atr_multipliers="1.5", test_fraction=0.3,
+                slippage_bps_per_side=-1.0, fees_bps_per_side=3.0, json=False,
+            )
 
 
 class RollingWalkForwardBacktestTests(TestCase):

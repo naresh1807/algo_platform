@@ -11,6 +11,8 @@ from .views import (
     TradeReviewViewSet,
 )
 
+app_name = "learning"
+
 router = DefaultRouter()
 router.register("strategy-versions", StrategyVersionViewSet, basename="strategy-version")
 router.register("model-registry", ModelRegistryViewSet, basename="model-registry")

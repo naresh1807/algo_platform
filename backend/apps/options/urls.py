@@ -15,6 +15,8 @@ from .views import (
     OptionsStrategySettingView,
 )
 
+app_name = "options"
+
 router = DefaultRouter()
 router.register("contracts", OptionContractViewSet, basename="option-contract")
 router.register("snapshots", OptionChainSnapshotViewSet, basename="option-snapshot")

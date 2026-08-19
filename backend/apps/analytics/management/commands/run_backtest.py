@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import json
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
-from apps.analytics.backtest import walk_forward_backtest
+from apps.analytics.backtest import (
+    DEFAULT_FEES_BPS_PER_SIDE,
+    DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    walk_forward_backtest,
+)
 
 
 class Command(BaseCommand):
@@ -36,18 +40,38 @@ class Command(BaseCommand):
             "--test-fraction", type=float, default=0.3,
             help="Fraction of history (most recent, chronologically) held out as the out-of-sample test slice.",
         )
+        parser.add_argument(
+            "--slippage-bps-per-side", type=float, default=DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+            help=(
+                "Adverse fill slippage in basis points on each entry and exit "
+                f"(default: {DEFAULT_SLIPPAGE_BPS_PER_SIDE}; use 0 with --fees-bps-per-side=0 "
+                "for a frictionless comparison)."
+            ),
+        )
+        parser.add_argument(
+            "--fees-bps-per-side", type=float, default=DEFAULT_FEES_BPS_PER_SIDE,
+            help=(
+                "Aggregate brokerage, taxes, and exchange charges in basis points "
+                f"on each entry and exit (default: {DEFAULT_FEES_BPS_PER_SIDE})."
+            ),
+        )
         parser.add_argument("--json", action="store_true", help="Print raw JSON instead of a formatted report.")
 
     def handle(self, *args, **options):
         thresholds = [float(x) for x in options["thresholds"].split(",")]
         multipliers = [float(x) for x in options["atr_multipliers"].split(",")]
 
-        result = walk_forward_backtest(
-            options["symbol"], options["timeframe"],
-            technical_score_thresholds=thresholds,
-            atr_stop_multipliers=multipliers,
-            test_fraction=options["test_fraction"],
-        )
+        try:
+            result = walk_forward_backtest(
+                options["symbol"], options["timeframe"],
+                technical_score_thresholds=thresholds,
+                atr_stop_multipliers=multipliers,
+                test_fraction=options["test_fraction"],
+                slippage_bps_per_side=options["slippage_bps_per_side"],
+                fees_bps_per_side=options["fees_bps_per_side"],
+            )
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
 
         if options["json"]:
             self.stdout.write(json.dumps(result, indent=2, default=str))
@@ -62,6 +86,13 @@ class Command(BaseCommand):
             f"\n{result['symbol']} {result['timeframe']} -- "
             f"train={result['train_candles']} candles, test={result['test_candles']} candles\n"
         ))
+        cost_model = result["cost_model"]
+        self.stdout.write(
+            "Cost model (each side): "
+            f"slippage={cost_model['slippage_bps_per_side']} bps, "
+            f"fees={cost_model['fees_bps_per_side']} bps; "
+            f"round-trip drag={cost_model['assumed_round_trip_drag_bps']} bps.\n"
+        )
         self.stdout.write(
             f"Selected on train slice: technical_score_threshold="
             f"{result['selected_technical_score_threshold']}, "
@@ -70,10 +101,12 @@ class Command(BaseCommand):
         train, test = result["train_metrics"], result["test_metrics"]
         self.stdout.write(
             f"  train: {train['total_trades']} trades, win_rate={train['win_rate']}, "
-            f"expectancy_r={train['expectancy_r']}, profit_factor={train['profit_factor']}\n"
+            f"gross_expectancy_r={train['gross_expectancy_r']}, "
+            f"net_expectancy_r={train['expectancy_r']}, profit_factor={train['profit_factor']}\n"
         )
         self.stdout.write(
             f"  test:  {test['total_trades']} trades, win_rate={test['win_rate']}, "
-            f"expectancy_r={test['expectancy_r']}, profit_factor={test['profit_factor']}\n"
+            f"gross_expectancy_r={test['gross_expectancy_r']}, "
+            f"net_expectancy_r={test['expectancy_r']}, profit_factor={test['profit_factor']}\n"
         )
         self.stdout.write(self.style.WARNING(f"\n{result['note']}\n"))

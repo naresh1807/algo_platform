@@ -1,5 +1,5 @@
-from rest_framework import viewsets
-from rest_framework.permissions import IsAuthenticated
+from django.conf import settings
+from rest_framework import mixins, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -55,19 +55,24 @@ class StrategyVersionViewSet(viewsets.ModelViewSet):
 class ModelRegistryViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ModelRegistry.objects.all()
     serializer_class = ModelRegistrySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
 
-class DailyReviewNoteViewSet(viewsets.ModelViewSet):
+class DailyReviewNoteViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
     """
-    ModelViewSet (not read-only) specifically so a human can PATCH
-    approved_flag=True from the dashboard -- that single field flip is
-    the entire governance gate described in the manual's AI Deployment
-    Backbone section. Same RBAC split as StrategyVersionViewSet: anyone
-    with dashboard access can read reviews, only Admin can approve one.
+    The scheduled review job owns creation and review contents; the REST
+    surface only lets an Admin PATCH the human approval flag.  This keeps
+    an API client from fabricating, rewriting, or deleting learning
+    evidence while preserving the governance gate.
     """
     queryset = DailyReviewNote.objects.all()
     serializer_class = DailyReviewNoteSerializer
+    http_method_names = ["get", "patch", "head", "options"]
 
     def get_permissions(self):
         if self.action in ("list", "retrieve"):
@@ -89,7 +94,7 @@ class DailyReviewNoteViewSet(viewsets.ModelViewSet):
 class DriftEventViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = DriftEvent.objects.all()
     serializer_class = DriftEventSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
 
 class TradeReviewViewSet(viewsets.ReadOnlyModelViewSet):
@@ -100,7 +105,7 @@ class TradeReviewViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = TradeReview.objects.select_related("position").all()
     serializer_class = TradeReviewSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
 
 class HypotheticalTradeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -116,7 +121,7 @@ class HypotheticalTradeViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = HypotheticalTrade.objects.all()
     serializer_class = HypotheticalTradeSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["method", "symbol"]
 
 
@@ -139,6 +144,14 @@ class TechnicalDirectionView(APIView):
         timeframe = request.query_params.get("timeframe", "5m")
         if not symbol:
             return Response({"detail": "symbol query parameter is required."}, status=400)
+        symbol = symbol.strip().upper()
+        if not symbol or len(symbol) > 32:
+            return Response({"detail": "symbol must contain between 1 and 32 characters."}, status=400)
+        if timeframe not in settings.CHART_TIMEFRAMES:
+            return Response(
+                {"detail": f"Unsupported timeframe. Choose one of: {settings.CHART_TIMEFRAMES}."},
+                status=400,
+            )
 
         prediction = predict_technical_direction(symbol, timeframe)
         if prediction is None:

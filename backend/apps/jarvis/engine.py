@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import time
 
+from common.permissions import is_admin_user
+
 from . import memory, navigation, responses
-from .commands import COMMANDS, FORBIDDEN_ACTIONS, RESTRICTED_ACTIONS
+from .commands import ADMIN_ONLY_ACTIONS, COMMANDS, FORBIDDEN_ACTIONS, RESTRICTED_ACTIONS
 from .intent import detect_intent
 from .models import JarvisCommandHistory
 
@@ -78,6 +80,14 @@ def process(raw_text: str, user, *, input_mode: str = "text", confirm: bool = Fa
     if intent.action in FORBIDDEN_ACTIONS:
         response = JarvisResponse(
             text="I can't do that -- it's outside JARVIS's permissions in Version 1.0 (manual 14.21).",
+            action=intent.action, category=intent.category, success=False,
+        )
+        _log(raw_text, user, input_mode, intent, response, started)
+        return response
+
+    if intent.action in ADMIN_ONLY_ACTIONS and not is_admin_user(user):
+        response = JarvisResponse(
+            text="That command requires Admin privileges.",
             action=intent.action, category=intent.category, success=False,
         )
         _log(raw_text, user, input_mode, intent, response, started)

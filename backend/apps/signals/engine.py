@@ -154,6 +154,9 @@ def _create_signal(_ml_probability: float | None = "unset", **kwargs) -> Trading
     apps.signals.engine must not force scikit-learn/joblib to load in
     processes that never generate a signal.
     """
+    from apps.execution.models import get_execution_mode
+
+    kwargs.setdefault("execution_mode", get_execution_mode())
     signal = TradingSignal.objects.create(**kwargs)
 
     from apps.learning.ml_predict import predict_win_probability

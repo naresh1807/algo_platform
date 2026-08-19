@@ -1,6 +1,10 @@
 from django.urls import path
-from rest_framework.authtoken.views import obtain_auth_token
+
+from .views import LogoutView, RotatingAuthTokenView
+
+app_name = "auth"
 
 urlpatterns = [
-    path("token/", obtain_auth_token, name="api-token-auth"),
+    path("token/", RotatingAuthTokenView.as_view(), name="api-token-auth"),
+    path("logout/", LogoutView.as_view(), name="logout"),
 ]

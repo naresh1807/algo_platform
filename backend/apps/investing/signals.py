@@ -9,21 +9,25 @@ apps/investing/live_feed.py) automatically pushes a live update
 without that code needing to know about Channels at all.
 """
 
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
+import logging
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+
+from common.websockets import broadcast_group
 
 from .models import IndexConstituent, IndexPriceSnapshot
 
 GROUP_NAME = "index_live"
+logger = logging.getLogger(__name__)
 
 
 def _send(data: dict) -> None:
-    channel_layer = get_channel_layer()
-    if channel_layer is None:
-        return
-    async_to_sync(channel_layer.group_send)(GROUP_NAME, {"type": "index_update", "data": data})
+    broadcast_group(
+        GROUP_NAME,
+        {"type": "index_update", "data": data},
+        log=logger,
+    )
 
 
 @receiver(post_save, sender=IndexPriceSnapshot)

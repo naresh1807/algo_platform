@@ -1,6 +1,8 @@
-from rest_framework import generics, permissions, status
+from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from common.permissions import IsTraderOrAdmin
 
 from . import engine
 from .commands import CATEGORIES, suggested_commands
@@ -22,7 +24,7 @@ class JarvisCommandView(APIView):
     optional route to navigate to + confirmation flag).
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def post(self, request):
         serializer = JarvisCommandRequestSerializer(data=request.data)
@@ -45,7 +47,7 @@ class JarvisHistoryListView(generics.ListAPIView):
     """
 
     serializer_class = JarvisCommandHistorySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get_queryset(self):
         return JarvisCommandHistory.objects.filter(user=self.request.user)[:100]
@@ -61,7 +63,7 @@ class JarvisHistoryListView(generics.ListAPIView):
 class JarvisMemoryView(APIView):
     """GET /api/jarvis/memory/ -- current context (manual 14.17)."""
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         memory = get_memory(request.user)
@@ -71,7 +73,7 @@ class JarvisMemoryView(APIView):
 class JarvisSuggestedCommandsView(APIView):
     """GET /api/jarvis/suggested/ -- manual 14.19 Suggested Commands panel."""
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         category = request.query_params.get("category")
@@ -89,7 +91,7 @@ class MarketOutlookView(APIView):
     computes one on the spot if nothing has been generated yet, same
     fallback the market_outlook JARVIS command itself uses.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         latest = MarketOutlookSnapshot.objects.order_by("-generated_at").first()
@@ -111,4 +113,4 @@ class MarketOutlookHistoryView(generics.ListAPIView):
 
     queryset = MarketOutlookSnapshot.objects.all()[:50]
     serializer_class = MarketOutlookSnapshotSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]

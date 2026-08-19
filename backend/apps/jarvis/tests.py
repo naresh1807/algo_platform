@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
@@ -100,6 +101,7 @@ class CommandEngineHistoryTests(APITestCase):
 class JarvisCommandAPITests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="a-real-password-123")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
 
     def test_command_endpoint_requires_auth(self):
         response = self.client.post("/api/jarvis/command/", {"text": "show risk"})
@@ -154,6 +156,7 @@ class PriceAlertCommandTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="a-real-password-123")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
 
     def test_create_alert_with_explicit_direction(self):
         self.client.force_authenticate(self.user)
@@ -184,6 +187,7 @@ class StockWatchlistCommandTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="a-real-password-123")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
 
     def test_add_to_stock_watchlist_extracts_symbol_from_utterance(self):
         self.client.force_authenticate(self.user)
@@ -278,6 +282,7 @@ class GenerateMarketOutlookTaskTests(TestCase):
 class MarketOutlookCommandTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="a-real-password-123")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
 
     def test_market_outlook_command_computes_on_the_fly_with_no_snapshots(self):
         self.client.force_authenticate(self.user)

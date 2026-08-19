@@ -31,6 +31,7 @@ looks versus what it would have actually done trading forward in time.
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass, field
 
 from apps.market_data.indicators import indicator_dict_at, load_full_indicator_frame
@@ -51,6 +52,36 @@ DEFAULT_MAX_HOLDING_BARS = 48
 # convention apps.learning.ml_train already uses, for the same reason.
 DEFAULT_TEST_FRACTION = 0.3
 
+# Conservative, transparent friction assumptions for the liquid underlying
+# price series this technical-layer backtest replays. Both figures are per
+# side, so the default models 20 bps of round-trip drag in total (10 bps from
+# adverse fills and 10 bps from brokerage/taxes/exchange charges). They are
+# invocation-level inputs rather than estimates inferred from future spreads
+# or volumes, which the stored candle data cannot truthfully provide. Pass
+# both values as 0 for an explicit frictionless comparison run.
+DEFAULT_SLIPPAGE_BPS_PER_SIDE = 5.0
+DEFAULT_FEES_BPS_PER_SIDE = 5.0
+
+
+def _validate_cost_assumptions(slippage_bps_per_side: float, fees_bps_per_side: float) -> None:
+    """Reject nonsensical cost inputs before they can distort a report."""
+    for label, value in (
+        ("slippage_bps_per_side", slippage_bps_per_side),
+        ("fees_bps_per_side", fees_bps_per_side),
+    ):
+        if not math.isfinite(value) or value < 0 or value >= 10_000:
+            raise ValueError(f"{label} must be finite and in the range 0 <= value < 10000.")
+
+
+def _cost_model_dict(slippage_bps_per_side: float, fees_bps_per_side: float) -> dict:
+    """Serializable cost disclosure shared by CLI and programmatic reports."""
+    return {
+        "slippage_bps_per_side": slippage_bps_per_side,
+        "fees_bps_per_side": fees_bps_per_side,
+        "assumed_round_trip_drag_bps": 2 * (slippage_bps_per_side + fees_bps_per_side),
+        "metrics_are_net_of_costs": True,
+    }
+
 
 @dataclass
 class SimulatedTrade:
@@ -61,6 +92,11 @@ class SimulatedTrade:
     exit_index: int
     exit_price: float
     exit_reason: str  # "stop_loss", "target_1", "time_stop"
+    gross_r_multiple: float
+    entry_fill_price: float
+    exit_fill_price: float
+    fees_price_units: float
+    cost_r: float
     r_multiple: float
 
 
@@ -71,12 +107,17 @@ class BacktestResult:
     technical_score_threshold: float
     atr_stop_multiplier: float
     total_candles: int
+    slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE
+    fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE
     total_trades: int = 0
     wins: int = 0
     losses: int = 0
     win_rate: float | None = None
     profit_factor: float | None = None
+    gross_expectancy_r: float | None = None
     expectancy_r: float | None = None
+    average_cost_r: float | None = None
+    total_fees_price_units: float = 0.0
     trades: list[SimulatedTrade] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -87,12 +128,75 @@ class BacktestResult:
             "total_candles": self.total_candles, "total_trades": self.total_trades,
             "wins": self.wins, "losses": self.losses,
             "win_rate": self.win_rate, "profit_factor": self.profit_factor,
+            "gross_expectancy_r": self.gross_expectancy_r,
             "expectancy_r": self.expectancy_r,
+            "average_cost_r": self.average_cost_r,
+            "total_fees_price_units": self.total_fees_price_units,
+            "cost_model": _cost_model_dict(
+                self.slippage_bps_per_side, self.fees_bps_per_side,
+            ),
         }
 
 
-def _simulate_exit(df, entry_index: int, entry_price: float, stop_loss: float,
-                    target_1: float, max_holding_bars: int) -> SimulatedTrade:
+def _trade_with_costs(
+    *,
+    entry_index: int,
+    entry_price: float,
+    stop_loss: float,
+    target_1: float,
+    exit_index: int,
+    exit_price: float,
+    exit_reason: str,
+    slippage_bps_per_side: float,
+    fees_bps_per_side: float,
+) -> SimulatedTrade:
+    """
+    Convert a reference-price outcome into conservative long-side fills.
+
+    The entry is slipped upward and the exit downward. Fees are charged on
+    both sides' executed turnover. Inputs are either fixed before the run or
+    come from the exit bar currently being processed; no future bar, spread,
+    or volume is consulted to choose a cost after its outcome is known.
+    """
+    _validate_cost_assumptions(slippage_bps_per_side, fees_bps_per_side)
+    risk = entry_price - stop_loss
+    gross_r = (exit_price - entry_price) / risk if risk > 0 else 0.0
+
+    slippage_rate = slippage_bps_per_side / 10_000
+    fee_rate = fees_bps_per_side / 10_000
+    entry_fill = entry_price * (1 + slippage_rate)
+    exit_fill = exit_price * (1 - slippage_rate)
+    fees = (entry_fill + exit_fill) * fee_rate
+    net_r = (exit_fill - entry_fill - fees) / risk if risk > 0 else 0.0
+
+    return SimulatedTrade(
+        entry_index=entry_index,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_1=target_1,
+        exit_index=exit_index,
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        gross_r_multiple=round(gross_r, 4),
+        entry_fill_price=round(entry_fill, 6),
+        exit_fill_price=round(exit_fill, 6),
+        fees_price_units=round(fees, 6),
+        cost_r=round(gross_r - net_r, 4),
+        r_multiple=round(net_r, 4),
+    )
+
+
+def _simulate_exit(
+    df,
+    entry_index: int,
+    entry_price: float,
+    stop_loss: float,
+    target_1: float,
+    max_holding_bars: int,
+    end_index: int | None = None,
+    slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
+) -> SimulatedTrade:
     """
     Walks forward bar-by-bar from entry_index+1, checking each candle's
     high/low against target_1/stop_loss. Stop-loss is checked before
@@ -103,29 +207,37 @@ def _simulate_exit(df, entry_index: int, entry_price: float, stop_loss: float,
     assuming the better outcome would flatter the results dishonestly.
     """
     n = len(df)
-    last_index = min(entry_index + max_holding_bars, n - 1)
+    # A train/test slice is a hard information boundary, not merely a bound on
+    # where entries may be opened.  Without this cap, a trade opened near the
+    # end of a training slice could resolve on a candle from the holdout slice,
+    # leaking the very future data the chronological split is meant to protect.
+    slice_end = n - 1 if end_index is None else min(end_index, n - 1)
+    last_index = min(entry_index + max_holding_bars, slice_end)
+    if last_index <= entry_index:
+        raise ValueError("A simulated trade needs at least one post-entry candle inside its slice.")
     for i in range(entry_index + 1, last_index + 1):
         low = float(df.iloc[i]["low"])
         high = float(df.iloc[i]["high"])
         if low <= stop_loss:
-            return SimulatedTrade(
+            return _trade_with_costs(
                 entry_index=entry_index, entry_price=entry_price, stop_loss=stop_loss,
                 target_1=target_1, exit_index=i, exit_price=stop_loss,
-                exit_reason="stop_loss", r_multiple=-1.0,
+                exit_reason="stop_loss", slippage_bps_per_side=slippage_bps_per_side,
+                fees_bps_per_side=fees_bps_per_side,
             )
         if high >= target_1:
-            return SimulatedTrade(
+            return _trade_with_costs(
                 entry_index=entry_index, entry_price=entry_price, stop_loss=stop_loss,
                 target_1=target_1, exit_index=i, exit_price=target_1,
-                exit_reason="target_1", r_multiple=1.0,
+                exit_reason="target_1", slippage_bps_per_side=slippage_bps_per_side,
+                fees_bps_per_side=fees_bps_per_side,
             )
     exit_price = float(df.iloc[last_index]["close"])
-    risk = entry_price - stop_loss
-    r_multiple = (exit_price - entry_price) / risk if risk > 0 else 0.0
-    return SimulatedTrade(
+    return _trade_with_costs(
         entry_index=entry_index, entry_price=entry_price, stop_loss=stop_loss,
         target_1=target_1, exit_index=last_index, exit_price=exit_price,
-        exit_reason="time_stop", r_multiple=round(r_multiple, 4),
+        exit_reason="time_stop", slippage_bps_per_side=slippage_bps_per_side,
+        fees_bps_per_side=fees_bps_per_side,
     )
 
 
@@ -134,6 +246,8 @@ def run_backtest(
     technical_score_threshold: float = 0.7, atr_stop_multiplier: float = 1.5,
     max_holding_bars: int = DEFAULT_MAX_HOLDING_BARS,
     start_index: int = 0, end_index: int | None = None,
+    slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
 ) -> BacktestResult:
     """
     Single backtest run over one threshold combo. start_index/end_index
@@ -149,12 +263,15 @@ def run_backtest(
     genuinely strong setup can still trade there, just held to a higher
     bar (sizing itself isn't simulated here, see this module's docstring).
     """
+    _validate_cost_assumptions(slippage_bps_per_side, fees_bps_per_side)
     df = load_full_indicator_frame(symbol, timeframe)
     if df.empty:
         return BacktestResult(
             symbol=symbol, timeframe=timeframe,
             technical_score_threshold=technical_score_threshold,
             atr_stop_multiplier=atr_stop_multiplier, total_candles=0,
+            slippage_bps_per_side=slippage_bps_per_side,
+            fees_bps_per_side=fees_bps_per_side,
         )
 
     n = len(df)
@@ -163,7 +280,11 @@ def run_backtest(
 
     trades: list[SimulatedTrade] = []
     i = start_index
-    while i <= end_index:
+    # The final candle in a slice cannot be a new entry: there is no later
+    # in-slice candle on which its outcome can be known.  Skipping it is the
+    # honest alternative to either fabricating a same-bar exit or looking into
+    # the next (possibly held-out) slice.
+    while i < end_index:
         ind = indicator_dict_at(df, i)
         regime = classify_regime(ind)
 
@@ -181,7 +302,17 @@ def run_backtest(
             stop_loss = entry_price - ind["atr"] * atr_stop_multiplier
             target_1 = entry_price + (entry_price - stop_loss)
             if stop_loss < entry_price:  # guard a degenerate zero/negative-ATR bar
-                trade = _simulate_exit(df, i, entry_price, stop_loss, target_1, max_holding_bars)
+                trade = _simulate_exit(
+                    df,
+                    i,
+                    entry_price,
+                    stop_loss,
+                    target_1,
+                    max_holding_bars,
+                    end_index=end_index,
+                    slippage_bps_per_side=slippage_bps_per_side,
+                    fees_bps_per_side=fees_bps_per_side,
+                )
                 trades.append(trade)
                 i = trade.exit_index + 1  # no overlapping trades on this symbol
                 continue
@@ -191,7 +322,10 @@ def run_backtest(
         symbol=symbol, timeframe=timeframe,
         technical_score_threshold=technical_score_threshold,
         atr_stop_multiplier=atr_stop_multiplier,
-        total_candles=end_index - start_index + 1, trades=trades,
+        total_candles=end_index - start_index + 1,
+        slippage_bps_per_side=slippage_bps_per_side,
+        fees_bps_per_side=fees_bps_per_side,
+        trades=trades,
     )
     result.total_trades = len(trades)
     if trades:
@@ -203,7 +337,10 @@ def run_backtest(
         gross_win = sum(t.r_multiple for t in wins)
         gross_loss = abs(sum(t.r_multiple for t in losses))
         result.profit_factor = round(gross_win / gross_loss, 4) if gross_loss > 0 else None
+        result.gross_expectancy_r = round(sum(t.gross_r_multiple for t in trades) / len(trades), 4)
         result.expectancy_r = round(sum(t.r_multiple for t in trades) / len(trades), 4)
+        result.average_cost_r = round(sum(t.cost_r for t in trades) / len(trades), 4)
+        result.total_fees_price_units = round(sum(t.fees_price_units for t in trades), 6)
 
     return result
 
@@ -214,6 +351,8 @@ def walk_forward_backtest(
     atr_stop_multipliers: list[float] | None = None,
     test_fraction: float = DEFAULT_TEST_FRACTION,
     min_trades_to_rank: int = 5,
+    slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
 ) -> dict:
     """
     The actual recommended entry point: grid-searches every combo of
@@ -230,12 +369,17 @@ def walk_forward_backtest(
     from a handful of trades is mostly noise and would otherwise let a
     lucky-but-thin combo win the grid search.
     """
+    _validate_cost_assumptions(slippage_bps_per_side, fees_bps_per_side)
+    cost_model = _cost_model_dict(slippage_bps_per_side, fees_bps_per_side)
     technical_score_thresholds = technical_score_thresholds or [0.5, 0.6, 0.7, 0.8]
     atr_stop_multipliers = atr_stop_multipliers or [1.2, 1.5, 1.8]
 
     df = load_full_indicator_frame(symbol, timeframe)
     if df.empty:
-        return {"error": "insufficient_historical_data", "symbol": symbol, "timeframe": timeframe}
+        return {
+            "error": "insufficient_historical_data", "symbol": symbol,
+            "timeframe": timeframe, "cost_model": cost_model,
+        }
 
     n = len(df)
     split_index = int(n * (1 - test_fraction))
@@ -245,6 +389,8 @@ def walk_forward_backtest(
         result = run_backtest(
             symbol, timeframe, technical_score_threshold=threshold,
             atr_stop_multiplier=multiplier, start_index=1, end_index=split_index - 1,
+            slippage_bps_per_side=slippage_bps_per_side,
+            fees_bps_per_side=fees_bps_per_side,
         )
         if result.total_trades >= min_trades_to_rank:
             train_results.append(result)
@@ -254,6 +400,7 @@ def walk_forward_backtest(
             "error": "no_combo_reached_min_trades_on_train_slice",
             "symbol": symbol, "timeframe": timeframe,
             "train_candles": split_index, "min_trades_to_rank": min_trades_to_rank,
+            "cost_model": cost_model,
         }
 
     train_results.sort(key=lambda r: (r.expectancy_r if r.expectancy_r is not None else -999), reverse=True)
@@ -262,10 +409,12 @@ def walk_forward_backtest(
     test_result = run_backtest(
         symbol, timeframe, technical_score_threshold=best.technical_score_threshold,
         atr_stop_multiplier=best.atr_stop_multiplier, start_index=split_index, end_index=n - 1,
+        slippage_bps_per_side=slippage_bps_per_side,
+        fees_bps_per_side=fees_bps_per_side,
     )
 
     return {
-        "symbol": symbol, "timeframe": timeframe,
+        "symbol": symbol, "timeframe": timeframe, "cost_model": cost_model,
         "train_candles": split_index, "test_candles": n - split_index,
         "selected_technical_score_threshold": best.technical_score_threshold,
         "selected_atr_stop_multiplier": best.atr_stop_multiplier,
@@ -279,7 +428,8 @@ def walk_forward_backtest(
             "apps.learning.ml_train reports chronological holdout separately from "
             "train-set accuracy). Scope reminder: technical layer only -- sentiment, "
             "options-chain confluence, and live risk-engine state are not replayed "
-            "here, see this module's docstring."
+            "here, see this module's docstring. All performance metrics are net of "
+            "the disclosed static slippage and fee assumptions."
         ),
     }
 
@@ -355,6 +505,8 @@ def rolling_walk_forward_backtest(
     atr_stop_multipliers: list[float] | None = None,
     n_folds: int = 5,
     min_trades_to_rank: int = 5,
+    slippage_bps_per_side: float = DEFAULT_SLIPPAGE_BPS_PER_SIDE,
+    fees_bps_per_side: float = DEFAULT_FEES_BPS_PER_SIDE,
 ) -> dict:
     """
     A REAL rolling multi-fold walk-forward: Train -> Test -> Move the
@@ -382,6 +534,8 @@ def rolling_walk_forward_backtest(
     this selection PROCESS have performed, repeated over time," which
     is a stronger claim than any one fold's often-noisy result alone.
     """
+    _validate_cost_assumptions(slippage_bps_per_side, fees_bps_per_side)
+    cost_model = _cost_model_dict(slippage_bps_per_side, fees_bps_per_side)
     technical_score_thresholds = technical_score_thresholds or [0.5, 0.6, 0.7, 0.8]
     atr_stop_multipliers = atr_stop_multipliers or [1.2, 1.5, 1.8]
 
@@ -390,18 +544,24 @@ def rolling_walk_forward_backtest(
 
     df = load_full_indicator_frame(symbol, timeframe)
     if df.empty:
-        return {"error": "insufficient_historical_data", "symbol": symbol, "timeframe": timeframe}
+        return {
+            "error": "insufficient_historical_data", "symbol": symbol,
+            "timeframe": timeframe, "cost_model": cost_model,
+        }
 
     n = len(df)
     segment_size = n // (n_folds + 1)
     if segment_size < 10:
         return {
             "error": "insufficient_candles_for_requested_fold_count",
-            "symbol": symbol, "timeframe": timeframe, "total_candles": n, "n_folds": n_folds,
+            "symbol": symbol, "timeframe": timeframe, "total_candles": n,
+            "n_folds": n_folds, "cost_model": cost_model,
         }
 
     fold_results = []
     all_test_r_multiples: list[float] = []
+    all_test_gross_r_multiples: list[float] = []
+    all_test_cost_r: list[float] = []
 
     for fold in range(n_folds):
         train_end = segment_size * (fold + 1)
@@ -413,6 +573,8 @@ def rolling_walk_forward_backtest(
             result = run_backtest(
                 symbol, timeframe, technical_score_threshold=threshold,
                 atr_stop_multiplier=multiplier, start_index=1, end_index=train_end - 1,
+                slippage_bps_per_side=slippage_bps_per_side,
+                fees_bps_per_side=fees_bps_per_side,
             )
             if result.total_trades >= min_trades_to_rank:
                 train_candidates.append(result)
@@ -429,8 +591,12 @@ def rolling_walk_forward_backtest(
         test_result = run_backtest(
             symbol, timeframe, technical_score_threshold=best.technical_score_threshold,
             atr_stop_multiplier=best.atr_stop_multiplier, start_index=test_start, end_index=test_end,
+            slippage_bps_per_side=slippage_bps_per_side,
+            fees_bps_per_side=fees_bps_per_side,
         )
         all_test_r_multiples.extend(t.r_multiple for t in test_result.trades)
+        all_test_gross_r_multiples.extend(t.gross_r_multiple for t in test_result.trades)
+        all_test_cost_r.extend(t.cost_r for t in test_result.trades)
 
         fold_results.append({
             "fold": fold, "train_candles": train_end,
@@ -445,16 +611,31 @@ def rolling_walk_forward_backtest(
         return {
             "error": "no_fold_produced_a_valid_result",
             "symbol": symbol, "timeframe": timeframe, "fold_results": fold_results,
+            "cost_model": cost_model,
         }
 
+    aggregate_metrics = _aggregate_r_multiples(all_test_r_multiples)
+    gross_aggregate_metrics = _aggregate_r_multiples(all_test_gross_r_multiples)
+    aggregate_metrics.update({
+        "gross_expectancy_r": gross_aggregate_metrics["expectancy_r"],
+        "average_cost_r": (
+            round(sum(all_test_cost_r) / len(all_test_cost_r), 4)
+            if all_test_cost_r else None
+        ),
+        "metrics_are_net_of_costs": True,
+    })
+
     return {
-        "symbol": symbol, "timeframe": timeframe, "n_folds": n_folds, "total_candles": n,
+        "symbol": symbol, "timeframe": timeframe, "n_folds": n_folds,
+        "total_candles": n, "cost_model": cost_model,
         "fold_results": fold_results,
-        "aggregate_out_of_sample_metrics": _aggregate_r_multiples(all_test_r_multiples),
+        "aggregate_out_of_sample_metrics": aggregate_metrics,
         "note": (
             "aggregate_out_of_sample_metrics pools every fold's TEST-window trades -- "
             "this is the number that should actually inform a decision, not any single "
             "fold's own result. Same scope reminder as walk_forward_backtest: technical "
-            "layer only, sentiment/options-chain/live-risk-engine state not replayed."
+            "layer only, sentiment/options-chain/live-risk-engine state not replayed. "
+            "All performance metrics are net of the disclosed static slippage and fee "
+            "assumptions."
         ),
     }

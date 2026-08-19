@@ -1,4 +1,4 @@
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from .models import DailyReviewNote, DriftEvent, StrategyVersion
 from .tasks import check_for_drift
@@ -253,6 +253,7 @@ class HypotheticalTradeAPITests(TestCase):
         from decimal import Decimal
 
         from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Group
         from rest_framework.test import APIClient
 
         from .models import HypotheticalTrade
@@ -267,6 +268,7 @@ class HypotheticalTradeAPITests(TestCase):
         )
 
         user = get_user_model().objects.create_user(username="trader1", password="pw")
+        user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         client = APIClient()
         client.force_authenticate(user)
         response = client.get("/api/learning/hypothetical-trades/", {"method": "ema_momentum_scalp"})
@@ -402,6 +404,76 @@ class ScalpWinProbabilityTrainTests(TestCase):
         self.assertTrue(row.active_flag)
         # The real win_probability model must be completely untouched.
         self.assertFalse(ModelRegistry.objects.filter(model_name="win_probability").exists())
+
+
+class ChronologicalMLBoundaryTests(SimpleTestCase):
+    """Forward labels and class composition must respect holdout boundaries."""
+
+    def test_technical_labels_record_the_last_future_candle_used(self):
+        import numpy as np
+
+        from .ml_technical import _simulate_labels
+
+        labels, _r_multiples, label_end_indices = _simulate_labels(
+            high=np.array([101.0, 102.0, 106.0]),
+            low=np.array([99.0, 98.0, 99.0]),
+            close=np.array([100.0, 99.0, 105.0]),
+            atr=np.array([5.0, 5.0, 5.0]),
+            atr_multiplier=1.0,
+            max_holding_bars=48,
+        )
+
+        self.assertEqual(labels[0], 1.0)
+        self.assertEqual(label_end_indices[0], 2.0)
+
+    def test_technical_fit_purges_labels_that_cross_into_holdout(self):
+        import numpy as np
+
+        from .ml_technical import _fit_and_evaluate
+
+        n = 20
+        source_indices = np.arange(n)
+        label_end_indices = source_indices + 1
+        X = np.column_stack((source_indices, source_indices % 3)).astype(float)
+        y = np.array([i % 2 for i in range(n)])
+
+        model, metrics = _fit_and_evaluate(
+            X,
+            y,
+            ["time", "cycle"],
+            label_end_indices=label_end_indices,
+            source_indices=source_indices,
+        )
+
+        self.assertIsNotNone(model)
+        self.assertEqual(metrics["purged_train_rows"], 1)
+        self.assertEqual(metrics["train_size"], 14)
+
+    def test_trade_model_returns_no_train_when_earlier_fold_is_single_class(self):
+        from .ml_train import _fit_and_evaluate
+
+        # 60 rows activates the chronological holdout. Both classes exist in
+        # the full data, but the earlier 45-row training fold has only losses.
+        X = [[float(i)] for i in range(60)]
+        y = [0] * 45 + [1] * 15
+
+        model, metrics = _fit_and_evaluate(X, y)
+
+        self.assertIsNone(model)
+        self.assertEqual(metrics["reason"], "single_class_training_fold")
+
+    def test_technical_model_returns_no_train_for_single_class_training_fold(self):
+        import numpy as np
+
+        from .ml_technical import _fit_and_evaluate
+
+        X = np.arange(40, dtype=float).reshape(20, 2)
+        y = np.array([0] * 15 + [1] * 5)
+
+        model, metrics = _fit_and_evaluate(X, y, ["a", "b"])
+
+        self.assertIsNone(model)
+        self.assertEqual(metrics["reason"], "single_class_training_fold")
 
 
 class WinProbabilityEnsembleTests(TestCase):

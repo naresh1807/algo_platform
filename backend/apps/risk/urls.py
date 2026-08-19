@@ -3,6 +3,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import EquityCurveView, EquityStatusView, KillSwitchStatusView, RiskEventViewSet
 
+app_name = "risk"
+
 router = DefaultRouter()
 router.register("events", RiskEventViewSet, basename="risk-event")
 

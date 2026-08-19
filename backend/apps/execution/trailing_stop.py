@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from django.db import transaction
+
 from common.constants import PositionSide
 
 
@@ -40,30 +42,36 @@ def update_trailing_stop(position, current_price: Decimal) -> bool:
     is off for this position or price hasn't made a new favorable
     extreme since the last check.
     """
-    if position.trailing_stop_distance is None:
-        return False
+    with transaction.atomic():
+        locked = type(position).objects.select_for_update().get(pk=position.pk)
+        if locked.closed_at is not None or locked.trailing_stop_distance is None:
+            return False
 
-    if position.side == PositionSide.LONG:
-        new_peak = max(position.peak_price or position.entry_price, current_price)
-        peak_changed = new_peak != position.peak_price
-        new_stop = new_peak - position.trailing_stop_distance
-        stop_changed = new_stop > position.stop_loss
-    else:
-        new_peak = min(position.peak_price or position.entry_price, current_price)
-        peak_changed = new_peak != position.peak_price
-        new_stop = new_peak + position.trailing_stop_distance
-        stop_changed = new_stop < position.stop_loss
+        if locked.side == PositionSide.LONG:
+            new_peak = max(locked.peak_price or locked.entry_price, current_price)
+            peak_changed = new_peak != locked.peak_price
+            new_stop = new_peak - locked.trailing_stop_distance
+            stop_changed = new_stop > locked.stop_loss
+        else:
+            new_peak = min(locked.peak_price or locked.entry_price, current_price)
+            peak_changed = new_peak != locked.peak_price
+            new_stop = new_peak + locked.trailing_stop_distance
+            stop_changed = new_stop < locked.stop_loss
 
-    if not peak_changed and not stop_changed:
-        return False
+        if not peak_changed and not stop_changed:
+            return False
 
-    update_fields = []
-    if peak_changed:
-        position.peak_price = new_peak
-        update_fields.append("peak_price")
-    if stop_changed:
-        position.stop_loss = new_stop
-        update_fields.append("stop_loss")
+        update_fields = []
+        if peak_changed:
+            locked.peak_price = new_peak
+            update_fields.append("peak_price")
+        if stop_changed:
+            locked.stop_loss = new_stop
+            update_fields.append("stop_loss")
+        locked.save(update_fields=update_fields)
 
-    position.save(update_fields=update_fields)
+    # Keep the caller's instance coherent for the stop comparison that
+    # immediately follows this helper.
+    position.peak_price = locked.peak_price
+    position.stop_loss = locked.stop_loss
     return stop_changed

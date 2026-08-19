@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LogOut, Settings as SettingsIcon, User } from "lucide-react";
 
+import { logoutSession } from "../services/api.js";
+
 /**
  * Minimal profile menu. There is no /auth/me or user-profile endpoint
  * in this backend (DRF token auth is opaque -- the token carries no
@@ -24,9 +26,10 @@ export default function UserMenu() {
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, [open]);
 
-  const handleLogout = () => {
-    localStorage.removeItem("authToken");
-    navigate("/login");
+  const handleLogout = async () => {
+    setOpen(false);
+    await logoutSession();
+    navigate("/login", { replace: true });
   };
 
   return (

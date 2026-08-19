@@ -1,9 +1,10 @@
 from decimal import Decimal
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from .engine import check_pre_trade
-from .models import AccountEquity, KillSwitchState
+from .models import AccountEquity, KillSwitchState, RiskEvent
 
 
 class AccountEquityTests(TestCase):
@@ -35,6 +36,53 @@ class AccountEquityTests(TestCase):
         )
         e1.save()
         self.assertEqual(e1.pk, 1)
+
+    def test_get_equity_rolls_daily_baseline_once_without_changing_equity(self):
+        from datetime import timedelta
+
+        from apps.execution.models import ExecutionModeSetting
+
+        from .engine import get_equity
+
+        today = timezone.localdate()
+        ExecutionModeSetting.objects.create(pk=1, mode=ExecutionModeSetting.Mode.PAPER)
+        AccountEquity.objects.create(
+            current_equity=Decimal("97500"), daily_start_equity=Decimal("100000"),
+            peak_equity=Decimal("102000"), trading_day=today - timedelta(days=1),
+            source_mode=ExecutionModeSetting.Mode.PAPER,
+        )
+
+        first = get_equity()
+        second = get_equity()
+
+        self.assertEqual(first.current_equity, Decimal("97500"))
+        self.assertEqual(first.daily_start_equity, Decimal("97500"))
+        self.assertEqual(first.trading_day, today)
+        self.assertEqual(second.daily_start_equity, Decimal("97500"))
+        self.assertEqual(
+            RiskEvent.objects.filter(event_type="daily_equity_rollover").count(), 1,
+        )
+
+    def test_switching_from_live_to_paper_resets_risk_provenance(self):
+        from apps.execution.models import ExecutionModeSetting
+
+        from .engine import get_equity
+
+        ExecutionModeSetting.objects.create(pk=1, mode=ExecutionModeSetting.Mode.PAPER)
+        AccountEquity.objects.create(
+            current_equity=Decimal("99000"), daily_start_equity=Decimal("105000"),
+            peak_equity=Decimal("110000"), consecutive_losses=2,
+            trading_day=timezone.localdate(), source_mode=ExecutionModeSetting.Mode.LIVE,
+            last_broker_sync_at=timezone.now(),
+        )
+
+        equity = get_equity()
+
+        self.assertEqual(equity.source_mode, ExecutionModeSetting.Mode.PAPER)
+        self.assertEqual(equity.daily_start_equity, Decimal("99000"))
+        self.assertEqual(equity.peak_equity, Decimal("99000"))
+        self.assertEqual(equity.consecutive_losses, 0)
+        self.assertIsNone(equity.last_broker_sync_at)
 
 
 class CheckPreTradeTests(TestCase):

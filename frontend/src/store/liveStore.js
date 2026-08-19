@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { createAuthenticatedWebSocket } from "../utils/websocket.js";
+
 /**
  * Holds everything that changes via WebSocket push (manual section 10:
  * live candles, signal updates, P&L, risk alerts, kill-switch status,
@@ -57,12 +59,13 @@ export const useLiveStore = create((set, get) => ({
   connected: false,
 
   _generation: 0,
+  _active: false,
   _sockets: {},
 
   connect: () => {
-    if (get()._generation > 0) return; // already connected/connecting -- see module docstring
+    if (get()._active) return; // already connected/connecting -- see module docstring
     const generation = get()._generation + 1;
-    set({ _generation: generation });
+    set({ _generation: generation, _active: true });
 
     SOCKET_DEFS.forEach(({ key, path, handle }) => {
       openWithRetry(key, `${wsBase()}${path}`, handle(set), set, get, generation);
@@ -72,18 +75,20 @@ export const useLiveStore = create((set, get) => ({
   // Closes every tracked socket and invalidates any pending reconnect
   // timers (via the generation guard in openWithRetry) so a stale timer
   // from a previous connect() can never resurrect a socket after
-  // disconnect() -- not called anywhere today (AppShell stays mounted
-  // for the whole authenticated session), but provided so any future
-  // caller (e.g. on logout) has a real, complete teardown instead of
-  // reimplementing one.
+  // disconnect(). AppShell invokes this on unmount and every auth-token
+  // transition so sockets from one account cannot survive into another.
   disconnect: () => {
-    const { _sockets } = get();
+    const { _sockets, _generation } = get();
     Object.values(_sockets).forEach((socket) => {
       socket.onclose = null; // don't let the intentional close trigger a reconnect
       socket.close();
     });
     set({
-      _generation: 0,
+      // Keep this monotonic. Resetting to zero reused generation 1 on
+      // the next login, allowing an old generation-1 retry timer to
+      // resurrect a socket from the prior account.
+      _generation: _generation + 1,
+      _active: false,
       _sockets: {},
       connected: false,
       socketStatus: Object.fromEntries(SOCKET_DEFS.map((d) => [d.key, false])),
@@ -106,16 +111,20 @@ function openWithRetry(key, url, onMessage, set, get, generation, attempt = 0) {
   // A stale reconnect timer from a superseded connect()/disconnect()
   // cycle must not open a new socket -- compare against the current
   // generation before doing anything.
-  if (get()._generation !== generation) return;
+  if (!get()._active || get()._generation !== generation) return;
 
-  const socket = new WebSocket(url);
+  const socket = createAuthenticatedWebSocket(url);
+  if (!socket) {
+    setSocketOpen(key, false, set, get);
+    return;
+  }
   set((state) => ({ _sockets: { ...state._sockets, [key]: socket } }));
 
   socket.onopen = () => setSocketOpen(key, true, set, get);
   socket.onmessage = (event) => onMessage(JSON.parse(event.data));
   socket.onclose = () => {
     setSocketOpen(key, false, set, get);
-    if (get()._generation !== generation) return; // disconnect() already tore this down
+    if (!get()._active || get()._generation !== generation) return; // disconnect() already tore this down
     // Exponential backoff, capped at 30s, so a backend restart doesn't
     // get hammered with reconnect attempts.
     const delay = Math.min(30000, 1000 * 2 ** attempt);

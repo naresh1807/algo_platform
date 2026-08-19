@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { endpoints } from "../services/api.js";
+import { createAuthenticatedWebSocket } from "../utils/websocket.js";
 
 /**
  * JARVIS panel state: the visible conversation, the live announcement
@@ -42,6 +43,9 @@ export const useJarvisStore = create((set, get) => ({
   sending: false,
   connected: false,
   pendingConfirmText: null, // set when JARVIS is waiting on a confirm
+  _socket: null,
+  _reconnectTimer: null,
+  _generation: 0,
 
   addUserMessage: (text) => {
     set((state) => ({ messages: [...state.messages, { role: "user", text }] }));
@@ -126,11 +130,49 @@ export const useJarvisStore = create((set, get) => ({
   },
 
   connectAnnouncements: () => {
-    if (get().connected) return;
+    if (get()._socket) return;
+    const generation = get()._generation + 1;
+    set({ _generation: generation });
+    openAnnouncementSocket(set, get, generation);
+  },
+
+  disconnectAnnouncements: () => {
+    const { _socket: socket, _reconnectTimer: timer, _generation: generation } = get();
+    if (timer) clearTimeout(timer);
+    if (socket) {
+      socket.onclose = null;
+      socket.close();
+    }
+    set({
+      connected: false,
+      _socket: null,
+      _reconnectTimer: null,
+      _generation: generation + 1,
+    });
+  },
+
+  setListening: (listening) => set({ listening }),
+}));
+
+function openAnnouncementSocket(set, get, generation, attempt = 0) {
+    if (get()._generation !== generation) return;
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const socket = new WebSocket(`${proto}://${window.location.host}/ws/jarvis/live/`);
+    const socket = createAuthenticatedWebSocket(`${proto}://${window.location.host}/ws/jarvis/live/`);
+    if (!socket) {
+      set({ connected: false });
+      return;
+    }
+    set({ _socket: socket });
     socket.onopen = () => set({ connected: true });
-    socket.onclose = () => set({ connected: false });
+    socket.onclose = () => {
+      if (get()._generation !== generation) return;
+      const delay = Math.min(30000, 1000 * 2 ** attempt);
+      const timer = setTimeout(
+        () => openAnnouncementSocket(set, get, generation, attempt + 1),
+        delay
+      );
+      set({ connected: false, _socket: null, _reconnectTimer: timer });
+    };
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       const toastId = `${Date.now()}-${Math.random()}`;
@@ -147,10 +189,8 @@ export const useJarvisStore = create((set, get) => ({
         speak(data.message);
       }
     };
-  },
-
-  setListening: (listening) => set({ listening }),
-}));
+    socket.onerror = () => socket.close();
+}
 
 // manual 14.2/14.7: Voice + Screen output. Browser's built-in
 // SpeechSynthesis -- no external TTS API/key needed. Silently no-ops

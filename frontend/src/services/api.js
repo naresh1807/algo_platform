@@ -1,5 +1,7 @@
 import axios from "axios";
 
+import { clearAuthenticationToken } from "../utils/websocket.js";
+
 /**
  * Single axios instance for all REST calls. The Vite dev-server proxy
  * (vite.config.js) forwards "/api/*" to Django, so this stays relative
@@ -37,16 +39,15 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// If the token is missing, expired, or revoked, every request will
-// 403 forever with no visible explanation (exactly what happened
-// before Login.jsx/the auth_app URL wiring existed) -- this clears the
-// stale token and bounces back to /login instead of failing silently
-// on every subsequent page.
+// Only 401 means the credential itself is missing, expired, or revoked.
+// A 403 is an authenticated RBAC denial and must be shown to the caller;
+// treating it as logout would destroy a valid session and obscure the
+// real authorization problem.
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401 || error.response?.status === 403) {
-      localStorage.removeItem("authToken");
+    if (error.response?.status === 401) {
+      clearAuthenticationToken();
       if (window.location.pathname !== "/login") {
         window.location.href = "/login";
       }
@@ -54,6 +55,23 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/**
+ * Revoke the current server-side token before removing the local copy.
+ * Logout remains reliable when Django is temporarily unreachable: the
+ * request is best-effort, while local sockets/session state are always
+ * cleared after the bounded attempt finishes.
+ */
+export async function logoutSession() {
+  try {
+    await api.post("/auth/logout/", null, { timeout: 5000 });
+  } catch {
+    // The token may already be expired/revoked or the backend may be
+    // unavailable. Local logout must still complete in every case.
+  } finally {
+    clearAuthenticationToken();
+  }
+}
 
 export const endpoints = {
   // page_size=2000 -- without this, DRF's project-wide PAGE_SIZE=100

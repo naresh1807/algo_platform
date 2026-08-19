@@ -12,13 +12,24 @@ class StrategyVersionSerializer(serializers.ModelSerializer):
 class ModelRegistrySerializer(serializers.ModelSerializer):
     class Meta:
         model = ModelRegistry
-        fields = "__all__"
+        # artifact_path is an internal server filesystem/object-store
+        # location.  The dashboard needs model identity and metrics, not
+        # deployment topology details.
+        fields = (
+            "id",
+            "model_name",
+            "model_version",
+            "metrics_json",
+            "active_flag",
+            "created_at",
+        )
 
 
 class DailyReviewNoteSerializer(serializers.ModelSerializer):
     class Meta:
         model = DailyReviewNote
         fields = "__all__"
+        read_only_fields = ("review_date", "summary", "suggested_changes")
 
 
 class DriftEventSerializer(serializers.ModelSerializer):

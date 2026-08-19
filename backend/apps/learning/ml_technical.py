@@ -73,7 +73,7 @@ MIN_ROWS_REQUIRED = 300  # below this, a holdout would be too thin to mean anyth
 def _simulate_labels(
     high: np.ndarray, low: np.ndarray, close: np.ndarray, atr: np.ndarray,
     atr_multiplier: float, max_holding_bars: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     For every bar i (except the last few, which don't have enough
     forward bars left), simulates a hypothetical long entry at close[i]
@@ -83,10 +83,13 @@ def _simulate_labels(
     target on any bar where both could theoretically have been hit,
     the conservative assumption absent intra-candle tick data).
 
-    Returns (labels, r_multiples), both float arrays with NaN where a
-    label couldn't be computed (invalid/zero ATR, or too close to the
-    end of the series to know the outcome yet) -- NaN rows are dropped
-    by the caller, not treated as a class.
+    Returns (labels, r_multiples, label_end_indices), all float arrays
+    with NaN where a label couldn't be computed (invalid/zero ATR, or
+    too close to the end of the series to know the outcome yet) -- NaN
+    rows are dropped by the caller, not treated as a class.  The third
+    array records the last future candle used by each label so the
+    chronological split can purge training rows whose outcomes cross
+    into the holdout window.
 
     Implemented with plain numpy array indexing (not pandas .iloc in a
     loop) specifically for speed -- this runs an O(n * max_holding_bars)
@@ -97,6 +100,7 @@ def _simulate_labels(
     n = len(close)
     labels = np.full(n, np.nan)
     r_multiples = np.full(n, np.nan)
+    label_end_indices = np.full(n, np.nan)
 
     for i in range(n - 1):
         entry = close[i]
@@ -110,12 +114,15 @@ def _simulate_labels(
 
         last_index = min(i + max_holding_bars, n - 1)
         outcome = None
+        outcome_index = last_index
         for j in range(i + 1, last_index + 1):
             if low[j] <= stop:
                 outcome = -1.0
+                outcome_index = j
                 break
             if high[j] >= target:
                 outcome = 1.0
+                outcome_index = j
                 break
         if outcome is None:
             if last_index <= i:
@@ -125,8 +132,9 @@ def _simulate_labels(
 
         r_multiples[i] = outcome
         labels[i] = 1.0 if outcome > 0 else 0.0
+        label_end_indices[i] = outcome_index
 
-    return labels, r_multiples
+    return labels, r_multiples, label_end_indices
 
 
 def _classify_regime_series(df: pd.DataFrame) -> pd.Series:
@@ -243,7 +251,14 @@ def _build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out[TECHNICAL_FEATURES]
 
 
-def _fit_and_evaluate(X: np.ndarray, y: np.ndarray, feature_names: list[str]) -> tuple:
+def _fit_and_evaluate(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    *,
+    label_end_indices: np.ndarray | None = None,
+    source_indices: np.ndarray | None = None,
+) -> tuple:
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.inspection import permutation_importance
     from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
@@ -252,6 +267,33 @@ def _fit_and_evaluate(X: np.ndarray, y: np.ndarray, feature_names: list[str]) ->
     split = int(n * (1 - DEFAULT_TEST_FRACTION))
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
+
+    # Labels are forward-looking: a row near the split can use stop/target
+    # information from a candle that belongs to the holdout. Purge exactly
+    # those crossing rows before fitting. Keeping the original candle indices
+    # alongside the post-dropna matrix makes this precise rather than dropping
+    # a blanket max_holding_bars window unnecessarily.
+    purged_train_rows = 0
+    if label_end_indices is not None and source_indices is not None and len(y_test):
+        holdout_start_source_index = source_indices[split]
+        keep = label_end_indices[:split] < holdout_start_source_index
+        purged_train_rows = int((~keep).sum())
+        X_train = X_train[keep]
+        y_train = y_train[keep]
+
+    # The full dataset may contain both outcomes while the strictly earlier
+    # training fold contains only one (for example after a regime change).
+    # sklearn estimators either fail or expose a one-column predict_proba in
+    # that case; report a safe no-train result instead of crashing a scheduled
+    # retraining task or publishing meaningless holdout metrics.
+    if len(y_train) == 0 or len(np.unique(y_train)) < 2:
+        return None, {
+            "eval_type": "chronological_holdout_unavailable",
+            "reason": "single_class_training_fold",
+            "train_size": len(y_train),
+            "holdout_size": len(y_test),
+            "purged_train_rows": purged_train_rows,
+        }
 
     def _new_model():
         return HistGradientBoostingClassifier(
@@ -267,6 +309,7 @@ def _fit_and_evaluate(X: np.ndarray, y: np.ndarray, feature_names: list[str]) ->
     metrics = {
         "eval_type": "chronological_holdout",
         "train_size": len(y_train), "holdout_size": len(y_test),
+        "purged_train_rows": purged_train_rows,
         "accuracy": round(float(accuracy_score(y_test, preds)), 4),
         "brier_score": round(float(brier_score_loss(y_test, probs)), 4),
         "baseline_win_rate_holdout": round(float(y_test.mean()), 4),
@@ -329,12 +372,14 @@ def train_technical_direction_model(
         }
 
     features = _build_feature_frame(df)
-    labels, r_multiples = _simulate_labels(
+    labels, r_multiples, label_end_indices = _simulate_labels(
         df["high"].to_numpy(), df["low"].to_numpy(), df["close"].to_numpy(), df["atr"].to_numpy(),
         atr_multiplier, max_holding_bars,
     )
     features = features.copy()
     features["__label"] = labels
+    features["__label_end_index"] = label_end_indices
+    features["__source_index"] = np.arange(len(features))
     features = features.replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(features) < MIN_ROWS_REQUIRED:
@@ -344,13 +389,28 @@ def train_technical_direction_model(
         }
 
     y = features.pop("__label").to_numpy()
+    label_end_indices = features.pop("__label_end_index").to_numpy()
+    source_indices = features.pop("__source_index").to_numpy()
     X = features[TECHNICAL_FEATURES].to_numpy()
 
     win_rate = float(y.mean())
     if win_rate in (0.0, 1.0):
         return {"trained": False, "reason": "single_class_only", "row_count": len(y)}
 
-    model, metrics = _fit_and_evaluate(X, y, TECHNICAL_FEATURES)
+    model, metrics = _fit_and_evaluate(
+        X,
+        y,
+        TECHNICAL_FEATURES,
+        label_end_indices=label_end_indices,
+        source_indices=source_indices,
+    )
+    if model is None:
+        return {
+            "trained": False,
+            "reason": metrics["reason"],
+            "row_count": len(y),
+            "metrics": metrics,
+        }
     metrics["row_count"] = len(y)
     metrics["baseline_win_rate_full"] = round(win_rate, 4)
     metrics["atr_multiplier"] = atr_multiplier

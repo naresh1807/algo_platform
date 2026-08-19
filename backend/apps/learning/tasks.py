@@ -747,6 +747,11 @@ def run_scalping_real_execution():
     here after every method/symbol combo has had a chance to open.
     """
     from apps.market_data.market_hours import is_market_open
+    from apps.execution.models import ExecutionModeSetting, get_execution_mode
+
+    if get_execution_mode() != ExecutionModeSetting.Mode.PAPER:
+        logger.warning("run_scalping_real_execution: disabled outside paper execution mode.")
+        return {"skipped": True, "reason": "paper_only"}
 
     from .scalp_execution import evaluate_and_open_scalp
     from .strategy_methods import SCALPING_METHOD_FUNCS

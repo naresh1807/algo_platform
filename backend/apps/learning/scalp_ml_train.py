@@ -107,6 +107,13 @@ def train_scalp_win_probability_model() -> dict:
         return {"trained": False, "reason": "single_class_only", "sample_count": len(rows)}
 
     pipeline, metrics = _fit_and_evaluate(X, y)
+    if pipeline is None:
+        return {
+            "trained": False,
+            "reason": metrics["reason"],
+            "sample_count": len(rows),
+            "metrics": metrics,
+        }
     metrics["sample_count"] = len(rows)
     metrics["baseline_win_rate"] = round(win_rate, 4)
     metrics["feature_columns"] = feature_names

@@ -48,6 +48,7 @@ export default function JarvisPanel() {
   const sendCommand = useJarvisStore((s) => s.sendCommand);
   const setListening = useJarvisStore((s) => s.setListening);
   const connectAnnouncements = useJarvisStore((s) => s.connectAnnouncements);
+  const disconnectAnnouncements = useJarvisStore((s) => s.disconnectAnnouncements);
   const markAnnouncementsSeen = useJarvisStore((s) => s.markAnnouncementsSeen);
   const dismissToast = useJarvisStore((s) => s.dismissToast);
   const hydrateHistory = useJarvisStore((s) => s.hydrateHistory);
@@ -70,7 +71,8 @@ export default function JarvisPanel() {
     endpoints.jarvisSuggested().then((res) => {
       if (res.data.commands?.length > 0) setSuggested(res.data.commands);
     }).catch(() => {}); // FALLBACK_SUGGESTED already covers this
-  }, [connectAnnouncements, hydrateHistory]);
+    return () => disconnectAnnouncements();
+  }, [connectAnnouncements, disconnectAnnouncements, hydrateHistory]);
 
   useEffect(() => {
     // NotificationBell (TopBar) dispatches this instead of holding its

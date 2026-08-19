@@ -66,6 +66,15 @@ FORBIDDEN_ACTIONS = {
     "place_live_order",
 }
 
+# These commands do have handlers, but expose platform-wide data or
+# operational controls rather than a trader's own workspace.  Keep the
+# rule beside the command registry so every caller applies the same
+# authorization boundary.
+ADMIN_ONLY_ACTIONS = {
+    "backup_database",
+    "export_trades",
+}
+
 COMMANDS = {
     # 14.8 Navigation Commands
     "open_dashboard": {"category": NAVIGATION, "phrases": ["open dashboard", "go home", "home"]},

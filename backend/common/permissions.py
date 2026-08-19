@@ -33,6 +33,16 @@ def _in_group(user, group_name: str) -> bool:
     return user.groups.filter(name=group_name).exists()
 
 
+def is_admin_user(user) -> bool:
+    """Return whether ``user`` may perform governance-level actions."""
+    return _in_group(user, ADMIN_GROUP_NAME)
+
+
+def is_trader_or_admin_user(user) -> bool:
+    """Return whether ``user`` may use the authenticated trading UI."""
+    return _in_group(user, TRADER_GROUP_NAME) or is_admin_user(user)
+
+
 class IsAdminGroup(BasePermission):
     """
     For governance-level writes: promoting a StrategyVersion,
@@ -45,7 +55,7 @@ class IsAdminGroup(BasePermission):
     message = "This action requires Admin privileges."
 
     def has_permission(self, request, view):
-        return _in_group(request.user, ADMIN_GROUP_NAME)
+        return is_admin_user(request.user)
 
 
 class IsTraderOrAdmin(BasePermission):
@@ -56,4 +66,4 @@ class IsTraderOrAdmin(BasePermission):
     """
 
     def has_permission(self, request, view):
-        return _in_group(request.user, TRADER_GROUP_NAME) or _in_group(request.user, ADMIN_GROUP_NAME)
+        return is_trader_or_admin_user(request.user)

@@ -150,6 +150,13 @@ class TradingSignal(models.Model):
         LOT_SIZE = "lot_size", "Lot-Size Rounding"
 
     status = models.CharField(max_length=16, choices=SignalStatus.choices, default=SignalStatus.PENDING)
+    execution_mode = models.CharField(
+        max_length=8,
+        choices=[("paper", "Paper"), ("live", "Live")],
+        default="paper",
+        db_index=True,
+        help_text="Execution venue intended when this signal was generated.",
+    )
     rejection_stage = models.CharField(
         max_length=24, choices=RejectionStage.choices, null=True, blank=True,
         help_text=(

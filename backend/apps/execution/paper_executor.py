@@ -5,6 +5,11 @@ APPROVED TradingSignal into a real OpenPosition row, and later closes
 it when a stop/target/exit condition fires, updating AccountEquity as
 if the trade had really happened.
 
+Paper fills are deliberately not frictionless: cash and option positions use
+separate configured per-side slippage/fee assumptions, snapshotted on the
+position at entry. Reference prices, simulated fills, gross P&L, costs, and
+net realized P&L remain independently auditable.
+
 This is intentionally the ONLY code path that touches AccountEquity's
 current_equity / consecutive_losses / peak_equity -- apps.risk.engine
 only ever *reads* those fields. Keeping the write path in one place
@@ -31,10 +36,20 @@ from apps.signals.engine import should_exit_position
 from common.constants import PositionSide, SignalStatus, SignalType
 
 from .models import OpenPosition
+from .paper_costs import (
+    adverse_fill_price,
+    assumptions_from_position,
+    cap_quantity_to_reference_stop_risk,
+    calculate_paper_settlement,
+    configured_assumptions,
+)
 from apps.risk.models import AccountEquity
 
 
-def open_position_from_signal(signal) -> OpenPosition:
+def open_position_from_signal(
+    signal, *, timeframe: str = "5m", strategy_key: str = "",
+    enforce_execution_risk: bool = False,
+) -> OpenPosition:
     """
     signal: an apps.signals.models.TradingSignal with status=APPROVED
     and signal_type BUY or SELL. Marks the signal EXECUTED in the same
@@ -68,8 +83,8 @@ def open_position_from_signal(signal) -> OpenPosition:
     """
     from django.conf import settings
 
-    qty = int(signal.position_size or 0)
-    if qty <= 0:
+    requested_qty = int(signal.position_size or 0)
+    if requested_qty <= 0:
         signal.status = SignalStatus.REJECTED
         signal.reason += " [paper execution: position_size was 0, no position opened]"
         signal.save(update_fields=["status", "reason"])
@@ -78,6 +93,16 @@ def open_position_from_signal(signal) -> OpenPosition:
     is_option_order = signal.option_contract_id is not None
     side = PositionSide.LONG if is_option_order or signal.signal_type == SignalType.BUY else PositionSide.SHORT
     position_symbol = signal.option_contract.tradingsymbol if is_option_order else signal.symbol
+    cost_assumptions = configured_assumptions(is_option=is_option_order)
+    entry_reference_price = Decimal(str(signal.entry_price))
+    entry_fill_price = adverse_fill_price(
+        entry_reference_price,
+        side=side,
+        is_entry=True,
+        assumptions=cost_assumptions,
+    )
+    lot_size = int(signal.option_contract.lot_size) if is_option_order else 1
+    qty = requested_qty
 
     trailing_distance = None
     peak_price = None
@@ -86,35 +111,115 @@ def open_position_from_signal(signal) -> OpenPosition:
         # sized against -- abs() since a SHORT's stop sits ABOVE entry
         # (signal.entry_price - signal.stop_loss would be negative
         # there), see apps.execution.trailing_stop's module docstring.
-        trailing_distance = abs(signal.entry_price - signal.stop_loss)
-        peak_price = signal.entry_price
+        trailing_distance = abs(entry_fill_price - signal.stop_loss)
+        peak_price = entry_fill_price
 
+    from apps.risk.engine import exposure_check_for_execution
+
+    from .models import ExecutionModeSetting
+
+    rejection_error: str | None = None
     with transaction.atomic():
-        position = OpenPosition.objects.create(
-            signal=signal,
-            option_contract=signal.option_contract if is_option_order else None,
-            symbol=position_symbol,
-            side=side,
-            # Already an int (see the qty=0 guard above) -- signal.position_size
-            # itself is a DecimalField, and OpenPosition.qty (PositiveIntegerField)
-            # doesn't coerce a raw Decimal on plain assignment when signal was
-            # loaded from a queryset (the real run_trading_cycle path, as opposed
-            # to this test suite's in-memory .create() objects). Left as a raw
-            # Decimal, it later broke the "qty" audit-log JSON write in
-            # log_action() below, which -- even though that failure is caught
-            # and swallowed there -- still leaves the surrounding DB transaction
-            # poisoned for the rest of this request/task (Django marks
-            # connection.needs_rollback=True from the failed internal
-            # atomic(savepoint=False) save).
-            qty=qty,
-            entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            target_price=signal.target_1,
-            trailing_stop_distance=trailing_distance,
-            peak_price=peak_price,
-        )
-        signal.status = SignalStatus.EXECUTED
-        signal.save(update_fields=["status"])
+        mode_row, _ = ExecutionModeSetting.objects.select_for_update().get_or_create(pk=1)
+        if mode_row.mode != ExecutionModeSetting.Mode.PAPER:
+            raise ValueError("Paper execution is disabled while the effective mode is live.")
+        signal = type(signal).objects.select_for_update().get(pk=signal.pk)
+        if signal.execution_mode != ExecutionModeSetting.Mode.PAPER:
+            raise ValueError(
+                f"Signal {signal.pk} was approved for {signal.execution_mode}, not paper execution."
+            )
+        if signal.status != SignalStatus.APPROVED:
+            raise ValueError(f"Signal {signal.pk} is not executable (status={signal.status}).")
+        if enforce_execution_risk:
+            from apps.risk.engine import validate_signal_for_execution
+
+            risk_ok, risk_reason = validate_signal_for_execution(signal)
+            if not risk_ok:
+                signal.status = SignalStatus.REJECTED
+                signal.reason += f" [execution-time risk veto: {risk_reason}]"
+                signal.save(update_fields=["status", "reason"])
+                rejection_error = risk_reason
+        if rejection_error is None:
+            exposure_ok, exposure_reason = exposure_check_for_execution(signal.symbol)
+            if not exposure_ok:
+                signal.status = SignalStatus.REJECTED
+                signal.reason += f" [execution-time risk veto: {exposure_reason}]"
+                signal.save(update_fields=["status", "reason"])
+                rejection_error = exposure_reason
+        if rejection_error is None:
+            equity = AccountEquity.objects.select_for_update().get(pk=1)
+            max_risk_pct = Decimal(str(settings.RISK_HARD_LIMITS["MAX_RISK_PER_TRADE_PCT"]))
+            risk_budget = equity.current_equity * max_risk_pct / Decimal("100")
+            qty = cap_quantity_to_reference_stop_risk(
+                entry_reference_price=entry_reference_price,
+                stop_reference_price=Decimal(str(signal.stop_loss)),
+                requested_qty=requested_qty,
+                side=side,
+                assumptions=cost_assumptions,
+                entry_fill_price=entry_fill_price,
+                lot_size=lot_size,
+                risk_budget=risk_budget,
+            )
+            if qty <= 0:
+                signal.status = SignalStatus.REJECTED
+                signal.reason += " [paper execution: modeled costs exhausted the hard risk budget]"
+                signal.save(update_fields=["status", "reason"])
+                rejection_error = "Modeled paper costs exhaust the per-trade risk budget."
+        if rejection_error is None:
+            opening_liquidation = calculate_paper_settlement(
+                entry_reference_price=entry_reference_price,
+                exit_reference_price=entry_reference_price,
+                qty=qty,
+                side=side,
+                assumptions=cost_assumptions,
+                entry_fill_price=entry_fill_price,
+            )
+            signal.status = SignalStatus.EXECUTING
+            signal_update_fields = ["status"]
+            if qty < requested_qty:
+                signal.reason += (
+                    f" [paper cost-aware size cap: {requested_qty} -> {qty}]"
+                )
+                signal_update_fields.append("reason")
+            signal.save(update_fields=signal_update_fields)
+            position = OpenPosition.objects.create(
+                signal=signal,
+                option_contract=signal.option_contract if is_option_order else None,
+                symbol=position_symbol,
+                execution_mode="paper",
+                timeframe=timeframe,
+                strategy_key=strategy_key,
+                side=side,
+                # Already an int (see the qty=0 guard above) -- signal.position_size
+                # itself is a DecimalField, and OpenPosition.qty (PositiveIntegerField)
+                # doesn't coerce a raw Decimal on plain assignment when signal was
+                # loaded from a queryset (the real run_trading_cycle path, as opposed
+                # to this test suite's in-memory .create() objects). Left as a raw
+                # Decimal, it later broke the "qty" audit-log JSON write in
+                # log_action() below, which -- even though that failure is caught
+                # and swallowed there -- still leaves the surrounding DB transaction
+                # poisoned for the rest of this request/task (Django marks
+                # connection.needs_rollback=True from the failed internal
+                # atomic(savepoint=False) save).
+                qty=qty,
+                entry_price=entry_fill_price,
+                entry_reference_price=entry_reference_price,
+                stop_loss=signal.stop_loss,
+                target_price=signal.target_1,
+                trailing_stop_distance=trailing_distance,
+                peak_price=peak_price,
+                unrealized_pnl=opening_liquidation.net_pnl,
+                last_mark_price=entry_reference_price,
+                paper_slippage_bps_per_side=cost_assumptions.slippage_bps_per_side,
+                paper_fees_bps_per_side=cost_assumptions.fees_bps_per_side,
+            )
+            signal.status = SignalStatus.EXECUTED
+            signal.save(update_fields=["status"])
+
+    # Commit the rejection audit state before surfacing the error to the task.
+    # An exception raised inside transaction.atomic() would roll it back.
+    if rejection_error is not None:
+        raise ValueError(rejection_error)
 
     from apps.admin_tools.audit import log_action
     log_action(
@@ -123,8 +228,12 @@ def open_position_from_signal(signal) -> OpenPosition:
         target=position,
         details={
             "symbol": position.symbol, "side": position.side, "qty": position.qty,
-            "entry_price": str(position.entry_price), "mode": "paper",
+            "requested_qty": requested_qty,
+            "entry_reference_price": str(position.entry_reference_price),
+            "entry_fill_price": str(position.entry_price), "mode": "paper",
             "option_contract_id": signal.option_contract_id,
+            "slippage_bps_per_side": str(position.paper_slippage_bps_per_side),
+            "fees_bps_per_side": str(position.paper_fees_bps_per_side),
         },
     )
     return position
@@ -136,9 +245,22 @@ def _pnl_for(position: OpenPosition, exit_price: Decimal) -> Decimal:
     return (position.entry_price - exit_price) * position.qty
 
 
-def close_position(position: OpenPosition, exit_price: Decimal, reason: str) -> None:
+def _settlement_for(position: OpenPosition, exit_reference_price: Decimal):
+    """Reprice a paper position using only its persisted cost snapshot."""
+    entry_reference_price = position.entry_reference_price or position.entry_price
+    return calculate_paper_settlement(
+        entry_reference_price=entry_reference_price,
+        exit_reference_price=Decimal(str(exit_reference_price)),
+        qty=int(position.qty),
+        side=position.side,
+        assumptions=assumptions_from_position(position),
+        entry_fill_price=position.entry_price,
+    )
+
+
+def close_position(position: OpenPosition, exit_price: Decimal, reason: str) -> bool:
     """
-    Closes the position and applies its P&L to AccountEquity in one
+    Closes the position and applies its NET realized P&L to AccountEquity in one
     transaction. Also updates consecutive_losses (reset to 0 on a win,
     incremented on a loss) and peak_equity (only ever moves up) --
     these are exactly the two numbers apps.risk.engine's
@@ -146,11 +268,30 @@ def close_position(position: OpenPosition, exit_price: Decimal, reason: str) -> 
     candidate trade.
     """
     with transaction.atomic():
-        pnl = _pnl_for(position, exit_price)
+        position = OpenPosition.objects.select_for_update().get(pk=position.pk)
+        if position.closed_at is not None:
+            return False
+        if position.execution_mode != "paper":
+            raise ValueError(f"Refusing to paper-close {position.execution_mode} position {position.pk}.")
+        exit_reference_price = Decimal(str(exit_price))
+        settlement = _settlement_for(position, exit_reference_price)
+        pnl = settlement.net_pnl
 
         position.unrealized_pnl = pnl
+        position.last_mark_price = exit_reference_price
+        position.exit_reference_price = exit_reference_price
+        position.exit_price = settlement.exit_fill_price
+        position.gross_realized_pnl = settlement.gross_pnl
+        position.slippage_cost = settlement.slippage_cost
+        position.fees = settlement.fees
+        position.total_costs = settlement.total_costs
+        position.realized_pnl = settlement.net_pnl
         position.closed_at = timezone.now()
-        position.save(update_fields=["unrealized_pnl", "closed_at"])
+        position.save(update_fields=[
+            "unrealized_pnl", "last_mark_price", "exit_reference_price", "exit_price",
+            "gross_realized_pnl", "slippage_cost", "fees", "total_costs",
+            "realized_pnl", "closed_at",
+        ])
 
         equity = AccountEquity.objects.select_for_update().get(pk=1)
         equity.current_equity += pnl
@@ -163,20 +304,38 @@ def close_position(position: OpenPosition, exit_price: Decimal, reason: str) -> 
         action="order_closed",
         actor_label="paper_executor",
         target=position,
-        details={"symbol": position.symbol, "exit_price": str(exit_price), "pnl": str(pnl), "reason": reason, "mode": "paper"},
+        details={
+            "symbol": position.symbol,
+            "exit_reference_price": str(exit_reference_price),
+            "exit_fill_price": str(settlement.exit_fill_price),
+            "gross_pnl": str(settlement.gross_pnl),
+            "slippage_cost": str(settlement.slippage_cost),
+            "fees": str(settlement.fees),
+            "total_costs": str(settlement.total_costs),
+            "net_realized_pnl": str(settlement.net_pnl),
+            "reason": reason,
+            "mode": "paper",
+        },
     )
+    return True
 
 
 def mark_to_market(position: OpenPosition, current_price: Decimal) -> None:
     """
-    Updates unrealized_pnl on a still-open position WITHOUT touching
-    AccountEquity -- only close_position() realizes P&L into equity.
+    Updates conservative net liquidation P&L on a still-open position WITHOUT
+    touching AccountEquity -- only close_position() realizes P&L into equity.
     This is what lets the dashboard show a live-moving P&L number
     (manual section 18) between ticks without the drawdown/exposure
     checks reacting to paper gains/losses that could still reverse.
     """
-    position.unrealized_pnl = _pnl_for(position, current_price)
-    position.save(update_fields=["unrealized_pnl"])
+    current_price = Decimal(str(current_price))
+    pnl = _settlement_for(position, current_price).net_pnl
+    updated = OpenPosition.objects.filter(
+        pk=position.pk, closed_at__isnull=True,
+    ).update(unrealized_pnl=pnl, last_mark_price=current_price)
+    if updated:
+        position.unrealized_pnl = pnl
+        position.last_mark_price = current_price
 
 
 def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
@@ -197,7 +356,9 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
     side of the stop/target comparison below ever applies to them.
     """
     results = []
-    for position in OpenPosition.objects.filter(closed_at__isnull=True):
+    for position in OpenPosition.objects.filter(
+        closed_at__isnull=True, execution_mode="paper", timeframe=timeframe,
+    ):
         if position.option_contract_id is not None:
             from apps.options.pricing import latest_ltp_for_contract
 
@@ -226,7 +387,10 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
             target_hit = position.target_price is not None and current_price <= position.target_price
 
         if stop_hit:
-            close_position(position, position.stop_loss, "Stop-loss hit")
+            # This loop observes discrete quotes/candle closes. Once price has
+            # crossed the stop, filling at the old stop would erase any gap;
+            # use the observed market reference and then apply exit slippage.
+            close_position(position, current_price, "Stop-loss hit")
             results.append({"symbol": position.symbol, "closed": True, "reason": "stop_loss"})
             continue
 
@@ -245,4 +409,47 @@ def check_and_close_positions(timeframe: str = "5m") -> list[dict]:
         mark_to_market(position, current_price)
         results.append({"symbol": position.symbol, "closed": False})
 
+    return results
+
+
+def flatten_all_positions(timeframe: str = "5m") -> list[dict]:
+    """Immediately close every paper position after a kill-switch trip.
+
+    A missing fresh quote must not leave a simulated position open during an
+    emergency. In that rare case the persisted raw mark is used; if it has
+    never been marked, the reference entry is the conservative deterministic
+    fallback.
+    """
+    results = []
+    for position in OpenPosition.objects.filter(
+        closed_at__isnull=True, execution_mode="paper",
+    ):
+        current_price = None
+        if position.option_contract_id is not None:
+            from apps.options.pricing import latest_ltp_for_contract
+
+            ltp = latest_ltp_for_contract(position.option_contract)
+            if ltp is not None:
+                current_price = Decimal(str(ltp))
+        else:
+            ind = compute_indicators(position.symbol, timeframe)
+            if ind is not None:
+                current_price = Decimal(str(ind["close"]))
+
+        if current_price is None:
+            # `unrealized_pnl` is now net of a hypothetical exit and cannot be
+            # inverted into an unambiguous market price. Persist the last raw
+            # mark explicitly; a never-marked position falls back to its
+            # reference entry, producing a conservative immediate cost loss.
+            current_price = (
+                position.last_mark_price
+                or position.entry_reference_price
+                or position.entry_price
+            )
+        closed = close_position(position, current_price, "Emergency kill-switch flatten")
+        results.append({
+            "symbol": position.symbol,
+            "closed": closed,
+            "reason": "kill_switch" if closed else "already_closed",
+        })
     return results

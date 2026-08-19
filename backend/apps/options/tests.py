@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -387,6 +388,7 @@ class OptionExpiriesViewTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="pw")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.client.force_authenticate(self.user)
 
         self.expired = date.today() - timedelta(days=1)
@@ -1218,6 +1220,7 @@ class OptionExpiryStatusViewTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="pw")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.client.force_authenticate(self.user)
 
     def test_returns_current_and_next_expiry_chronologically(self):
@@ -1275,6 +1278,7 @@ class OptionChainViewFallbackTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader1", password="pw")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.client.force_authenticate(self.user)
         self.expired = date.today() - timedelta(days=1)
         self.current = date.today() + timedelta(days=3)
@@ -2359,6 +2363,7 @@ class FinalSignalViewTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="trader_final", password="pw")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.client.force_authenticate(self.user)
 
     def test_404_when_no_signals_exist(self):
@@ -2600,6 +2605,7 @@ class OptionCandlesViewTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="candle_trader", password="pw")
+        self.user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         self.expiry = date.today() + timedelta(days=3)
         self.ce = _make_contract(strike=24500, option_type="CE", token="tok_view_ce", expiry=self.expiry)
         self.pe = _make_contract(strike=24500, option_type="PE", token="tok_view_pe", expiry=self.expiry)
@@ -2713,6 +2719,7 @@ class OptionCandleConsumerTests(TestCase):
     @override_settings(CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}})
     def test_only_matching_contract_timeframe_group_receives_broadcast(self):
         import asyncio
+        from types import SimpleNamespace
 
         from channels.layers import get_channel_layer
         from channels.routing import URLRouter
@@ -2720,8 +2727,17 @@ class OptionCandleConsumerTests(TestCase):
 
         from .routing import websocket_urlpatterns
 
+        async def authenticated_scope(app, scope, receive, send):
+            scope = dict(scope)
+            scope["user"] = SimpleNamespace(is_authenticated=True, is_active=True)
+            await app(scope, receive, send)
+
         async def scenario():
-            app = URLRouter(websocket_urlpatterns)
+            router = URLRouter(websocket_urlpatterns)
+
+            async def app(scope, receive, send):
+                await authenticated_scope(router, scope, receive, send)
+
             comm_a = WebsocketCommunicator(app, "/ws/options/candles/1/5m/")
             comm_b = WebsocketCommunicator(app, "/ws/options/candles/2/5m/")
             try:

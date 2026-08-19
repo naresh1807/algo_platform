@@ -13,13 +13,16 @@ Credentials come from .env (ANGEL_ONE_*), never hardcoded.
 from __future__ import annotations
 
 import logging
+import importlib
 import random
 import threading
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 import pyotp
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone as django_timezone
 
 # A simple cross-thread, per-process rate limiter for Angel One API
@@ -70,6 +73,9 @@ _SMARTAPI_COOLDOWN_TRIP_THRESHOLD = 2  # consecutive retry-exhausted calls befor
 _SMARTAPI_COOLDOWN_SECONDS = 300.0  # 5 minutes
 _smartapi_consecutive_rate_limit_exhaustions = 0
 _smartapi_cooldown_until = 0.0
+_SMARTAPI_SHARED_SLOT_KEY = "broker:angel_one:request_slot"
+_SMARTAPI_SHARED_FAILURES_KEY = "broker:angel_one:rate_limit_failures"
+_SMARTAPI_SHARED_COOLDOWN_KEY = "broker:angel_one:cooldown"
 
 
 class SmartApiCooldownActive(Exception):
@@ -88,6 +94,14 @@ def _record_smartapi_rate_limit_exhaustion() -> None:
                 "attempted until then) instead of continuing to retry into an active cooldown.",
                 _smartapi_consecutive_rate_limit_exhaustions, _SMARTAPI_COOLDOWN_SECONDS,
             )
+    if getattr(settings, "SMARTAPI_DISTRIBUTED_RATE_LIMIT", False):
+        try:
+            cache.add(_SMARTAPI_SHARED_FAILURES_KEY, 0, timeout=int(_SMARTAPI_COOLDOWN_SECONDS))
+            failures = cache.incr(_SMARTAPI_SHARED_FAILURES_KEY)
+            if failures >= _SMARTAPI_COOLDOWN_TRIP_THRESHOLD:
+                cache.set(_SMARTAPI_SHARED_COOLDOWN_KEY, True, timeout=int(_SMARTAPI_COOLDOWN_SECONDS))
+        except Exception:
+            logger.warning("Shared SmartAPI cooldown state is unavailable; using process-local fallback.", exc_info=True)
 
 
 def _reset_smartapi_rate_limit_failures() -> None:
@@ -95,6 +109,11 @@ def _reset_smartapi_rate_limit_failures() -> None:
     if _smartapi_consecutive_rate_limit_exhaustions:
         with _SMARTAPI_RATE_LIMIT_LOCK:
             _smartapi_consecutive_rate_limit_exhaustions = 0
+    if getattr(settings, "SMARTAPI_DISTRIBUTED_RATE_LIMIT", False):
+        try:
+            cache.delete(_SMARTAPI_SHARED_FAILURES_KEY)
+        except Exception:
+            logger.warning("Unable to reset shared SmartAPI failure counter.", exc_info=True)
 
 
 def _wait_for_smartapi_slot() -> None:
@@ -109,6 +128,22 @@ def _wait_for_smartapi_slot() -> None:
             time.sleep(sleep_time)
             now = time.monotonic()
         _SMARTAPI_LAST_REQUEST_AT = now
+
+    if not getattr(settings, "SMARTAPI_DISTRIBUTED_RATE_LIMIT", False):
+        return
+    while True:
+        try:
+            acquired = cache.add(
+                _SMARTAPI_SHARED_SLOT_KEY,
+                True,
+                timeout=max(1, int(_SMARTAPI_MIN_REQUEST_INTERVAL + 0.999)),
+            )
+        except Exception:
+            logger.warning("Shared SmartAPI rate limiter is unavailable; using process-local fallback.", exc_info=True)
+            return
+        if acquired:
+            return
+        time.sleep(min(0.25, _SMARTAPI_MIN_REQUEST_INTERVAL))
 
 
 def _is_smartapi_rate_limit_error(exc: Exception) -> bool:
@@ -256,22 +291,23 @@ def _call_with_hard_timeout(func, timeout_seconds: float, *args, **kwargs):
     killing the whole process -- an acceptable trade next to "the
     process can never recover on its own."
     """
-    result: dict = {}
+    value: list[object] = []
+    error: list[BaseException] = []
 
     def runner():
         try:
-            result["value"] = func(*args, **kwargs)
+            value.append(func(*args, **kwargs))
         except BaseException as exc:  # noqa: BLE001 -- re-raised on the calling thread below, must not be lost
-            result["error"] = exc
+            error.append(exc)
 
     thread = threading.Thread(target=runner, daemon=True)
     thread.start()
     thread.join(timeout_seconds)
     if thread.is_alive():
         raise _HardTimeout(f"{getattr(func, '__qualname__', func)} did not complete within {timeout_seconds}s.")
-    if "error" in result:
-        raise result["error"]
-    return result["value"]
+    if error:
+        raise error[0]
+    return value[0]
 
 
 _shared_client_lock = threading.Lock()
@@ -331,8 +367,21 @@ class BrokerClient:
         self._smart_connect = None
         self._jwt_token = None
         self._feed_token = None
+        self._connect_lock = threading.Lock()
 
-    def _smartapi_request(self, func, *args, **kwargs):
+    def _smartapi_request(
+        self, func, *args, retry_rate_limits: bool = True, **kwargs,
+    ):
+        if getattr(settings, "SMARTAPI_DISTRIBUTED_RATE_LIMIT", False):
+            try:
+                if cache.get(_SMARTAPI_SHARED_COOLDOWN_KEY):
+                    raise SmartApiCooldownActive(
+                        "Angel One shared cooldown circuit breaker is open."
+                    )
+            except SmartApiCooldownActive:
+                raise
+            except Exception:
+                logger.warning("Unable to read shared SmartAPI cooldown state.", exc_info=True)
         with _SMARTAPI_RATE_LIMIT_LOCK:
             remaining_cooldown = _smartapi_cooldown_until - time.monotonic()
         if remaining_cooldown > 0:
@@ -350,6 +399,8 @@ class BrokerClient:
                 response = func(*args, **kwargs)
             except Exception as exc:
                 if (
+                    retry_rate_limits
+                    and
                     attempt < _SMARTAPI_RETRY_ATTEMPTS
                     and _is_smartapi_rate_limit_error(exc)
                 ):
@@ -367,7 +418,7 @@ class BrokerClient:
                     _record_smartapi_rate_limit_exhaustion()
                 raise
 
-            if attempt < _SMARTAPI_RETRY_ATTEMPTS and _is_smartapi_rate_limit_response(
+            if retry_rate_limits and attempt < _SMARTAPI_RETRY_ATTEMPTS and _is_smartapi_rate_limit_response(
                 response
             ):
                 backoff = _SMARTAPI_RETRY_BACKOFF_FACTOR * (2 ** (attempt - 1))
@@ -392,59 +443,65 @@ class BrokerClient:
         if self._smart_connect is not None:
             return self._smart_connect
 
-        # Imported lazily (not at module top) so `smartapi-python` isn't
-        # a hard import-time dependency for anything running in paper
-        # mode -- only actually needed once a live connection is made.
-        from SmartApi import SmartConnect
+        # A single BrokerClient is shared by every thread in a worker.
+        # Serialize the first login so concurrent tasks cannot create two
+        # sessions and have Angel One invalidate the earlier token.
+        with self._connect_lock:
+            if self._smart_connect is not None:
+                return self._smart_connect
 
-        api_key = settings.ANGEL_ONE_API_KEY
-        client_id = settings.ANGEL_ONE_CLIENT_ID
-        password = settings.ANGEL_ONE_PASSWORD
-        totp_secret = settings.ANGEL_ONE_TOTP_SECRET
+            api_key = settings.ANGEL_ONE_API_KEY
+            client_id = settings.ANGEL_ONE_CLIENT_ID
+            password = settings.ANGEL_ONE_PASSWORD
+            totp_secret = settings.ANGEL_ONE_TOTP_SECRET
 
-        if not all([api_key, client_id, password, totp_secret]):
-            raise BrokerAuthError(
-                "Angel One credentials are missing from settings/.env -- "
-                "set ANGEL_ONE_API_KEY/CLIENT_ID/PASSWORD/TOTP_SECRET, or "
-                "run in BROKER_MODE=paper instead."
+            if not all([api_key, client_id, password, totp_secret]):
+                raise BrokerAuthError(
+                    "Angel One credentials are missing from settings/.env -- "
+                    "set ANGEL_ONE_API_KEY/CLIENT_ID/PASSWORD/TOTP_SECRET, or "
+                    "run in BROKER_MODE=paper instead."
+                )
+
+            # SmartAPI 1.5.5 performs an external IP lookup while its module
+            # imports. Importing on the caller thread would bypass every
+            # timeout below, so the lazy import itself receives the same hard
+            # bound as construction and login.
+            smartapi_module = _call_with_hard_timeout(
+                importlib.import_module, _SMARTAPI_REQUEST_TIMEOUT_SECONDS, "SmartApi",
+            )
+            SmartConnect = smartapi_module.SmartConnect
+            connection = _call_with_hard_timeout(
+                SmartConnect, _SMARTAPI_REQUEST_TIMEOUT_SECONDS,
+                api_key=api_key, timeout=_SMARTAPI_REQUEST_TIMEOUT_SECONDS,
             )
 
-        totp = pyotp.TOTP(totp_secret).now()
-        # SmartConnect(...) construction itself is wrapped too, not just
-        # generateSession() -- observed hanging BEFORE any HTTP request is
-        # even made, most likely inside ssl.create_default_context()
-        # (SmartConnect.__init__ builds one unconditionally): on Windows
-        # this can trigger a certificate-store/revocation-check network
-        # call the first time it runs in a process, which isn't bounded
-        # by requests' own `timeout=` at all since no request has been
-        # sent yet. See _call_with_hard_timeout's own docstring for the
-        # full reasoning on why a call hanging here must still surface as
-        # an exception, not an unrecoverable process hang.
-        connection = _call_with_hard_timeout(
-            SmartConnect, _SMARTAPI_REQUEST_TIMEOUT_SECONDS,
-            api_key=api_key, timeout=_SMARTAPI_REQUEST_TIMEOUT_SECONDS,
-        )
-        session = _call_with_hard_timeout(
-            connection.generateSession, _SMARTAPI_REQUEST_TIMEOUT_SECONDS, client_id, password, totp,
-        )
+            # Generate the one-time code immediately before login. Creating it
+            # before SDK import/construction could leave only a few seconds of
+            # validity after a slow TLS/certificate initialization.
+            _wait_for_smartapi_slot()
+            totp = pyotp.TOTP(totp_secret).now()
+            session = _call_with_hard_timeout(
+                connection.generateSession, _SMARTAPI_REQUEST_TIMEOUT_SECONDS,
+                client_id, password, totp,
+            )
 
-        if not session.get("status"):
-            raise BrokerAuthError(f"Angel One login failed: {session.get('message')}")
+            if not session.get("status"):
+                raise BrokerAuthError(f"Angel One login failed: {session.get('message')}")
 
-        # jwtToken/feedToken are only used by the SmartWebSocketV2 live-tick
-        # connection (apps/market_data/broker_ws_client.py) -- SmartConnect's
-        # own REST methods (getCandleData/ltpData/placeOrder/...) don't need
-        # them, which is why nothing before this read them. Captured here
-        # rather than re-deriving from a second generateSession call, since
-        # Angel One invalidates the previous session's tokens on a fresh
-        # login for the same client.
-        session_data = session.get("data") or {}
-        self._jwt_token = session_data.get("jwtToken")
-        self._feed_token = session_data.get("feedToken")
+            # jwtToken/feedToken are only used by the SmartWebSocketV2 live-tick
+            # connection (apps/market_data/broker_ws_client.py) -- SmartConnect's
+            # own REST methods (getCandleData/ltpData/placeOrder/...) don't need
+            # them, which is why nothing before this read them. Captured here
+            # rather than re-deriving from a second generateSession call, since
+            # Angel One invalidates the previous session's tokens on a fresh
+            # login for the same client.
+            session_data = session.get("data") or {}
+            self._jwt_token = session_data.get("jwtToken")
+            self._feed_token = session_data.get("feedToken")
 
-        self._smart_connect = connection
-        logger.info("Angel One session established for client %s", client_id)
-        return connection
+            self._smart_connect = connection
+            logger.info("Angel One session established for client %s", client_id)
+            return connection
 
     def get_feed_credentials(self) -> dict:
         """
@@ -461,6 +518,41 @@ class BrokerClient:
             "jwt_token": self._jwt_token,
             "feed_token": self._feed_token,
         }
+
+    def get_account_equity(self) -> Decimal:
+        """Return Angel One's current net RMS funds as a validated amount."""
+        connection = self._connect()
+        response = self._smartapi_request(connection.rmsLimit)
+        if not isinstance(response, dict) or not response.get("status"):
+            raise RuntimeError(
+                f"Could not fetch broker funds: "
+                f"{response.get('message') if isinstance(response, dict) else 'invalid response'}"
+            )
+        data = response.get("data") or {}
+        raw_equity = data.get("net")
+        if raw_equity in (None, ""):
+            raw_equity = data.get("availablecash")
+        try:
+            equity = Decimal(str(raw_equity))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError("Broker funds response did not contain a valid net balance.") from exc
+        if not equity.is_finite() or equity < 0:
+            raise RuntimeError("Broker net balance was negative or non-finite.")
+        return equity
+
+    def get_positions(self) -> list[dict]:
+        """Return current broker positions for local/live reconciliation."""
+        connection = self._connect()
+        response = self._smartapi_request(connection.position)
+        if not isinstance(response, dict) or not response.get("status"):
+            raise RuntimeError(
+                f"Could not fetch broker positions: "
+                f"{response.get('message') if isinstance(response, dict) else 'invalid response'}"
+            )
+        data = response.get("data") or []
+        if not isinstance(data, list):
+            raise RuntimeError("Broker positions response had an invalid data shape.")
+        return data
 
     def _fetch_candle_rows(
         self, exchange: str, symboltoken: str, timeframe: str, lookback_days: int, to_date: datetime | None,
@@ -529,7 +621,7 @@ class BrokerClient:
 
         # Angel One returns rows as [timestamp, open, high, low, close, volume]
         rows = []
-        for row in response.get("data", []):
+        for row in response.get("data") or []:
             ts, o, h, l, c, v = row
             timestamp = datetime.fromisoformat(ts)
             if django_timezone.is_naive(timestamp):
@@ -684,6 +776,8 @@ class BrokerClient:
         symbol_token: str | None = None,
         exchange: str | None = None,
         tradingsymbol: str | None = None,
+        order_tag: str | None = None,
+        risk_reducing: bool = False,
     ) -> str:
         """
         Places a real order. transaction_type is "BUY" or "SELL".
@@ -709,6 +803,19 @@ class BrokerClient:
         explicitly given. Every pre-existing caller passes none of
         these and is unaffected.
         """
+        if not settings.LIVE_TRADING_ENABLED and not risk_reducing:
+            raise PermissionError("Live order placement is disarmed by server configuration.")
+
+        qty = int(qty)
+        if qty <= 0:
+            raise ValueError("Order quantity must be a positive integer.")
+        transaction_type = transaction_type.upper()
+        if transaction_type not in {"BUY", "SELL"}:
+            raise ValueError("transaction_type must be BUY or SELL.")
+        order_type = order_type.upper()
+        if order_type not in {"MARKET", "LIMIT"}:
+            raise ValueError("order_type must be MARKET or LIMIT.")
+
         if symbol_token and exchange:
             token = symbol_token
             exch = exchange
@@ -733,8 +840,20 @@ class BrokerClient:
             "duration": "DAY",
             "price": str(price) if order_type == "LIMIT" else "0",
             "quantity": str(qty),
+            "ordertag": order_tag,
         }
-        response = self._smartapi_request(connection.placeOrder, order_params)
+        # placeOrder() in smartapi-python 1.5.5 discards the broker's error
+        # response and returns None. The full-response variant preserves rate
+        # limit/error details and the order id, allowing our retry/circuit
+        # breaker and audit paths to make an informed decision.
+        place = getattr(connection, "placeOrderFullResponse", connection.placeOrder)
+        # Never retry a state-changing submission. A timeout/rate-limit
+        # response can be ambiguous (the broker may have accepted the first
+        # request); the durable order tag is reconciled through orderBook
+        # instead of risking a duplicate POST.
+        response = self._smartapi_request(
+            place, order_params, retry_rate_limits=False,
+        )
 
         # smartapi-python's placeOrder return shape has varied across
         # versions (sometimes the order id directly, sometimes a dict) --
@@ -744,7 +863,7 @@ class BrokerClient:
                 raise RuntimeError(
                     f"Order placement failed for {symbol}: {response.get('message')}"
                 )
-            order_id = response.get("data", {}).get("orderid") or response.get(
+            order_id = (response.get("data") or {}).get("orderid") or response.get(
                 "orderid"
             )
         else:
@@ -773,18 +892,38 @@ class BrokerClient:
         derivatives usually do fill immediately, but "usually" is not a
         safe assumption for code that risks real money.
         """
-        connection = self._connect()
-        order_book = self._smartapi_request(connection.orderBook)
-        if not order_book.get("status"):
-            raise RuntimeError(
-                f"Could not fetch order book: {order_book.get('message')}"
-            )
-
-        for order in order_book.get("data", []) or []:
+        for order in self.get_order_book():
             if str(order.get("orderid")) == str(order_id):
                 return order
 
         raise RuntimeError(f"Order {order_id} not found in order book.")
+
+    def get_order_book(self) -> list[dict]:
+        """Fetch and validate the current broker order book once."""
+        connection = self._connect()
+        response = self._smartapi_request(connection.orderBook)
+        if not isinstance(response, dict) or not response.get("status"):
+            raise RuntimeError(
+                f"Could not fetch order book: "
+                f"{response.get('message') if isinstance(response, dict) else 'invalid response'}"
+            )
+        data = response.get("data") or []
+        if not isinstance(data, list):
+            raise RuntimeError("Broker order book had an invalid data shape.")
+        return data
+
+    def find_order_by_tag(self, order_tag: str) -> dict | None:
+        """Return the most recent order-book row carrying ``order_tag``.
+
+        Used after an interrupted/ambiguous submission: the local journal is
+        written before the request and its UUID is sent as Angel One's
+        ``ordertag``, so reconciliation does not need to guess by symbol/time.
+        """
+        matching = [
+            order for order in self.get_order_book()
+            if str(order.get("ordertag") or order.get("orderTag") or "") == str(order_tag)
+        ]
+        return matching[-1] if matching else None
 
     def cancel_order(self, order_id: str, variety: str = "NORMAL") -> bool:
         """

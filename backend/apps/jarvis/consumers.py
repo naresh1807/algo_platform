@@ -15,18 +15,14 @@ push).
 
 import json
 
-from channels.generic.websocket import AsyncWebsocketConsumer
+from common.websockets import AuthenticatedWebsocketConsumer
 
 GROUP_NAME = "jarvis_live"
 
 
-class JarvisNotificationConsumer(AsyncWebsocketConsumer):
+class JarvisNotificationConsumer(AuthenticatedWebsocketConsumer):
     async def connect(self):
-        await self.channel_layer.group_add(GROUP_NAME, self.channel_name)
-        await self.accept()
-
-    async def disconnect(self, code):
-        await self.channel_layer.group_discard(GROUP_NAME, self.channel_name)
+        await self.join_group_and_accept(GROUP_NAME)
 
     async def jarvis_announcement(self, event):
         await self.send(text_data=json.dumps(event["data"]))

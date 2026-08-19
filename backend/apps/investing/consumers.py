@@ -22,18 +22,14 @@ per-second ticks would actually require.
 
 import json
 
-from channels.generic.websocket import AsyncWebsocketConsumer
+from common.websockets import AuthenticatedWebsocketConsumer
 
 GROUP_NAME = "index_live"
 
 
-class LiveIndexConsumer(AsyncWebsocketConsumer):
+class LiveIndexConsumer(AuthenticatedWebsocketConsumer):
     async def connect(self):
-        await self.channel_layer.group_add(GROUP_NAME, self.channel_name)
-        await self.accept()
-
-    async def disconnect(self, code):
-        await self.channel_layer.group_discard(GROUP_NAME, self.channel_name)
+        await self.join_group_and_accept(GROUP_NAME)
 
     # Called by group_send({"type": "index_update", ...}) -- must match
     # apps/investing/signals.py's group_send call exactly.

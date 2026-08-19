@@ -56,7 +56,9 @@ def market_open_routine() -> str:
     steps = []
 
     broker_mode = getattr(settings, "BROKER_MODE", "paper")
-    execution_mode = getattr(settings, "EXECUTION_MODE", "paper")
+    from apps.execution.models import get_execution_mode
+
+    execution_mode = get_execution_mode()
     steps.append(f"1. Broker: BROKER_MODE={broker_mode} (data source), EXECUTION_MODE={execution_mode} (order placement)")
 
     feed = FeedHealthCheck.objects.order_by("-checked_at").first()

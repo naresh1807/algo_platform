@@ -39,6 +39,8 @@ from decimal import Decimal, InvalidOperation
 
 from celery import shared_task
 
+from apps.market_data.market_hours import is_market_open
+
 logger = logging.getLogger(__name__)
 
 
@@ -321,6 +323,11 @@ def sync_index_constituents_and_prices():
     constituent list is a reasonable future fallback if this needs to
     work reliably, not attempted here.
     """
+    market_open, reason = is_market_open()
+    if not market_open:
+        logger.info("sync_index_constituents_and_prices skipped: %s", reason)
+        return {"skipped": True, "reason": reason}
+
     from .models import Index
 
     nse_indices = Index.objects.filter(exchange=Index.Exchange.NSE)

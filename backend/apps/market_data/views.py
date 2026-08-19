@@ -1,8 +1,9 @@
 from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from common.permissions import IsTraderOrAdmin
 
 from .indicators import compute_indicator_series
 from .models import HistoricalData
@@ -34,7 +35,7 @@ class HistoricalDataViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = HistoricalData.objects.all()
     serializer_class = HistoricalDataSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
     filterset_fields = ["symbol", "timeframe"]
     pagination_class = CandlePagination
 
@@ -48,7 +49,7 @@ class IndicatorSeriesView(APIView):
     same auth as candles/: this endpoint computes from HistoricalData,
     it never writes anything.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsTraderOrAdmin]
 
     def get(self, request):
         symbol = request.query_params.get("symbol")
@@ -58,6 +59,11 @@ class IndicatorSeriesView(APIView):
                 {"detail": "symbol and timeframe query params are required."}, status=400,
             )
 
-        limit = int(request.query_params.get("limit", 300))
+        try:
+            limit = int(request.query_params.get("limit", 300))
+        except (TypeError, ValueError):
+            return Response({"detail": "limit must be an integer."}, status=400)
+        if not 1 <= limit <= 10000:
+            return Response({"detail": "limit must be between 1 and 10000."}, status=400)
         series = compute_indicator_series(symbol, timeframe, limit=limit)
         return Response({"results": series})

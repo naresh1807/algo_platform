@@ -223,7 +223,12 @@ def evaluate_and_open_scalp(method: str, generate_idea, underlying: str) -> Trad
     from apps.execution.paper_executor import open_position_from_signal
 
     try:
-        open_position_from_signal(signal)
+        open_position_from_signal(
+            signal,
+            timeframe="1m",
+            strategy_key=method,
+            enforce_execution_risk=True,
+        )
     except ValueError:
         # position_size rounded to 0 inside open_position_from_signal --
         # shouldn't happen given the lot check above, but that function

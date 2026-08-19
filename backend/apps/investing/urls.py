@@ -12,6 +12,8 @@ from .views import (
     StockWatchlistViewSet,
 )
 
+app_name = "investing"
+
 router = DefaultRouter()
 router.register("stocks", StockViewSet, basename="stock")
 router.register("fundamentals", FundamentalSnapshotViewSet, basename="fundamental-snapshot")

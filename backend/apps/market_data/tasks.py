@@ -40,7 +40,10 @@ def _lookback_days_for_timeframe(timeframe: str) -> int:
 
 
 @shared_task
-def ingest_watchlist_candles(timeframe: str | None = None):
+def ingest_watchlist_candles(
+    timeframe: str | None = None,
+    exclude_timeframes: list[str] | tuple[str, ...] | None = None,
+):
     """
     In BROKER_MODE=paper (the default), this deliberately does nothing
     but log a warning -- there is no broker connection to pull from,
@@ -49,14 +52,14 @@ def ingest_watchlist_candles(timeframe: str | None = None):
     run. Switch BROKER_MODE=live (and fill in ANGEL_ONE_* in .env) once
     you're ready to actually pull real data.
 
-    timeframe=None (the default, and what Celery beat calls this with)
-    sweeps EVERY timeframe in settings.CHART_TIMEFRAMES for every
-    WATCHLIST symbol -- this is what keeps the frontend's timeframe
-    dropdown "live" for whichever interval is currently selected,
-    without the frontend ever needing to trigger a broker call itself
-    (see apps/market_data/views.py: the REST API is read-only).
-    Passing an explicit timeframe (e.g. from the shell, or a one-off
-    beat entry) restricts the sweep to just that one.
+    timeframe=None sweeps settings.CHART_TIMEFRAMES for every WATCHLIST
+    symbol. The five-minute Celery entry passes exclude_timeframes=["1m"]
+    because a dedicated every-minute entry already owns that interval;
+    this prevents duplicate 1m broker requests when those schedules
+    coincide while keeping every higher timeframe current. Passing an
+    explicit timeframe (e.g. from the shell, or a one-off beat entry)
+    restricts the sweep to just that one and takes precedence over the
+    exclusion list.
     """
     if settings.BROKER_MODE != "live":
         logger.warning(
@@ -66,7 +69,11 @@ def ingest_watchlist_candles(timeframe: str | None = None):
         )
         return {"skipped": True, "reason": f"BROKER_MODE={settings.BROKER_MODE}"}
 
-    timeframes = [timeframe] if timeframe else settings.CHART_TIMEFRAMES
+    if timeframe:
+        timeframes = [timeframe]
+    else:
+        excluded = set(exclude_timeframes or ())
+        timeframes = [tf for tf in settings.CHART_TIMEFRAMES if tf not in excluded]
     client = get_broker_client()
     results = []
 

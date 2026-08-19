@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../services/api.js";
+import { storeAuthenticationToken } from "../utils/websocket.js";
 
 /**
  * This page didn't exist until now -- apps.auth_app.urls already
@@ -27,7 +28,7 @@ export default function Login() {
     setLoading(true);
     try {
       const res = await api.post("/auth/token/", { username, password });
-      localStorage.setItem("authToken", res.data.token);
+      storeAuthenticationToken(res.data.token);
       navigate("/");
     } catch (err) {
       setError(

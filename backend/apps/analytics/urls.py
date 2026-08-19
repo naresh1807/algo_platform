@@ -5,6 +5,8 @@ from .views import (
     DailyPnLReportView, PerformanceBreakdownView, PerformanceMetricsViewSet, SharpeRatioView,
 )
 
+app_name = "analytics"
+
 router = DefaultRouter()
 router.register("performance", PerformanceMetricsViewSet, basename="performance-metrics")
 

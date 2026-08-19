@@ -16,6 +16,7 @@ class SignalType(models.TextChoices):
 class SignalStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     APPROVED = "approved", "Approved"
+    EXECUTING = "executing", "Executing"
     REJECTED = "rejected", "Rejected"
     EXECUTED = "executed", "Executed"
     EXPIRED = "expired", "Expired"
