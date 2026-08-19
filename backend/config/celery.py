@@ -23,6 +23,29 @@ if platform.system() == "Windows":
     app.conf.worker_pool = "solo"
     app.conf.worker_concurrency = 1
 
+# --pool=solo means concurrency=1: ONE worker process can only ever run
+# ONE task at a time, full stop -- there is no in-process parallelism to
+# fall back on. Observed for real: ingest_index_chart_candles (looping
+# many symbol x timeframe combinations, each individually retrying with
+# backoff when Angel One is rate-limited) took over 6 minutes end to end
+# under real rate-limit pressure, which on a single default-queue worker
+# completely starves every OTHER scheduled task queued behind it for
+# that whole window -- including ingest_option_chain_snapshots (every 5
+# minutes), so the option chain's own displayed prices silently stopped
+# updating even though nothing about ingest_option_chain_snapshots
+# itself was broken. Routing it onto its own "priority" queue means a
+# second worker process consuming ONLY that queue (see the
+# "Running the project" note in this repo's own docs/README for the
+# exact second `celery worker -Q priority` command) can always run it
+# immediately, independent of however long a slow candle-ingestion task
+# on the default queue is taking. Scoped to just this one task
+# deliberately, not every options/market-data task -- broadening this
+# indiscriminately would just recreate the same starvation risk one
+# queue over.
+app.conf.task_routes = {
+    "apps.options.tasks.ingest_option_chain_snapshots": {"queue": "priority"},
+}
+
 # Scheduled jobs (Celery beat). Times are IST (settings.CELERY_TIMEZONE).
 # NOTE on ordering: ingest-watchlist-candles and generate-signals both
 # run every 5 minutes as independent schedules, so there's no hard

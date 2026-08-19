@@ -7,8 +7,21 @@ import axios from "axios";
  * production the same relative path works as long as Django is served
  * from the same origin (or behind the same reverse proxy).
  */
+// No timeout was set at all before this (axios defaults to 0 = never
+// times out) -- meaning a single stalled request (a DB lock held by
+// concurrent candle ingestion, a dropped connection, a briefly
+// unresponsive dev server) could leave a loading spinner spinning
+// forever with zero feedback and no way to recover short of a full
+// page reload. 20s is generous for even the heaviest real request this
+// app makes (a 2000-row candle fetch normally completes in well under
+// 1s) while still bounding the worst case to something a user would
+// actually wait through before seeing a real error instead of an
+// indefinite spinner.
+const REQUEST_TIMEOUT_MS = 20000;
+
 export const api = axios.create({
   baseURL: "/api",
+  timeout: REQUEST_TIMEOUT_MS,
 });
 
 // Attach the DRF token from localStorage, if present. The manual's
@@ -132,6 +145,16 @@ export const endpoints = {
   optionExpiryStatus: (underlying) =>
     api.get("/options/expiry-status/", { params: { underlying }, validateStatus: (s) => s === 200 || s === 503 }),
   optionChain: (underlying, expiry) => api.get("/options/chain/", { params: { underlying, expiry } }),
+  // apps.options.views.OptionCandlesView -- one exact option contract's
+  // own OHLCV candles (never the underlying's). `params` accepts either
+  // {contract} or {token} (once already known, e.g. for a WS resub) or
+  // {underlying, expiry, strike, option_type} (exactly what an option-
+  // chain row click has before any token is known) plus {timeframe} and
+  // optional {from, to} -- the backend resolves/validates the exact
+  // contract server-side, this app never constructs a token itself.
+  // Undefined keys are dropped by axios's own param serializer, so
+  // callers can pass every field and let whichever identity applies win.
+  optionCandles: (params) => api.get("/options/candles/", { params }),
   bestStrike: (underlying, expiry, direction) =>
     api.get("/options/best-strike/", { params: { underlying, expiry, direction } }),
   // apps.options.views.OptionsStrategySettingView -- the expiry/strike

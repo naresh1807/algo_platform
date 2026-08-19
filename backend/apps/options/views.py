@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from django.core.cache import cache
 from django.utils import timezone
@@ -196,6 +196,112 @@ class OptionChainView(APIView):
             "substituted_expiry": was_substituted,
             "spot": spot,
             "rows": sorted(rows.values(), key=lambda r: r["strike"]),
+        })
+
+
+def _parse_query_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    from django.utils.dateparse import parse_datetime
+
+    parsed = parse_datetime(raw)
+    if parsed is None:
+        raise ValueError(f"{raw!r} is not a valid ISO-8601 datetime.")
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_default_timezone())
+    return parsed
+
+
+class OptionCandlesView(APIView):
+    """
+    GET /api/options/candles/?<identity>&timeframe=5m[&from=&to=]
+
+    `<identity>` is one of:
+      - contract=<OptionContract id>
+      - token=<Angel One symbol_token>
+      - underlying=&expiry=&strike=&option_type= (exactly what an
+        option-chain row click already knows, before any token exists)
+
+    Resolution happens entirely server-side (apps.options.candle_service
+    .resolve_contract) -- the frontend never constructs or guesses a
+    token/tradingsymbol itself, matching this app's "backend is the
+    source of truth for contract identity" convention already
+    established by apps.options.expiry_service/contract_sync for expiry
+    selection. Adapted from apps.market_data.views.HistoricalDataViewSet's
+    own symbol/timeframe query-param convention rather than a literal
+    duplicate of it -- option candles are identified by an exact
+    contract, never just an underlying string, so this is a plain
+    APIView (one contract's own history, custom response shape) instead
+    of a ViewSet/paginated list the way the underlying's candles are.
+
+    404 (not 200-with-empty-list) when the requested identity doesn't
+    resolve to a real, synced contract -- e.g. right after an expiry
+    rollover, when a strike that existed on the old expiry has no
+    equivalent row yet on the new one. The frontend hook
+    (useOptionCandles.js) treats this as the trigger to fall back to the
+    nearest still-listed strike on the same side, rather than silently
+    showing an empty chart for a contract that no longer exists.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .candle_service import (
+            TIMEFRAME_CHOICES,
+            ContractResolutionError,
+            OPTION_EXCHANGE,
+            get_option_candles,
+            resolve_contract,
+        )
+
+        timeframe = request.query_params.get("timeframe", "5m")
+        if timeframe not in TIMEFRAME_CHOICES:
+            return Response(
+                {"error": f"Unsupported timeframe {timeframe!r}. Choose one of: {sorted(TIMEFRAME_CHOICES)}."},
+                status=400,
+            )
+
+        expiry = None
+        expiry_str = request.query_params.get("expiry")
+        if expiry_str:
+            try:
+                expiry = date.fromisoformat(expiry_str)
+            except ValueError:
+                return Response({"error": f"expiry {expiry_str!r} is not a valid YYYY-MM-DD date."}, status=400)
+
+        try:
+            contract = resolve_contract(
+                contract_id=request.query_params.get("contract"),
+                token=request.query_params.get("token"),
+                underlying=request.query_params.get("underlying"),
+                expiry=expiry,
+                strike=request.query_params.get("strike"),
+                option_type=request.query_params.get("option_type"),
+            )
+        except ContractResolutionError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            from_dt = _parse_query_dt(request.query_params.get("from"))
+            to_dt = _parse_query_dt(request.query_params.get("to"))
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
+
+        candles = get_option_candles(contract, timeframe, from_dt=from_dt, to_dt=to_dt)
+
+        return Response({
+            "contract": {
+                "id": contract.id,
+                "token": contract.symbol_token,
+                "trading_symbol": contract.tradingsymbol,
+                "underlying": contract.underlying,
+                "expiry": contract.expiry.isoformat(),
+                "strike": float(contract.strike),
+                "option_type": contract.option_type,
+                "exchange": OPTION_EXCHANGE,
+            },
+            "timeframe": timeframe,
+            "candles": candles,
         })
 
 

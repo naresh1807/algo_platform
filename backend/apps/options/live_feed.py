@@ -42,6 +42,22 @@ _last_snapshot_at: dict[int, object] = {}  # contract_id -> last snapshot dateti
 
 def handle_option_tick(contract_id: int, ltp: float, oi: int, volume: int, bid: float | None, ask: float | None) -> None:
     now = django_timezone.now()
+
+    # Candle aggregation runs on EVERY tick, unthrottled by the
+    # OptionChainSnapshot interval below (that throttle is about how
+    # often we persist a full OI/IV/bid-ask snapshot, not about candle
+    # accuracy) -- apps.options.candle_aggregator.OptionCandleAggregator
+    # does its own internal persist/broadcast throttling, the same
+    # "every tick updates the in-memory bucket, DB writes are rate
+    # limited independently" split apps.market_data.tick_aggregator
+    # already uses for the underlying's own live candles.
+    try:
+        from .candle_aggregator import get_option_candle_aggregator
+
+        get_option_candle_aggregator().on_tick(contract_id, ltp, volume, now)
+    except Exception:
+        logger.exception("handle_option_tick: candle aggregation failed for contract_id=%s", contract_id)
+
     with _lock:
         last = _last_snapshot_at.get(contract_id)
         if last is not None and (now - last) < _MIN_SNAPSHOT_INTERVAL:

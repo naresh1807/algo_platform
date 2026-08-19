@@ -8,10 +8,9 @@ const toChartTime = (timestamp) => Math.floor(new Date(timestamp).getTime() / 10
 
 /**
  * apps.risk.EquitySnapshot's raw account-equity time series
- * (apps.risk.views.EquityCurveView) -- a line series, same lightweight-
- * charts setup as OptionPriceChart.jsx (that component's own docstring
- * explains why: point-in-time readings, not OHLC bars, so a line series
- * is the honest representation, not candles).
+ * (apps.risk.views.EquityCurveView) -- a line series, since these are
+ * point-in-time equity readings, not OHLC bars, so a line is the honest
+ * representation, not candles.
  */
 export default function EquityCurveChart({ points = [], theme = "dark" }) {
   const containerRef = useRef(null);

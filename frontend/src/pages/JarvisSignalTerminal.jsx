@@ -6,6 +6,7 @@ import PriceChart from "../charts/PriceChart.jsx";
 import RSIPanel from "../charts/RSIPanel.jsx";
 import DecisionFactors from "../components/DecisionFactors.jsx";
 import EmptyState from "../components/EmptyState.jsx";
+import ErrorState from "../components/ErrorState.jsx";
 import LoadingSkeleton from "../components/LoadingSkeleton.jsx";
 import OptionChainTable from "../components/OptionChainTable.jsx";
 import OptionContractChartModal from "../components/OptionContractChartModal.jsx";
@@ -15,6 +16,7 @@ import TimeframeSelector from "../components/TimeframeSelector.jsx";
 import Watchlist from "../components/Watchlist.jsx";
 import { DEFAULT_TIMEFRAME, TIMEFRAMES } from "../constants/market.js";
 import { useExpiryStatus } from "../hooks/useExpiryStatus.js";
+import { useLiveIndexSpot } from "../hooks/useLiveIndexSpot.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 import { useThemeStore } from "../store/themeStore.js";
@@ -68,7 +70,16 @@ export default function JarvisSignalTerminal() {
     rolloverRequired, unavailable: expiryUnavailable, error: expiryError,
   } = useExpiryStatus(underlying);
   const [chainRows, setChainRows] = useState([]);
-  const [spot, setSpot] = useState(null);
+  // restSpot is the one-time snapshot from the /options/chain/ REST
+  // response; `spot` prefers a live index-price tick (useLiveIndexSpot
+  // -- same /ws/investing/index-live/ push the Dashboard's index
+  // tickers already use) once one arrives, falling back to restSpot
+  // until then, so the displayed spot never silently goes stale the
+  // way it used to (option premiums in the chain already updated live
+  // via latestOptionUpdate; the underlying's own price didn't).
+  const [restSpot, setRestSpot] = useState(null);
+  const liveSpot = useLiveIndexSpot(underlying);
+  const spot = liveSpot ?? restSpot;
   const chainContainerRef = useRef(null);
   const atmRowRef = useRef(null);
   const [selectedContract, setSelectedContract] = useState(null);
@@ -82,6 +93,8 @@ export default function JarvisSignalTerminal() {
   const [timeframe, setTimeframe] = useState(DEFAULT_TIMEFRAME);
   const [candles, setCandles] = useState([]);
   const [candlesLoading, setCandlesLoading] = useState(true);
+  const [candlesError, setCandlesError] = useState(null);
+  const [candlesRetryToken, setCandlesRetryToken] = useState(0);
   const [indicators, setIndicators] = useState([]);
   const [activeTab, setActiveTab] = useState("positions");
   const [fullscreen, setFullscreen] = useState(false);
@@ -137,7 +150,7 @@ export default function JarvisSignalTerminal() {
     endpoints.optionChain(underlying, expiry).then((res) => {
       if (cancelled) return;
       setChainRows(res.data.rows ?? []);
-      setSpot(res.data.spot ?? null);
+      setRestSpot(res.data.spot ?? null);
     });
     return () => {
       cancelled = true;
@@ -182,14 +195,25 @@ export default function JarvisSignalTerminal() {
     });
   }, [latestOptionUpdate, underlying, expiry]);
 
-  // Candlestick chart -- same load pattern Dashboard.jsx uses.
+  // Candlestick chart -- same load pattern Dashboard.jsx uses, including
+  // its own candlesError/candlesRetryToken (a real fetch failure/timeout
+  // must not collapse into the same "no candles yet" empty state a
+  // genuinely cold-started symbol shows -- see Dashboard.jsx's own
+  // comment on why, and services/api.js's new REQUEST_TIMEOUT_MS).
   useEffect(() => {
     let cancelled = false;
     setCandlesLoading(true);
+    setCandlesError(null);
     endpoints.candles(underlying, timeframe).then((res) => {
       if (!cancelled) setCandles(res.data.results ?? []);
-    }).catch(() => {
-      if (!cancelled) setCandles([]);
+    }).catch((err) => {
+      if (cancelled) return;
+      setCandles([]);
+      setCandlesError(
+        err.code === "ECONNABORTED"
+          ? "The request timed out. The backend may be under load -- try again."
+          : "Could not load candle data."
+      );
     }).finally(() => {
       if (!cancelled) setCandlesLoading(false);
     });
@@ -201,7 +225,7 @@ export default function JarvisSignalTerminal() {
     return () => {
       cancelled = true;
     };
-  }, [underlying, timeframe]);
+  }, [underlying, timeframe, candlesRetryToken]);
 
   const liveCandle =
     !candlesLoading && latestCandle && latestCandle.symbol === underlying && latestCandle.timeframe === timeframe
@@ -326,6 +350,12 @@ export default function JarvisSignalTerminal() {
 
             {candlesLoading ? (
               <LoadingSkeleton height={360} />
+            ) : candlesError ? (
+              <ErrorState
+                title="Couldn't load the chart"
+                detail={candlesError}
+                onRetry={() => setCandlesRetryToken((t) => t + 1)}
+              />
             ) : candles.length === 0 ? (
               <EmptyState title={`No ${underlying} ${timeframe} candles yet`} detail="Run the ingestion task or backfill command to populate candle history." />
             ) : (
@@ -374,7 +404,7 @@ export default function JarvisSignalTerminal() {
                 selectedContractSide={signal?.status === "approved" || signal?.status === "executed" ? signal?.option_side : null}
                 containerRef={chainContainerRef}
                 atmRowRef={atmRowRef}
-                onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType, underlying, expiry })}
+                onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType })}
               />
             )}
           </div>
@@ -537,7 +567,13 @@ export default function JarvisSignalTerminal() {
         )}
       </div>
 
-      <OptionContractChartModal contract={selectedContract} onClose={() => setSelectedContract(null)} />
+      <OptionContractChartModal
+        contract={selectedContract}
+        underlying={underlying}
+        expiry={expiry}
+        chainRows={chainRows}
+        onClose={() => setSelectedContract(null)}
+      />
     </div>
   );
 }

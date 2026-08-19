@@ -71,6 +71,21 @@ _RECONNECT_BACKOFF_INITIAL = 5
 _RECONNECT_BACKOFF_MAX = 60
 _MARKET_CLOSED_POLL_INTERVAL = 60
 
+# SmartWebSocketV2.connect() calls websocket-client's WebSocketApp.
+# run_forever() with no ping_timeout/connect-timeout of its own -- if
+# the initial WS handshake itself never completes (observed for real:
+# on_open never fired, no error, no exception, run_forever() just never
+# returned), this codebase's own reconnect/backoff loop (run_forever()
+# below) never gets a chance to run either, since it's all one blocking
+# call. This bounds how long a single connection ATTEMPT is allowed to
+# stay un-opened before being forced closed and treated as a failure --
+# same "a hang must still surface as an exception" reasoning as
+# apps.market_data.broker_client._call_with_hard_timeout, applied here
+# via SmartWebSocketV2's own close_connection() (confirmed present on
+# the installed package) since a blocking run_forever() can't be
+# time-bounded any other way without a second thread to call it from.
+_CONNECT_TIMEOUT_SECONDS = 20
+
 
 class LiveFeedClient:
     """
@@ -218,7 +233,10 @@ class LiveFeedClient:
         self._token_to_symbol = {info["token"]: symbol for symbol, info in SYMBOL_TOKENS.items()}
         option_token_list = _build_nfo_token_list(self._option_tokens)
 
+        opened = threading.Event()
+
         def on_open(wsapp):
+            opened.set()
             logger.info("Angel One live feed connected -- subscribing to %d symbols.", len(SYMBOL_TOKENS))
             sws.subscribe("live_feed", SUBSCRIBE_MODE_QUOTE, token_list)
             if option_token_list:
@@ -261,7 +279,27 @@ class LiveFeedClient:
         sws.on_error = on_error
         sws.on_close = on_close
 
-        sws.connect()  # blocking for the lifetime of this connection
+        def _watchdog():
+            if not opened.is_set():
+                logger.warning(
+                    "Angel One live feed: WebSocket handshake did not open within %ds -- forcing it closed "
+                    "so run_forever()'s own reconnect/backoff can retry instead of hanging indefinitely.",
+                    _CONNECT_TIMEOUT_SECONDS,
+                )
+                sws.close_connection()
+
+        watchdog_timer = threading.Timer(_CONNECT_TIMEOUT_SECONDS, _watchdog)
+        watchdog_timer.daemon = True
+        watchdog_timer.start()
+        try:
+            sws.connect()  # blocking for the lifetime of this connection
+        finally:
+            watchdog_timer.cancel()
+
+        if not opened.is_set():
+            raise TimeoutError(
+                f"Angel One live feed: WebSocket connection never opened within {_CONNECT_TIMEOUT_SECONDS}s."
+            )
 
     def _index_worker_loop(self) -> None:
         while True:

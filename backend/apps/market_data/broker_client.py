@@ -33,6 +33,22 @@ _SMARTAPI_MIN_REQUEST_INTERVAL = 2.0  # seconds between requests across all thre
 _SMARTAPI_RETRY_ATTEMPTS = 5
 _SMARTAPI_RETRY_BACKOFF_FACTOR = 2.0
 
+# SmartConnect accepts a `timeout` constructor arg and passes it straight
+# through to every underlying `requests.request(..., timeout=self.timeout)`
+# call (confirmed by reading the installed smartapi-python package's own
+# _request() source) -- left unset, it defaults to None, which means
+# "wait forever." That was a real, observed bug: a rate-limited or
+# otherwise unresponsive Angel One login request (generateSession(),
+# called directly in _connect() below, NOT through _smartapi_request's
+# retry/backoff wrapper -- that wrapper only guards calls made AFTER
+# login) hung the entire run_live_feed process indefinitely, with no
+# exception ever raised for run_forever()'s own reconnect/backoff loop to
+# catch -- the process just sat there needing a manual kill. Since
+# `connection` is constructed ONCE per session and reused for every
+# subsequent call (getCandleData/ltpData/placeOrder/getMarketData/...),
+# setting this here bounds ALL of them, not just login.
+_SMARTAPI_REQUEST_TIMEOUT_SECONDS = 20
+
 # Extended-cooldown circuit breaker. AB1021 has been observed in
 # practice (see this project's own incident history) as an ACCOUNT-
 # LEVEL cooldown Angel One imposes for a stretch of minutes, not just
@@ -209,6 +225,55 @@ class BrokerAuthError(Exception):
     pass
 
 
+class _HardTimeout(Exception):
+    """Raised by _call_with_hard_timeout when the wrapped call doesn't finish in time."""
+
+
+def _call_with_hard_timeout(func, timeout_seconds: float, *args, **kwargs):
+    """
+    Runs `func` on a daemon thread and raises _HardTimeout if it hasn't
+    finished within `timeout_seconds` -- a second, independent bound on
+    top of SmartConnect's own `timeout=` constructor arg (see
+    _SMARTAPI_REQUEST_TIMEOUT_SECONDS above), for the case that arg
+    doesn't actually end up bounding the call in practice. Observed for
+    real in this environment: generateSession() (called directly by
+    _connect() below, not through _smartapi_request's retry wrapper --
+    that wrapper only guards calls made AFTER login) hung for several
+    minutes with SmartConnect's own timeout=20 already set and no
+    exception ever raised, which strongly suggests requests/urllib3's
+    timeout wasn't actually bounding whatever stalled (a DNS-resolution
+    hang is a known gap in some requests/urllib3 versions -- their
+    `timeout` covers the connect/read phases, not always the DNS lookup
+    that happens before either). Whatever the exact underlying cause,
+    the actual problem this exists to prevent is worse than any single
+    root cause: run_live_feed's whole reconnect/backoff loop (see
+    LiveFeedClient.run_forever) depends on _connect() eventually
+    RAISING on failure so it can log, back off, and retry -- a call that
+    just hangs forever instead defeats that self-healing entirely, with
+    no way to recover short of an external process kill. If `func`
+    really is permanently stuck (blocked in a syscall Python can't
+    interrupt), this leaks one idle background thread rather than
+    killing the whole process -- an acceptable trade next to "the
+    process can never recover on its own."
+    """
+    result: dict = {}
+
+    def runner():
+        try:
+            result["value"] = func(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised on the calling thread below, must not be lost
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise _HardTimeout(f"{getattr(func, '__qualname__', func)} did not complete within {timeout_seconds}s.")
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
 _shared_client_lock = threading.Lock()
 _shared_client: "BrokerClient | None" = None
 
@@ -345,8 +410,23 @@ class BrokerClient:
             )
 
         totp = pyotp.TOTP(totp_secret).now()
-        connection = SmartConnect(api_key=api_key)
-        session = connection.generateSession(client_id, password, totp)
+        # SmartConnect(...) construction itself is wrapped too, not just
+        # generateSession() -- observed hanging BEFORE any HTTP request is
+        # even made, most likely inside ssl.create_default_context()
+        # (SmartConnect.__init__ builds one unconditionally): on Windows
+        # this can trigger a certificate-store/revocation-check network
+        # call the first time it runs in a process, which isn't bounded
+        # by requests' own `timeout=` at all since no request has been
+        # sent yet. See _call_with_hard_timeout's own docstring for the
+        # full reasoning on why a call hanging here must still surface as
+        # an exception, not an unrecoverable process hang.
+        connection = _call_with_hard_timeout(
+            SmartConnect, _SMARTAPI_REQUEST_TIMEOUT_SECONDS,
+            api_key=api_key, timeout=_SMARTAPI_REQUEST_TIMEOUT_SECONDS,
+        )
+        session = _call_with_hard_timeout(
+            connection.generateSession, _SMARTAPI_REQUEST_TIMEOUT_SECONDS, client_id, password, totp,
+        )
 
         if not session.get("status"):
             raise BrokerAuthError(f"Angel One login failed: {session.get('message')}")
@@ -382,6 +462,84 @@ class BrokerClient:
             "feed_token": self._feed_token,
         }
 
+    def _fetch_candle_rows(
+        self, exchange: str, symboltoken: str, timeframe: str, lookback_days: int, to_date: datetime | None,
+    ) -> list[dict]:
+        """
+        The actual Angel One getCandleData call, generic over ANY
+        exchange+symboltoken -- shared by fetch_recent_candles (below,
+        restricted to the SYMBOL_TOKENS watchlist) and
+        fetch_candles_for_token (any instrument, e.g. an NFO option
+        contract's own symbol_token) so there is exactly one place that
+        builds the request/parses the response, not two that could
+        drift. Returns dicts with just {timestamp, open, high, low,
+        close, volume} -- callers attach their own symbol/timeframe/
+        source framing on top.
+        """
+        if timeframe not in TIMEFRAME_TO_ANGEL_INTERVAL:
+            raise ValueError(
+                f"Unsupported timeframe {timeframe!r} for Angel One ingestion."
+            )
+
+        # Clamp rather than error: the recurring ingestion task calls
+        # this with the same small lookback_days for every timeframe
+        # (it doesn't know per-interval limits), so silently respecting
+        # Angel One's actual per-interval cap keeps that call working
+        # instead of throwing on the finer intervals.
+        max_days = MAX_LOOKBACK_DAYS.get(timeframe, lookback_days)
+        if lookback_days > max_days:
+            logger.warning(
+                "lookback_days=%d exceeds Angel One's %s limit of %d days for a single "
+                "request -- clamping. Call repeatedly with adjusted date ranges for more history.",
+                lookback_days,
+                timeframe,
+                max_days,
+            )
+            lookback_days = max_days
+
+        connection = self._connect()
+        # django_timezone.localtime() converts to settings.TIME_ZONE
+        # (Asia/Kolkata) regardless of the host machine/container's own
+        # system clock timezone -- plain datetime.now() would silently
+        # use whatever the OS is set to, which is wrong the moment this
+        # ever runs somewhere that isn't already set to IST (a fresh
+        # cloud VM defaults to UTC, for example) and Angel One's
+        # fromdate/todate strings need to be in IST to mean what NSE's
+        # own trading-hours convention means. Getting this wrong doesn't
+        # raise an error -- it silently fetches the wrong 5.5-hour
+        # window, which is a worse failure mode than a crash.
+        to_date = django_timezone.localtime(to_date) if to_date is not None else django_timezone.localtime(django_timezone.now())
+        from_date = to_date - timedelta(days=lookback_days)
+
+        response = self._smartapi_request(
+            connection.getCandleData,
+            {
+                "exchange": exchange,
+                "symboltoken": symboltoken,
+                "interval": TIMEFRAME_TO_ANGEL_INTERVAL[timeframe],
+                "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
+                "todate": to_date.strftime("%Y-%m-%d %H:%M"),
+            },
+        )
+
+        if not response.get("status"):
+            raise RuntimeError(
+                f"Angel One candle fetch failed for token={symboltoken}: {response.get('message')}"
+            )
+
+        # Angel One returns rows as [timestamp, open, high, low, close, volume]
+        rows = []
+        for row in response.get("data", []):
+            ts, o, h, l, c, v = row
+            timestamp = datetime.fromisoformat(ts)
+            if django_timezone.is_naive(timestamp):
+                timestamp = django_timezone.make_aware(
+                    timestamp,
+                    django_timezone.get_default_timezone(),
+                )
+            rows.append({"timestamp": timestamp, "open": o, "high": h, "low": l, "close": c, "volume": v})
+        return rows
+
     def fetch_recent_candles(
         self, symbol: str, timeframe: str, lookback_days: int = 5, to_date: datetime | None = None,
     ) -> list[dict]:
@@ -411,82 +569,28 @@ class BrokerClient:
                 f"No symboltoken configured for {symbol} -- add it to "
                 f"SYMBOL_TOKENS in apps/market_data/broker_client.py."
             )
-        if timeframe not in TIMEFRAME_TO_ANGEL_INTERVAL:
-            raise ValueError(
-                f"Unsupported timeframe {timeframe!r} for Angel One ingestion."
-            )
-
-        # Clamp rather than error: the recurring ingestion task calls
-        # this with the same small lookback_days for every timeframe
-        # (it doesn't know per-interval limits), so silently respecting
-        # Angel One's actual per-interval cap keeps that call working
-        # instead of throwing on the finer intervals.
-        max_days = MAX_LOOKBACK_DAYS.get(timeframe, lookback_days)
-        if lookback_days > max_days:
-            logger.warning(
-                "lookback_days=%d exceeds Angel One's %s limit of %d days for a single "
-                "request -- clamping. Call repeatedly with adjusted date ranges for more history.",
-                lookback_days,
-                timeframe,
-                max_days,
-            )
-            lookback_days = max_days
-
-        connection = self._connect()
         token_info = SYMBOL_TOKENS[symbol]
-        # django_timezone.localtime() converts to settings.TIME_ZONE
-        # (Asia/Kolkata) regardless of the host machine/container's own
-        # system clock timezone -- plain datetime.now() would silently
-        # use whatever the OS is set to, which is wrong the moment this
-        # ever runs somewhere that isn't already set to IST (a fresh
-        # cloud VM defaults to UTC, for example) and Angel One's
-        # fromdate/todate strings need to be in IST to mean what NSE's
-        # own trading-hours convention means. Getting this wrong doesn't
-        # raise an error -- it silently fetches the wrong 5.5-hour
-        # window, which is a worse failure mode than a crash.
-        to_date = django_timezone.localtime(to_date) if to_date is not None else django_timezone.localtime(django_timezone.now())
-        from_date = to_date - timedelta(days=lookback_days)
+        rows = self._fetch_candle_rows(token_info["exchange"], token_info["token"], timeframe, lookback_days, to_date)
+        return [
+            {"symbol": symbol, "timeframe": timeframe, "source": "angel_one", **row}
+            for row in rows
+        ]
 
-        response = self._smartapi_request(
-            connection.getCandleData,
-            {
-                "exchange": token_info["exchange"],
-                "symboltoken": token_info["token"],
-                "interval": TIMEFRAME_TO_ANGEL_INTERVAL[timeframe],
-                "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-                "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-            },
-        )
-
-        if not response.get("status"):
-            raise RuntimeError(
-                f"Angel One candle fetch failed for {symbol}: {response.get('message')}"
-            )
-
-        # Angel One returns rows as [timestamp, open, high, low, close, volume]
-        candles = []
-        for row in response.get("data", []):
-            ts, o, h, l, c, v = row
-            timestamp = datetime.fromisoformat(ts)
-            if django_timezone.is_naive(timestamp):
-                timestamp = django_timezone.make_aware(
-                    timestamp,
-                    django_timezone.get_default_timezone(),
-                )
-            candles.append(
-                {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "timestamp": timestamp,
-                    "open": o,
-                    "high": h,
-                    "low": l,
-                    "close": c,
-                    "volume": v,
-                    "source": "angel_one",
-                }
-            )
-        return candles
+    def fetch_candles_for_token(
+        self, exchange: str, symboltoken: str, timeframe: str, lookback_days: int = 5, to_date: datetime | None = None,
+    ) -> list[dict]:
+        """
+        Same Angel One getCandleData call as fetch_recent_candles, but
+        for ANY instrument's own exchange+symboltoken -- not restricted
+        to the small SYMBOL_TOKENS watchlist. Used by
+        apps.options.candle_service for individual NFO option contracts
+        (each OptionContract already carries its own real symbol_token
+        from the instrument master, see apps.options.contract_sync),
+        which will never appear in SYMBOL_TOKENS (that dict is indices
+        only). Returns bare {timestamp, open, high, low, close, volume}
+        dicts -- callers attach their own contract/timeframe framing.
+        """
+        return self._fetch_candle_rows(exchange, symboltoken, timeframe, lookback_days, to_date)
 
     def check_feed_health(self) -> dict:
         """

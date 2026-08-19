@@ -54,6 +54,8 @@ export default function Dashboard() {
   const [timeframe, setTimeframe] = useState(DEFAULT_TIMEFRAME);
   const [candles, setCandles] = useState([]);
   const [candlesLoading, setCandlesLoading] = useState(true);
+  const [candlesError, setCandlesError] = useState(null);
+  const [candlesRetryToken, setCandlesRetryToken] = useState(0);
   const [indicators, setIndicators] = useState([]);
   const [signals, setSignals] = useState([]);
   const [positions, setPositions] = useState([]);
@@ -121,13 +123,27 @@ export default function Dashboard() {
   useEffect(() => {
     let cancelled = false;
     setCandlesLoading(true);
+    setCandlesError(null);
     endpoints
       .candles(symbol, timeframe)
       .then((res) => {
         if (!cancelled) setCandles(res.data.results ?? []);
       })
-      .catch(() => {
-        if (!cancelled) setCandles([]);
+      .catch((err) => {
+        if (cancelled) return;
+        // A genuine fetch failure (timeout, network error, 5xx) is NOT
+        // the same as "no candles ingested yet" -- collapsing both into
+        // an empty candles array used to make a real error look
+        // identical to an ordinary cold-start empty state, with no way
+        // to tell the two apart or retry. axios's own ECONNABORTED code
+        // marks a timeout specifically (see services/api.js's new
+        // REQUEST_TIMEOUT_MS) so that case gets its own clear message.
+        setCandles([]);
+        setCandlesError(
+          err.code === "ECONNABORTED"
+            ? "The request timed out. The backend may be under load -- try again."
+            : "Could not load candle data."
+        );
       })
       .finally(() => {
         if (!cancelled) setCandlesLoading(false);
@@ -145,7 +161,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, candlesRetryToken]);
 
   const liveCandle =
     !candlesLoading && latestCandle && latestCandle.symbol === symbol && latestCandle.timeframe === timeframe
@@ -261,6 +277,12 @@ export default function Dashboard() {
         </div>
         {candlesLoading ? (
           <LoadingSkeleton height={420} />
+        ) : candlesError ? (
+          <ErrorState
+            title="Couldn't load the chart"
+            detail={candlesError}
+            onRetry={() => setCandlesRetryToken((t) => t + 1)}
+          />
         ) : candles.length === 0 ? (
           <EmptyState
             title={`No ${symbol} ${timeframe} candles yet`}

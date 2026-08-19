@@ -479,6 +479,20 @@ correctly applied. To actually run them continuously:
 celery -A config worker -l info
 celery -A config beat -l info
 ```
+On Windows, `--pool=solo` is forced automatically (`config/celery.py`),
+which means that ONE worker process can only run ONE task at a time --
+a slow task (e.g. `ingest_index_chart_candles` retrying through Angel
+One rate limits) blocks every other scheduled task queued behind it,
+including the option chain's own 5-minute refresh
+(`ingest_option_chain_snapshots`), which is why the option chain can
+appear to silently stop updating under real rate-limit pressure even
+though nothing is actually broken. `config/celery.py` routes that one
+task onto its own `priority` queue for exactly this reason -- run a
+**second** worker consuming just that queue so it's never starved:
+```bash
+# a 3rd terminal, alongside the default-queue worker above:
+celery -A config worker -l info -Q priority
+```
 
 For the chart/index cards to move **tick-by-tick** (not just every
 60s-3min from the Celery beat schedule above), also run the live tick
@@ -535,6 +549,7 @@ Celery worker + beat process:
 ```bash
 celery -A config worker -l info
 celery -A config beat -l info
+celery -A config worker -l info -Q priority   # see the note above about why this second worker exists
 ```
 Plus, for real tick-by-tick chart/index-card movement (BROKER_MODE=live only):
 ```bash

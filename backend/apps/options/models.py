@@ -105,6 +105,46 @@ class OptionChainSnapshot(models.Model):
         return f"{self.contract} @ {self.timestamp}: OI={self.open_interest}"
 
 
+class OptionCandle(models.Model):
+    """
+    One OHLCV bar for one exact OPTION CONTRACT -- the option-chart
+    equivalent of apps.market_data.models.HistoricalData, deliberately a
+    SEPARATE table rather than adding contract-scoping columns onto
+    HistoricalData: that model is keyed by a plain `symbol` string
+    (NIFTY/BANKNIFTY/...) and every existing backtest/indicator query
+    (apps.market_data.indicators, apps.analytics.backtest) filters it by
+    that string. Bolting an option contract's own identity onto the same
+    table would mean either a nullable FK that's meaningless for every
+    existing row, or overloading `symbol` with a tradingsymbol string
+    for options only -- both risk silently mixing an option's own OHLC
+    with the underlying's spot candles in a query that forgot to filter
+    it out. Keyed by `contract` (FK, not underlying+strike+expiry+type as
+    separate columns) so a candle is unambiguously tied to exactly one
+    OptionContract row and can never be queried against the wrong one.
+    """
+
+    contract = models.ForeignKey(OptionContract, on_delete=models.CASCADE, related_name="candles")
+    timeframe = models.CharField(max_length=8, help_text="e.g. 1m, 5m, 15m -- same convention as HistoricalData.timeframe")
+    timestamp = models.DateTimeField(db_index=True)
+    open = models.DecimalField(max_digits=14, decimal_places=4)
+    high = models.DecimalField(max_digits=14, decimal_places=4)
+    low = models.DecimalField(max_digits=14, decimal_places=4)
+    close = models.DecimalField(max_digits=14, decimal_places=4)
+    volume = models.BigIntegerField(default=0)
+    source = models.CharField(max_length=64, default="angel_one", help_text="e.g. angel_one (REST backfill), angel_one_live (tick aggregation)")
+
+    class Meta:
+        db_table = "option_candles"
+        unique_together = ("contract", "timeframe", "timestamp")
+        ordering = ["-timestamp"]
+        indexes = [
+            models.Index(fields=["contract", "timeframe", "-timestamp"]),
+        ]
+
+    def __str__(self):
+        return f"{self.contract} {self.timeframe} @ {self.timestamp}"
+
+
 class OptionsStrategySetting(models.Model):
     """
     Singleton (always exactly one row, same enforced-pk=1 pattern as

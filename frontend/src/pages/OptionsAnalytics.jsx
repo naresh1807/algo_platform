@@ -5,6 +5,7 @@ import OptionContractChartModal from "../components/OptionContractChartModal.jsx
 import StatusBadge from "../components/StatusBadge.jsx";
 import EmptyState from "../components/EmptyState.jsx";
 import { useExpiryStatus } from "../hooks/useExpiryStatus.js";
+import { useLiveIndexSpot } from "../hooks/useLiveIndexSpot.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 
@@ -48,7 +49,18 @@ export default function OptionsAnalytics() {
     rolloverRequired, unavailable: expiryUnavailable, error: expiryError,
   } = useExpiryStatus(underlying);
   const [chainRows, setChainRows] = useState([]);
-  const [spot, setSpot] = useState(null);
+  // restSpot is the one-time snapshot from the /options/chain/ REST
+  // response (real, but only as fresh as the last fetch). `spot`
+  // prefers a live index-price tick (useLiveIndexSpot, the same
+  // /ws/investing/index-live/ push IndexTickerBar/TopBar already use)
+  // once one arrives, falling back to restSpot until then -- so the
+  // displayed spot never silently goes stale for the rest of the
+  // session the way it used to (individual option premiums already
+  // updated live via latestOptionUpdate; the underlying's own price
+  // didn't).
+  const [restSpot, setRestSpot] = useState(null);
+  const liveSpot = useLiveIndexSpot(underlying);
+  const spot = liveSpot ?? restSpot;
   const [chainLoading, setChainLoading] = useState(false);
   const chainContainerRef = useRef(null);
   const atmRowRef = useRef(null);
@@ -109,7 +121,7 @@ export default function OptionsAnalytics() {
       setChainLoading(false);
       if (chainRes.status === "fulfilled") {
         setChainRows(chainRes.value.data.rows ?? []);
-        setSpot(chainRes.value.data.spot ?? null);
+        setRestSpot(chainRes.value.data.spot ?? null);
       } else {
         setError(
           "Could not load the option chain -- make sure OptionContract rows exist for this " +
@@ -292,7 +304,7 @@ export default function OptionsAnalytics() {
             flash={flash}
             containerRef={chainContainerRef}
             atmRowRef={atmRowRef}
-            onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType, underlying, expiry })}
+            onCellClick={(strike, optionType) => setSelectedContract({ strike, optionType })}
           />
         )}
         {expiry && !chainLoading && chainRows.length === 0 && !error && (
@@ -418,7 +430,13 @@ export default function OptionsAnalytics() {
         </>
       )}
 
-      <OptionContractChartModal contract={selectedContract} onClose={() => setSelectedContract(null)} />
+      <OptionContractChartModal
+        contract={selectedContract}
+        underlying={underlying}
+        expiry={expiry}
+        chainRows={chainRows}
+        onClose={() => setSelectedContract(null)}
+      />
     </div>
   );
 }

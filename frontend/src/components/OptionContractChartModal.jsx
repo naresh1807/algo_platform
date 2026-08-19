@@ -1,60 +1,87 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { X } from "lucide-react";
 
-import OptionPriceChart from "../charts/OptionPriceChart.jsx";
-import { endpoints } from "../services/api.js";
+import MACDPanel from "../charts/MACDPanel.jsx";
+import OptionCandleChart from "../charts/OptionCandleChart.jsx";
+import RSIPanel from "../charts/RSIPanel.jsx";
+import EmptyState from "./EmptyState.jsx";
+import ErrorState from "./ErrorState.jsx";
+import IndicatorToggles from "./IndicatorToggles.jsx";
+import LoadingSkeleton from "./LoadingSkeleton.jsx";
+import TimeframeSelector from "./TimeframeSelector.jsx";
+import { TIMEFRAMES } from "../constants/market.js";
+import { useOptionCandles } from "../hooks/useOptionCandles.js";
 import { useThemeStore } from "../store/themeStore.js";
+import { computeOptionIndicators, computeSupertrend, computeVWAP } from "../utils/optionIndicators.js";
+
+const DEFAULT_TOGGLES = { ema9: true, ema21: true, vwap: true, supertrend: false, rsi: false, macd: false, volume: true };
+
+// A subset of TIMEFRAMES -- an option contract chart doesn't need the
+// underlying's full 1m-1d range; 1h/1d option candles are rarely
+// useful for an intraday premium chart and would mostly just show
+// sparse bars. Matches WORKSPACE_TIMEFRAMES' own "curated subset, not
+// the full list" convention in JarvisSignalTerminal.jsx.
+const CONTRACT_TIMEFRAMES = TIMEFRAMES.filter((t) => ["1m", "5m", "15m", "30m"].includes(t.value));
+
+function mergeLiveCandle(candles, liveCandle) {
+  if (!liveCandle) return candles;
+  if (candles.length === 0) return [{ time: liveCandle.timestamp, open: liveCandle.open, high: liveCandle.high, low: liveCandle.low, close: liveCandle.close, volume: liveCandle.volume }];
+  const lastTime = new Date(candles[candles.length - 1].time).getTime();
+  const liveTime = new Date(liveCandle.timestamp).getTime();
+  const bar = { time: liveCandle.timestamp, open: liveCandle.open, high: liveCandle.high, low: liveCandle.low, close: liveCandle.close, volume: liveCandle.volume };
+  if (liveTime === lastTime) return [...candles.slice(0, -1), bar];
+  if (liveTime > lastTime) return [...candles, bar];
+  return candles;
+}
 
 /**
  * Broker-app-parity popup (manual's "click a strike to see its own
- * chart" convention, matching what Kite/Angel One do) -- opened from
- * OptionsAnalytics.jsx's chain table by clicking a strike's CE/PE LTP
- * cell. `contract` is {strike, optionType, underlying, expiry} | null;
- * rendering nothing when null is what makes this a no-op to mount
- * once in the page rather than every row needing its own modal
- * instance.
+ * chart" convention) -- opened from the option chain table's CE/PE LTP
+ * cells. Renders the SELECTED OPTION CONTRACT's own real OHLC
+ * candlestick chart (never the underlying's, never a line synthesized
+ * from LTP alone -- apps.options.candle_service is the backend's real
+ * Angel One-backed candle history for exactly this contract's own
+ * symbol_token) with volume and toggleable indicators, replacing the
+ * previous OptionPriceChart line-only view.
+ *
+ * `underlying`/`expiry` are the PAGE's live current values (not frozen
+ * at click time) so a rollover that happens while this modal is open
+ * is picked up automatically -- see useOptionCandles.js's own docstring
+ * for the same-side nearest-strike fallback this triggers if the exact
+ * strike no longer exists on the new expiry. `chainRows` is the page's
+ * already-loaded chain for `expiry`, used only for that fallback.
  */
-export default function OptionContractChartModal({ contract, onClose }) {
-  const [snapshots, setSnapshots] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+export default function OptionContractChartModal({ contract, underlying, expiry, chainRows = [], onClose }) {
   const theme = useThemeStore((s) => s.theme);
+  const [timeframe, setTimeframe] = useState("5m");
+  const [chartType, setChartType] = useState("candlestick");
+  const [toggles, setToggles] = useState(DEFAULT_TOGGLES);
 
-  useEffect(() => {
-    if (!contract) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    endpoints
-      .optionContractHistory(contract.underlying, contract.expiry, contract.strike, contract.optionType)
-      .then((res) => {
-        if (cancelled) return;
-        setSnapshots(res.data.results ?? []);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setError("Could not load this contract's price history.");
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [contract]);
+  const strike = contract?.strike ?? null;
+  const optionType = contract?.optionType ?? null;
 
-  useEffect(() => {
-    if (!contract) return undefined;
-    const onKeyDown = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [contract, onClose]);
+  const { contract: resolved, candles, liveCandle, loading, error, stale } = useOptionCandles({
+    underlying: contract ? underlying : null,
+    expiry: contract ? expiry : null,
+    strike,
+    optionType,
+    timeframe,
+    chainRows,
+  });
+
+  const merged = useMemo(() => mergeLiveCandle(candles, liveCandle), [candles, liveCandle]);
+  const optionIndicators = useMemo(() => computeOptionIndicators(merged), [merged]);
+  const vwapSeries = useMemo(() => (toggles.vwap ? computeVWAP(merged) : []), [merged, toggles.vwap]);
+  const supertrendSeries = useMemo(() => (toggles.supertrend ? computeSupertrend(merged) : []), [merged, toggles.supertrend]);
+
+  const toggleIndicator = (key) => setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
 
   if (!contract) return null;
 
-  const latest = snapshots[0]; // API returns newest-first
   const titleId = "option-contract-modal-title";
+  const label = resolved
+    ? `${resolved.underlying} ${resolved.strike} ${resolved.option_type}`
+    : `${underlying ?? ""} ${strike ?? ""} ${optionType ?? ""}`;
 
   return (
     <div
@@ -69,41 +96,83 @@ export default function OptionContractChartModal({ contract, onClose }) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        style={{ width: "min(720px, 92vw)", margin: 0 }}
+        style={{ width: "min(920px, 95vw)", margin: 0 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <h3 id={titleId} style={{ margin: 0 }}>
-            {contract.underlying} {contract.strike} {contract.optionType}
+            {label}
             <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)", marginLeft: 8 }}>
-              exp {contract.expiry}
+              Expiry: {resolved?.expiry ?? expiry} | {timeframe}
             </span>
+            {stale && (
+              <span className="badge badge-red" style={{ marginLeft: 8, fontSize: 10 }} title="Live feed reconnecting -- candles may be momentarily stale">
+                Reconnecting…
+              </span>
+            )}
           </h3>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
             <X size={16} />
           </button>
         </div>
 
-        {latest && (
-          <div style={{ display: "flex", gap: 16, margin: "8px 0 4px", fontSize: 13 }}>
-            <span>LTP <strong>{latest.ltp}</strong></span>
-            <span style={{ color: "var(--muted)" }}>OI {Number(latest.open_interest).toLocaleString()}</span>
-            <span style={{ color: "var(--muted)" }}>Vol {Number(latest.volume).toLocaleString()}</span>
-            {latest.iv != null && <span style={{ color: "var(--muted)" }}>IV {latest.iv}%</span>}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
+          <IndicatorToggles toggles={toggles} onToggle={toggleIndicator} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div role="group" aria-label="Chart type" style={{ display: "inline-flex", gap: 2, background: "var(--elevated)", padding: 3, borderRadius: "var(--radius-sm)" }}>
+              {[{ value: "candlestick", label: "Candles" }, { value: "line", label: "Line" }].map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setChartType(opt.value)}
+                  aria-pressed={chartType === opt.value}
+                  style={{
+                    border: "none", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    background: chartType === opt.value ? "var(--accent)" : "transparent",
+                    color: chartType === opt.value ? "var(--accent-contrast)" : "var(--muted)",
+                  }}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <TimeframeSelector options={CONTRACT_TIMEFRAMES} value={timeframe} onChange={setTimeframe} />
           </div>
-        )}
+        </div>
 
-        {loading && <p style={{ color: "var(--muted)", marginTop: 12 }}>Loading…</p>}
-        {error && <p style={{ color: "var(--red)", marginTop: 12 }}>{error}</p>}
-        {!loading && !error && snapshots.length === 0 && (
-          <p style={{ color: "var(--muted)", marginTop: 12 }}>
-            No snapshot history yet for this contract -- check back after the next ingestion cycle.
-          </p>
-        )}
-        {!loading && !error && snapshots.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <OptionPriceChart snapshots={snapshots} theme={theme} />
-          </div>
+        {loading ? (
+          <LoadingSkeleton height={380} />
+        ) : error ? (
+          <ErrorState title="Couldn't load this contract's chart" detail={error} />
+        ) : merged.length === 0 ? (
+          <EmptyState
+            title={`No ${label} ${timeframe} candles yet`}
+            detail="Angel One has no historical data for this contract yet -- check back after the next ingestion cycle, or try a different timeframe."
+          />
+        ) : (
+          <>
+            <OptionCandleChart
+              candles={candles}
+              liveCandle={liveCandle}
+              indicators={optionIndicators}
+              vwap={vwapSeries}
+              supertrend={supertrendSeries}
+              theme={theme}
+              chartType={chartType}
+              toggles={toggles}
+              height={380}
+            />
+            {toggles.rsi && (
+              <div style={{ marginTop: 8 }}>
+                <RSIPanel indicators={optionIndicators} theme={theme} />
+              </div>
+            )}
+            {toggles.macd && (
+              <div style={{ marginTop: 8 }}>
+                <MACDPanel indicators={optionIndicators} theme={theme} />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

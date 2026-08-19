@@ -2424,3 +2424,323 @@ class FeatureStoreTests(TestCase):
         self.assertEqual(vector["expiry"], expiry.isoformat())
         self.assertEqual(vector["strikeDistance"], 100.0)
         self.assertIsNotNone(vector["riskRewardScore"])
+
+
+def _make_contract(underlying="NIFTY", expiry=None, strike=24500, option_type="CE", token="tok_candle_ce"):
+    expiry = expiry or (date.today() + timedelta(days=3))
+    return OptionContract.objects.create(
+        underlying=underlying, expiry=expiry, strike=strike, option_type=option_type,
+        symbol_token=token, tradingsymbol=f"{underlying}{strike}{option_type}", lot_size=25,
+    )
+
+
+class ContractResolutionTests(TestCase):
+    """
+    apps.options.candle_service.resolve_contract -- the ONE place a
+    click's {underlying, expiry, strike, option_type} (or an already-
+    known contract id/token) turns into a real OptionContract row.
+    Covers scenarios 1/2 (exact CE vs. exact PE never cross-resolve).
+    """
+
+    def setUp(self):
+        self.expiry = date.today() + timedelta(days=3)
+        self.ce = _make_contract(strike=24500, option_type="CE", token="tok_ce_24500")
+        self.pe = _make_contract(strike=24500, option_type="PE", token="tok_pe_24500")
+
+    def test_resolves_exact_ce_not_pe(self):
+        from .candle_service import resolve_contract
+
+        resolved = resolve_contract(underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="CE")
+        self.assertEqual(resolved.id, self.ce.id)
+        self.assertNotEqual(resolved.id, self.pe.id)
+
+    def test_resolves_exact_pe_not_ce(self):
+        from .candle_service import resolve_contract
+
+        resolved = resolve_contract(underlying="NIFTY", expiry=self.expiry, strike=24500, option_type="PE")
+        self.assertEqual(resolved.id, self.pe.id)
+        self.assertNotEqual(resolved.id, self.ce.id)
+
+    def test_resolves_by_contract_id(self):
+        from .candle_service import resolve_contract
+
+        self.assertEqual(resolve_contract(contract_id=self.ce.id).id, self.ce.id)
+
+    def test_resolves_by_token(self):
+        from .candle_service import resolve_contract
+
+        self.assertEqual(resolve_contract(token="tok_pe_24500").id, self.pe.id)
+
+    def test_unknown_identity_raises_resolution_error(self):
+        from .candle_service import ContractResolutionError, resolve_contract
+
+        with self.assertRaises(ContractResolutionError):
+            resolve_contract(underlying="NIFTY", expiry=self.expiry, strike=99999, option_type="CE")
+
+    def test_no_identity_given_raises_resolution_error(self):
+        from .candle_service import ContractResolutionError, resolve_contract
+
+        with self.assertRaises(ContractResolutionError):
+            resolve_contract()
+
+    def test_garbage_strike_raises_resolution_error_not_500(self):
+        from .candle_service import ContractResolutionError, resolve_contract
+
+        with self.assertRaises(ContractResolutionError):
+            resolve_contract(underlying="NIFTY", expiry=self.expiry, strike="not-a-number", option_type="CE")
+
+
+class OptionCandleServiceTests(TestCase):
+    """
+    apps.options.candle_service.get_option_candles -- DB-first serving,
+    OHLC validation, and dedupe/sort guarantees. Covers scenarios 6 (no
+    duplicates), 15 (empty data handled honestly), and the "avoid a
+    broker call when the DB already has valid candles" caching requirement.
+    """
+
+    def setUp(self):
+        self.contract = _make_contract()
+
+    def test_fresh_db_rows_served_without_any_broker_call(self):
+        from .candle_service import get_option_candles
+        from .models import OptionCandle
+
+        OptionCandle.objects.create(
+            contract=self.contract, timeframe="5m", timestamp=timezone.now(),
+            open=100, high=105, low=98, close=103, volume=1000, source="angel_one",
+        )
+        with patch("apps.options.broker_client.get_option_chain_client") as mocked_client:
+            candles = get_option_candles(self.contract, "5m")
+        mocked_client.assert_not_called()
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0]["close"], 103.0)
+
+    def test_empty_history_returns_empty_list_not_fake_candles(self):
+        from .candle_service import get_option_candles
+
+        with override_settings(BROKER_MODE="paper"):
+            candles = get_option_candles(self.contract, "5m")
+        self.assertEqual(candles, [])
+
+    def test_stale_db_triggers_broker_fetch_and_upsert(self):
+        from .candle_service import get_option_candles
+        from .models import OptionCandle
+
+        stale_ts = timezone.now() - timedelta(hours=6)
+        OptionCandle.objects.create(
+            contract=self.contract, timeframe="5m", timestamp=stale_ts,
+            open=100, high=105, low=98, close=103, volume=1000, source="angel_one",
+        )
+        fresh_ts = timezone.now()
+        fake_client = type("FakeClient", (), {
+            "fetch_candles_for_token": lambda self, exchange, token, timeframe, lookback_days=5, to_date=None: [
+                {"timestamp": fresh_ts, "open": 110, "high": 115, "low": 108, "close": 112, "volume": 500},
+            ],
+        })()
+        with override_settings(BROKER_MODE="live"), \
+             patch("apps.options.broker_client.get_option_chain_client", return_value=fake_client):
+            candles = get_option_candles(self.contract, "5m")
+        self.assertEqual(OptionCandle.objects.filter(contract=self.contract).count(), 2)
+        self.assertAlmostEqual(candles[-1]["close"], 112.0)
+
+    def test_invalid_ohlc_rows_are_dropped_not_saved(self):
+        from .candle_service import get_option_candles
+        from .models import OptionCandle
+
+        stale_ts = timezone.now() - timedelta(hours=6)
+        OptionCandle.objects.create(
+            contract=self.contract, timeframe="5m", timestamp=stale_ts,
+            open=100, high=105, low=98, close=103, volume=1000, source="angel_one",
+        )
+        bad_ts = timezone.now()
+        fake_client = type("FakeClient", (), {
+            "fetch_candles_for_token": lambda self, exchange, token, timeframe, lookback_days=5, to_date=None: [
+                # high < low is impossible OHLC -- must be rejected, never stored.
+                {"timestamp": bad_ts, "open": 100, "high": 90, "low": 95, "close": 92, "volume": 10},
+            ],
+        })()
+        with override_settings(BROKER_MODE="live"), \
+             patch("apps.options.broker_client.get_option_chain_client", return_value=fake_client):
+            get_option_candles(self.contract, "5m")
+        self.assertFalse(OptionCandle.objects.filter(contract=self.contract, timestamp=bad_ts).exists())
+
+    def test_duplicate_timeframe_timestamp_never_stored_twice(self):
+        from .models import OptionCandle
+
+        ts = timezone.now()
+        OptionCandle.objects.create(
+            contract=self.contract, timeframe="5m", timestamp=ts,
+            open=100, high=105, low=98, close=103, volume=1000, source="angel_one",
+        )
+        OptionCandle.objects.update_or_create(
+            contract=self.contract, timeframe="5m", timestamp=ts,
+            defaults={"open": 101, "high": 106, "low": 99, "close": 104, "volume": 1200, "source": "angel_one_live"},
+        )
+        self.assertEqual(OptionCandle.objects.filter(contract=self.contract, timeframe="5m", timestamp=ts).count(), 1)
+
+    def test_results_sorted_ascending(self):
+        from .candle_service import get_option_candles
+        from .models import OptionCandle
+
+        now = timezone.now()
+        OptionCandle.objects.create(contract=self.contract, timeframe="5m", timestamp=now, open=1, high=2, low=1, close=2, volume=1)
+        OptionCandle.objects.create(contract=self.contract, timeframe="5m", timestamp=now - timedelta(minutes=5), open=1, high=2, low=1, close=1.5, volume=1)
+        candles = get_option_candles(self.contract, "5m")
+        times = [c["time"] for c in candles]
+        self.assertEqual(times, sorted(times))
+
+
+class OptionCandlesViewTests(APITestCase):
+    """
+    GET /api/options/candles/ -- scenarios 1/2 (exact CE/PE), 19 (auth
+    enforced), and honest 404 on a contract that doesn't exist (e.g.
+    right after rollover), matching apps.options.candle_service's own
+    "backend is the source of truth for contract identity" contract.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="candle_trader", password="pw")
+        self.expiry = date.today() + timedelta(days=3)
+        self.ce = _make_contract(strike=24500, option_type="CE", token="tok_view_ce", expiry=self.expiry)
+        self.pe = _make_contract(strike=24500, option_type="PE", token="tok_view_pe", expiry=self.expiry)
+        from .models import OptionCandle
+
+        OptionCandle.objects.create(
+            contract=self.ce, timeframe="5m", timestamp=timezone.now(),
+            open=100, high=105, low=98, close=103, volume=1000, source="angel_one",
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get("/api/options/candles/", {
+            "underlying": "NIFTY", "expiry": self.expiry.isoformat(), "strike": 24500, "option_type": "CE",
+        })
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_click_ce_returns_exact_ce_contract_and_candles(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/options/candles/", {
+            "underlying": "NIFTY", "expiry": self.expiry.isoformat(), "strike": 24500,
+            "option_type": "CE", "timeframe": "5m",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["contract"]["id"], self.ce.id)
+        self.assertEqual(response.data["contract"]["option_type"], "CE")
+        self.assertEqual(response.data["contract"]["token"], "tok_view_ce")
+        self.assertEqual(response.data["contract"]["exchange"], "NFO")
+        self.assertEqual(len(response.data["candles"]), 1)
+        self.assertEqual(response.data["candles"][0]["close"], 103.0)
+
+    def test_click_pe_never_returns_ce_data(self):
+        # The PE side has zero seeded candles, so the DB-freshness check
+        # would fail and get_option_candles would otherwise attempt a
+        # REAL Angel One call here -- BROKER_MODE=paper keeps this test
+        # (which is only about CE/PE never cross-contaminating, not
+        # about broker fetch behavior) from ever touching the network,
+        # same reasoning ContractSyncTests' own docstring gives.
+        self.client.force_authenticate(self.user)
+        with override_settings(BROKER_MODE="paper"):
+            response = self.client.get("/api/options/candles/", {
+                "underlying": "NIFTY", "expiry": self.expiry.isoformat(), "strike": 24500,
+                "option_type": "PE", "timeframe": "5m",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["contract"]["id"], self.pe.id)
+        self.assertEqual(response.data["candles"], [])  # no candles seeded for the PE side
+
+    def test_resolve_by_contract_id(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/options/candles/", {"contract": self.ce.id, "timeframe": "5m"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["contract"]["id"], self.ce.id)
+
+    def test_nonexistent_contract_returns_404_not_empty_200(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/options/candles/", {
+            "underlying": "NIFTY", "expiry": self.expiry.isoformat(), "strike": 99999,
+            "option_type": "CE", "timeframe": "5m",
+        })
+        self.assertEqual(response.status_code, 404)
+
+    def test_unsupported_timeframe_rejected(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/api/options/candles/", {"contract": self.ce.id, "timeframe": "7m"})
+        self.assertEqual(response.status_code, 400)
+
+
+class OptionCandleAggregatorTests(TestCase):
+    """
+    apps.options.candle_aggregator.OptionCandleAggregator -- bucket
+    boundaries, rollover-persists-the-closed-bar, and Channels group
+    naming/isolation (scenario 8: a new candle starts at the correct
+    timeframe boundary).
+    """
+
+    def test_bucket_rollover_persists_previous_bar_and_opens_new_one(self):
+        from .candle_aggregator import OptionCandleAggregator
+        from .models import OptionCandle
+
+        contract = _make_contract(token="tok_agg")
+        aggregator = OptionCandleAggregator(timeframes=["5m"])
+
+        t0 = _ist(2026, 8, 19, 10, 0)
+        aggregator.on_tick(contract.id, 100.0, 1000, t0)
+        aggregator.on_tick(contract.id, 102.0, 1200, t0 + timedelta(minutes=1))
+
+        t1 = t0 + timedelta(minutes=5)  # next 5m bucket
+        aggregator.on_tick(contract.id, 108.0, 1500, t1)
+
+        saved = list(OptionCandle.objects.filter(contract=contract, timeframe="5m").order_by("timestamp"))
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(float(saved[0].close), 102.0)  # first bucket froze at its last tick before rollover
+        self.assertEqual(float(saved[1].open), 108.0)   # new bucket opened fresh, not carrying over the old close
+
+    def test_group_name_is_contract_and_timeframe_specific(self):
+        from .candle_aggregator import group_name
+
+        self.assertEqual(group_name(42, "5m"), "option_candles_42_5m")
+        self.assertNotEqual(group_name(42, "5m"), group_name(43, "5m"))
+        self.assertNotEqual(group_name(42, "5m"), group_name(42, "1m"))
+
+
+class OptionCandleConsumerTests(TestCase):
+    """
+    apps.options.consumers.OptionCandleConsumer -- verifies group
+    isolation actually holds at the WebSocket transport layer, not just
+    in the group-naming helper: a broadcast to one contract+timeframe's
+    group must never reach a browser connected to a DIFFERENT one.
+    """
+
+    @override_settings(CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}})
+    def test_only_matching_contract_timeframe_group_receives_broadcast(self):
+        import asyncio
+
+        from channels.layers import get_channel_layer
+        from channels.routing import URLRouter
+        from channels.testing import WebsocketCommunicator
+
+        from .routing import websocket_urlpatterns
+
+        async def scenario():
+            app = URLRouter(websocket_urlpatterns)
+            comm_a = WebsocketCommunicator(app, "/ws/options/candles/1/5m/")
+            comm_b = WebsocketCommunicator(app, "/ws/options/candles/2/5m/")
+            try:
+                connected_a, _ = await comm_a.connect()
+                connected_b, _ = await comm_b.connect()
+                self.assertTrue(connected_a)
+                self.assertTrue(connected_b)
+
+                channel_layer = get_channel_layer()
+                await channel_layer.group_send(
+                    "option_candles_1_5m",
+                    {"type": "candle_update", "data": {"contract_id": 1, "timeframe": "5m", "close": 123.0}},
+                )
+
+                message = await comm_a.receive_json_from(timeout=2)
+                self.assertEqual(message["contract_id"], 1)
+                self.assertTrue(await comm_b.receive_nothing(timeout=0.5))
+            finally:
+                await comm_a.disconnect()
+                await comm_b.disconnect()
+
+        asyncio.run(scenario())
