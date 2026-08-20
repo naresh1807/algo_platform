@@ -53,20 +53,26 @@ class ComputeDailyPerformanceTests(TestCase):
         self.assertIsNone(metrics.net_pnl)
 
     def test_net_pnl_nets_wins_and_losses(self):
-        signal = TradingSignal.objects.create(
-            symbol="NIFTY", signal_type=SignalType.BUY, entry_price=Decimal("100"),
-            stop_loss=Decimal("95"), total_score=1, technical_score=1,
-            sentiment_score=0, risk_score=1, regime="trending",
-            status=SignalStatus.EXECUTED, reason="test",
-        )
+        # Two separate signals -- OpenPosition.signal is unique (see
+        # execution.migrations.0005_brokerorder_openposition_signal_unique),
+        # so two closed positions on the same day can no longer share one
+        # signal row the way this test originally assumed.
+        def _make_signal():
+            return TradingSignal.objects.create(
+                symbol="NIFTY", signal_type=SignalType.BUY, entry_price=Decimal("100"),
+                stop_loss=Decimal("95"), total_score=1, technical_score=1,
+                sentiment_score=0, risk_score=1, regime="trending",
+                status=SignalStatus.EXECUTED, reason="test",
+            )
+
         today = timezone.now()
         OpenPosition.objects.create(
-            signal=signal, symbol="NIFTY", side="long", qty=10,
+            signal=_make_signal(), symbol="NIFTY", side="long", qty=10,
             entry_price=Decimal("100"), stop_loss=Decimal("95"),
             unrealized_pnl=Decimal("100"), closed_at=today,
         )
         OpenPosition.objects.create(
-            signal=signal, symbol="NIFTY", side="long", qty=10,
+            signal=_make_signal(), symbol="NIFTY", side="long", qty=10,
             entry_price=Decimal("100"), stop_loss=Decimal("95"),
             unrealized_pnl=Decimal("-40"), closed_at=today,
         )

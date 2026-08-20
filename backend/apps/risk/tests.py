@@ -165,9 +165,13 @@ class EquityCurveViewTests(TestCase):
 
     def _client(self):
         from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Group
         from rest_framework.test import APIClient
 
         user = get_user_model().objects.create_user(username="trader_eq", password="pw")
+        # EquityCurveView requires IsTraderOrAdmin (common.permissions) --
+        # a plain authenticated user with no RBAC group membership 403s.
+        user.groups.add(Group.objects.get_or_create(name="Trader")[0])
         client = APIClient()
         client.force_authenticate(user)
         return client

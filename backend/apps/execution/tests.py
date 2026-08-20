@@ -621,13 +621,24 @@ class LiveExecutionSafetyGateTests(TestCase):
 
     @override_settings(LIVE_TRADING_ENABLED=False)
     def test_live_cycle_is_disarmed_before_reconciliation_or_submission(self):
+        """
+        run_trading_cycle() no longer short-circuits to a bare
+        {"skipped": True} for a disarmed live deployment with no
+        existing broker exposure (see that function's own "disarming is
+        an entry gate, not permission to abandon exposure that already
+        exists" comment) -- it still runs the full cycle and reports
+        the block via skipped_exposure, opening nothing and making no
+        broker call, which is what this test actually needs to verify.
+        """
         from .tasks import run_trading_cycle
 
         result = run_trading_cycle()
 
-        self.assertTrue(result["skipped"])
-        self.assertEqual(result["reason"], "live_trading_disarmed")
         self.assertEqual(result["mode"], "live")
+        self.assertEqual(result["opened"], [])
+        self.assertEqual(result["skipped_exposure"], [{"reason": "live_trading_disarmed"}])
+        self.assertEqual(result["equity_sync"], {"synced": False, "reason": "live_trading_disarmed"})
+        self.assertFalse(self.signal.broker_orders.exists())
 
 
 @override_settings(LIVE_TRADING_ENABLED=True)
@@ -667,8 +678,15 @@ class LiveExecutorOptionContractTests(TestCase):
             strike=24400, option_type="PE", symbol_token="tok_pe_24400",
             tradingsymbol="NIFTY24400PE", lot_size=25,
         )
+        # signal_type is deliberately BUY even though option_side is PE (a
+        # bearish view on the underlying): apps.execution.live_executor.
+        # _validate_live_signal_integrity requires every live OPTION order
+        # to be an explicit BUY signal (buying the PE's own premium) --
+        # a live "SELL" signal_type reaching real order placement would be
+        # ambiguous with sell-to-open/naked-writing, which this platform
+        # must never do automatically. See that function's own check.
         self.signal = TradingSignal.objects.create(
-            symbol="NIFTY", signal_type=SignalType.SELL, entry_price=Decimal("110"),
+            symbol="NIFTY", signal_type=SignalType.BUY, entry_price=Decimal("110"),
             stop_loss=Decimal("95"), target_1=Decimal("140"), position_size=25,
             option_side="PE", strike_price=Decimal("24400"), option_contract=self.contract,
             total_score=1, technical_score=1, sentiment_score=0, risk_score=1,
@@ -684,11 +702,11 @@ class LiveExecutorOptionContractTests(TestCase):
 
             def place_order(self, symbol, transaction_type, qty, order_type="MARKET", price=0.0,
                              symbol_token=None, exchange=None, tradingsymbol=None,
-                             order_tag=None):
+                             order_tag=None, risk_reducing=False):
                 self.place_order_calls.append({
                     "symbol": symbol, "transaction_type": transaction_type, "qty": qty,
                     "symbol_token": symbol_token, "exchange": exchange, "tradingsymbol": tradingsymbol,
-                    "order_tag": order_tag,
+                    "order_tag": order_tag, "risk_reducing": risk_reducing,
                 })
                 order_id = f"ORDER{self.next_order_number}"
                 self.next_order_number += 1
@@ -696,6 +714,17 @@ class LiveExecutorOptionContractTests(TestCase):
 
             def get_order_status(self, order_id):
                 return {"status": "complete", "averageprice": "112.5", "filledshares": "25"}
+
+            def get_positions(self):
+                # apps.execution.live_executor._verify_broker_exposure_before_exit
+                # confirms the broker's own reported position still
+                # matches what we expect LOCALLY before submitting any
+                # exit order (a real safety check against a desynced/
+                # already-closed broker position) -- matches this class's
+                # own contract/signal fixture (self.contract.tradingsymbol
+                # = "NIFTY24400PE", self.signal.position_size = 25, a full
+                # fill per this fake's own get_order_status above).
+                return [{"tradingsymbol": "NIFTY24400PE", "netqty": 25, "producttype": "INTRADAY"}]
 
         return FakeClient()
 
@@ -716,8 +745,10 @@ class LiveExecutorOptionContractTests(TestCase):
         self.assertEqual(call["exchange"], "NFO")
         self.assertEqual(call["tradingsymbol"], "NIFTY24400PE")
         self.assertTrue(call["order_tag"].startswith("ap"))
-        # SELL signal_type but option_contract set -- must still open LONG
-        # (buying a PE is a long bet on the PE's own premium).
+        # A BUY signal on a PE contract still opens LONG -- buying a PUT is
+        # a long bet on the PUT's own premium, LONG regardless of whether
+        # the contract itself represents a bullish (CE) or bearish (PE)
+        # view on the underlying.
         self.assertEqual(position.side, PositionSide.LONG)
         self.assertEqual(position.symbol, "NIFTY24400PE")
         self.assertEqual(position.option_contract_id, self.contract.pk)

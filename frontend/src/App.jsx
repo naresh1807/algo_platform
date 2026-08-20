@@ -5,6 +5,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import TopBar from "./components/TopBar.jsx";
 import JarvisPanel from "./components/JarvisPanel.jsx";
 import LoadingSkeleton from "./components/LoadingSkeleton.jsx";
+import RouteErrorBoundary from "./components/RouteErrorBoundary.jsx";
 import SignalAlertPopup from "./components/SignalAlertPopup.jsx";
 import { useJarvisStore } from "./store/jarvisStore.js";
 import { useLiveStore } from "./store/liveStore.js";
@@ -76,6 +77,7 @@ function AppShell() {
   }, []);
 
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
+  const { pathname } = useLocation();
 
   return (
     <div className="app-shell">
@@ -83,22 +85,26 @@ function AppShell() {
       <div className={`main-layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <Sidebar />
         <main className="content">
-          <Suspense fallback={<RouteFallback />}>
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/jarvis-signals" element={<JarvisSignalTerminal />} />
-              <Route path="/signals" element={<Signals />} />
-              <Route path="/news" element={<News />} />
-              <Route path="/options" element={<OptionsAnalytics />} />
-              <Route path="/investing" element={<StockInvesting />} />
-              <Route path="/positions" element={<Positions />} />
-              <Route path="/scalping" element={<Scalping />} />
-              <Route path="/reports" element={<Reports />} />
-              <Route path="/risk" element={<RiskLog />} />
-              <Route path="/learning" element={<Learning />} />
-              <Route path="/settings" element={<Settings />} />
-            </Routes>
-          </Suspense>
+          {/* key={pathname} resets the boundary's crashed state on every
+              navigation -- see RouteErrorBoundary's own docstring for why. */}
+          <RouteErrorBoundary key={pathname}>
+            <Suspense fallback={<RouteFallback />}>
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/jarvis-signals" element={<JarvisSignalTerminal />} />
+                <Route path="/signals" element={<Signals />} />
+                <Route path="/news" element={<News />} />
+                <Route path="/options" element={<OptionsAnalytics />} />
+                <Route path="/investing" element={<StockInvesting />} />
+                <Route path="/positions" element={<Positions />} />
+                <Route path="/scalping" element={<Scalping />} />
+                <Route path="/reports" element={<Reports />} />
+                <Route path="/risk" element={<RiskLog />} />
+                <Route path="/learning" element={<Learning />} />
+                <Route path="/settings" element={<Settings />} />
+              </Routes>
+            </Suspense>
+          </RouteErrorBoundary>
         </main>
       </div>
       <SignalAlertPopup />

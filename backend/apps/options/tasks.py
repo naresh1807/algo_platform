@@ -174,22 +174,31 @@ def ingest_option_chain_snapshots():
 
     from .broker_client import get_option_chain_client
     from .models import OptionChainSnapshot, OptionContract
+    from .subscription_manager import compute_desired_option_tokens
 
-    # Expired contracts are deliberately never deleted (see
-    # sync_watchlist_option_contracts's docstring -- historical snapshots
-    # stay attached for backtesting), but they must never be re-quoted
-    # here: since that sync task now syncs settings.OPTIONS_EXPIRY_SYNC_COUNT
-    # expiries per underlying instead of just one, an unfiltered query
-    # here would pull in several times as many contracts every run,
-    # multiplying Angel One call volume for expiries nobody can trade
-    # any more -- exactly the kind of avoidable load this codebase has
-    # hit real AB1021 rate-limit cooldowns from before. is_active (kept
-    # correct by apps.options.contract_sync on every sync/rollover run,
-    # via apps.options.expiry_service's cutoff-aware eligibility check)
-    # replaces the old plain `expiry__gte=today` filter here, which
-    # stayed True all day on expiry day itself -- long after that
-    # contract's own tradeable life had actually ended at market close.
-    contracts = list(OptionContract.objects.filter(is_active=True))
+    # REAL, OBSERVED INCIDENT: this used to query is_active=True (every
+    # non-expired contract across every one of settings.
+    # OPTIONS_EXPIRY_SYNC_COUNT=6 synced expiries, all strikes, no ATM
+    # narrowing) -- 2,116 contracts in practice, requiring ~43 sequential
+    # batched Angel One getMarketData calls (MARKET_DATA_BATCH_SIZE=50)
+    # each individually rate-limit-paced. On Celery's --pool=solo (one
+    # task at a time), that turned a single scheduled run into several
+    # minutes of blocking the ENTIRE priority queue -- including
+    # apps.monitoring.tasks.heartbeat_priority_worker, which is what
+    # actually surfaced as the frontend's "Priority Worker Missing"
+    # status despite the worker being alive and the broker session
+    # connecting successfully. The vast majority of those 2,116 contracts
+    # were never displayed anywhere (apps.options.views.OptionChainView
+    # only ever renders ONE resolved/selected expiry at a time) -- this
+    # now reuses the exact same scope apps.options.subscription_manager
+    # already resolves for the live WebSocket feed (current/selected
+    # expiry x ATM +/- settings.OPTIONS_LIVE_STRIKE_RANGE strikes per
+    # underlying), so the REST refresh only ever re-quotes what a chart
+    # could actually be showing right now. Expired contracts are still
+    # never deleted or re-quoted (see sync_watchlist_option_contracts's
+    # docstring -- historical snapshots stay attached for backtesting).
+    desired_tokens = compute_desired_option_tokens()
+    contracts = list(OptionContract.objects.filter(id__in={meta["contract_id"] for meta in desired_tokens.values()}))
     if not contracts:
         logger.warning(
             "ingest_option_chain_snapshots: no OptionContract rows exist yet -- "

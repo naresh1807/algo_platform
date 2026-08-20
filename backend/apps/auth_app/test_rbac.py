@@ -101,6 +101,13 @@ class ConsequentialWritePermissionTests(APITestCase):
         response = self._client_for(self.admin).post(
             self.url, {"strike_mode": "atm"}, format="json",
         )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(OptionsStrategySetting.objects.get(pk=1).strike_mode, "atm")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="options_strategy_settings_changed", actor=self.admin,
+            ).exists(),
+        )
 
     def test_admin_cannot_select_an_unsynchronized_custom_expiry(self):
         response = self._client_for(self.admin).post(
@@ -110,9 +117,12 @@ class ConsequentialWritePermissionTests(APITestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("custom_expiry", response.data)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(OptionsStrategySetting.objects.get(pk=1).strike_mode, "atm")
-        self.assertTrue(
+        # A rejected write must persist nothing -- the serializer's
+        # is_valid(raise_exception=True) raises INSIDE the view's own
+        # transaction.atomic() block, rolling back even the
+        # get_or_create(pk=1) that ran earlier in the same request.
+        self.assertFalse(OptionsStrategySetting.objects.filter(pk=1).exists())
+        self.assertFalse(
             AuditLog.objects.filter(
                 action="options_strategy_settings_changed", actor=self.admin,
             ).exists(),

@@ -11,9 +11,44 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task
+from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# Matches apps.monitoring.health._CELERY_HEARTBEAT_KEYS -- the ONE place
+# these key strings are defined, imported by neither module from the
+# other to avoid a health<->tasks import cycle; kept identical here on
+# purpose (see this module's own tests for a change-detector guard).
+_HEARTBEAT_KEY_DEFAULT = "celery:heartbeat:celery"
+_HEARTBEAT_KEY_PRIORITY = "celery:heartbeat:priority"
+
+
+@shared_task
+def heartbeat_default_worker():
+    """
+    Trivial periodic no-op, scheduled on the DEFAULT ('celery') queue
+    (config/celery.py beat_schedule) -- its only purpose is proving both
+    Celery Beat (which schedules it) and the default worker (which must
+    consume it to update the timestamp) are alive, for
+    apps.monitoring.health.SystemHealthView.
+    """
+    cache.set(_HEARTBEAT_KEY_DEFAULT, timezone.now().isoformat(), timeout=settings.CELERY_HEARTBEAT_STALE_SECONDS * 3)
+    return {"ok": True}
+
+
+@shared_task
+def heartbeat_priority_worker():
+    """
+    Same idea as heartbeat_default_worker, routed onto the 'priority'
+    queue (config/celery.py task_routes) -- this is what makes fix-list
+    item 7 ("priority worker silently not being consumed") an
+    observable health-endpoint fact instead of something only noticed
+    by reading raw worker logs.
+    """
+    cache.set(_HEARTBEAT_KEY_PRIORITY, timezone.now().isoformat(), timeout=settings.CELERY_HEARTBEAT_STALE_SECONDS * 3)
+    return {"ok": True}
 
 
 @shared_task

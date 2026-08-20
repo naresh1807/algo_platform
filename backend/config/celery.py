@@ -9,12 +9,35 @@ import platform
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import setup_logging
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
 app = Celery("algo_trading")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
+
+
+@setup_logging.connect
+def _use_django_logging_config(**kwargs):
+    """
+    Without this, Celery's own `-l info` CLI flag configures its OWN
+    root logger independently of config.settings.LOGGING -- meaning
+    common.log_filters.RedactSensitiveDataFilter would silently never
+    run for anything logged inside a Celery worker process, including
+    exactly the code most likely to log a raw broker response/exception
+    (apps.market_data.broker_client's login/REST calls, which run
+    almost entirely from Celery tasks, not request/response code).
+    Connecting this signal replaces Celery's default logging setup with
+    Django's own configured LOGGING dict, so every process in this
+    platform (Django/Daphne, run_live_feed, and both Celery workers +
+    beat) redacts the same way.
+    """
+    from logging.config import dictConfig
+
+    from django.conf import settings
+
+    dictConfig(settings.LOGGING)
 
 if platform.system() == "Windows":
     # Prefork worker pools can fail on Windows with billiard handle and
@@ -46,6 +69,16 @@ app.conf.task_routes = {
     "apps.options.tasks.ingest_option_chain_snapshots": {"queue": "priority"},
     "apps.execution.tasks.flatten_open_positions": {"queue": "priority"},
     "apps.execution.tasks.square_off_intraday_positions": {"queue": "priority"},
+    # apps.monitoring.tasks.heartbeat_priority_worker below -- deliberately
+    # routed here too (NOT to the default queue) so its own freshness is
+    # direct, observable proof the priority worker process is actually
+    # running and consuming from "priority", the exact gap that let
+    # ingest_option_chain_snapshots silently starve before: a missing
+    # priority worker previously showed up only as "the option chain
+    # stopped updating," discoverable only by reading raw worker logs.
+    # apps.monitoring.health.SystemHealthView surfaces this heartbeat's
+    # staleness directly instead.
+    "apps.monitoring.tasks.heartbeat_priority_worker": {"queue": "priority"},
 }
 
 # Scheduled jobs (Celery beat). Times are IST (settings.CELERY_TIMEZONE).
@@ -85,6 +118,21 @@ app.conf.beat_schedule = {
     "ingest-option-chain-every-5-minutes": {
         "task": "apps.options.tasks.ingest_option_chain_snapshots",
         "schedule": 300.0,
+    },
+    # apps.monitoring.health.SystemHealthView reads these -- one per
+    # queue, so "the priority worker isn't actually consuming its queue"
+    # (fix-list item 7's own root incident) shows up as a stale
+    # celery_priority_worker heartbeat instead of only being visible in
+    # raw worker logs. 60s cadence against
+    # settings.CELERY_HEARTBEAT_STALE_SECONDS's 150s default threshold
+    # gives real margin before a single missed tick reads as unhealthy.
+    "heartbeat-default-worker-every-minute": {
+        "task": "apps.monitoring.tasks.heartbeat_default_worker",
+        "schedule": 60.0,
+    },
+    "heartbeat-priority-worker-every-minute": {
+        "task": "apps.monitoring.tasks.heartbeat_priority_worker",
+        "schedule": 60.0,
     },
     # Expiry-rollover lifecycle (apps.options.expiry_service /
     # apps.options.contract_sync) -- four cooperating jobs, replacing

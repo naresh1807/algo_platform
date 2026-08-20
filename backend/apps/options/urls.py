@@ -13,6 +13,7 @@ from .views import (
     OptionExpiryStatusView,
     OptionsAnalyticsView,
     OptionsStrategySettingView,
+    SelectedExpiryView,
 )
 
 app_name = "options"
@@ -25,6 +26,7 @@ urlpatterns = router.urls + [
     path("analytics/", OptionsAnalyticsView.as_view(), name="options-analytics"),
     path("expiries/", OptionExpiriesView.as_view(), name="options-expiries"),
     path("expiry-status/", OptionExpiryStatusView.as_view(), name="options-expiry-status"),
+    path("selected-expiry/", SelectedExpiryView.as_view(), name="options-selected-expiry"),
     path("chain/", OptionChainView.as_view(), name="options-chain"),
     path("candles/", OptionCandlesView.as_view(), name="options-candles"),
     path("best-strike/", BestStrikeView.as_view(), name="options-best-strike"),

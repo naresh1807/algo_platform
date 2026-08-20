@@ -95,8 +95,20 @@ class OptionChainClient(BrokerClient):
         quotes_by_token: dict[str, dict] = {}
         for i in range(0, len(tokens), MARKET_DATA_BATCH_SIZE):
             batch = tokens[i:i + MARKET_DATA_BATCH_SIZE]
-            response = connection.getMarketData(
-                mode="FULL", exchangeTokens={"NFO": batch},
+            # Routed through _smartapi_request -- this used to call
+            # connection.getMarketData(...) directly, bypassing every
+            # protection every other SmartAPI call in this codebase gets
+            # (rate-limit retry/backoff, the shared cooldown circuit
+            # breaker, and now the hard per-call timeout _smartapi_request
+            # itself applies). Real, observed incident: this exact call
+            # hung for 160+ seconds with the process at 0% CPU and no
+            # exception ever raised, which on Celery's --pool=solo silently
+            # blocked every other task queued behind it on the priority
+            # worker -- including the heartbeat task the frontend's health
+            # badge depends on. See apps.market_data.broker_client.
+            # BrokerClient._smartapi_request's own comment for the full story.
+            response = self._smartapi_request(
+                connection.getMarketData, mode="FULL", exchangeTokens={"NFO": batch},
             )
             if not response.get("status"):
                 raise RuntimeError(f"Option chain quote fetch failed: {response.get('message')}")

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -2679,6 +2679,13 @@ class OptionCandleAggregatorTests(TestCase):
     boundaries, rollover-persists-the-closed-bar, and Channels group
     naming/isolation (scenario 8: a new candle starts at the correct
     timeframe boundary).
+
+    1m-only DB persistence (fix-list item 5, "do not write six database
+    records every two seconds for every contract"): live ticks persist
+    ONLY the "1m" timeframe to OptionCandle; every other configured
+    timeframe still aggregates/broadcasts in memory (see
+    test_non_1m_timeframe_broadcasts_but_never_persists below) but is
+    never written to the DB from this path.
     """
 
     def test_bucket_rollover_persists_previous_bar_and_opens_new_one(self):
@@ -2686,19 +2693,52 @@ class OptionCandleAggregatorTests(TestCase):
         from .models import OptionCandle
 
         contract = _make_contract(token="tok_agg")
+        aggregator = OptionCandleAggregator(timeframes=["1m"])
+
+        t0 = _ist(2026, 8, 19, 10, 0)
+        aggregator.on_tick(contract.id, 100.0, 1000, t0)
+        aggregator.on_tick(contract.id, 102.0, 1200, t0 + timedelta(seconds=30))
+
+        t1 = t0 + timedelta(minutes=1)  # next 1m bucket
+        aggregator.on_tick(contract.id, 108.0, 1500, t1)
+
+        saved = list(OptionCandle.objects.filter(contract=contract, timeframe="1m").order_by("timestamp"))
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(float(saved[0].close), 102.0)  # first bucket froze at its last tick before rollover
+        self.assertEqual(float(saved[1].open), 108.0)   # new bucket opened fresh, not carrying over the old close
+
+    def test_non_1m_timeframe_broadcasts_but_never_persists(self):
+        from .candle_aggregator import OptionCandleAggregator
+        from .models import OptionCandle
+
+        contract = _make_contract(token="tok_agg_5m")
         aggregator = OptionCandleAggregator(timeframes=["5m"])
 
         t0 = _ist(2026, 8, 19, 10, 0)
         aggregator.on_tick(contract.id, 100.0, 1000, t0)
         aggregator.on_tick(contract.id, 102.0, 1200, t0 + timedelta(minutes=1))
+        aggregator.on_tick(contract.id, 108.0, 1500, t0 + timedelta(minutes=5))  # next 5m bucket -- would rollover-persist under the old behavior
 
-        t1 = t0 + timedelta(minutes=5)  # next 5m bucket
-        aggregator.on_tick(contract.id, 108.0, 1500, t1)
+        self.assertEqual(OptionCandle.objects.filter(contract=contract, timeframe="5m").count(), 0)
+        # In-memory state still tracked the ticks correctly (used for the
+        # live broadcast, unaffected by not persisting).
+        state = aggregator._state[(contract.id, "5m")]
+        self.assertEqual(state.open, 108.0)
 
-        saved = list(OptionCandle.objects.filter(contract=contract, timeframe="5m").order_by("timestamp"))
-        self.assertEqual(len(saved), 2)
-        self.assertEqual(float(saved[0].close), 102.0)  # first bucket froze at its last tick before rollover
-        self.assertEqual(float(saved[1].open), 108.0)   # new bucket opened fresh, not carrying over the old close
+    def test_multiple_configured_timeframes_persist_only_1m(self):
+        from .candle_aggregator import OptionCandleAggregator
+        from .models import OptionCandle
+
+        contract = _make_contract(token="tok_agg_multi")
+        aggregator = OptionCandleAggregator(timeframes=["1m", "5m", "15m"])
+
+        t0 = _ist(2026, 8, 19, 10, 0)
+        aggregator.on_tick(contract.id, 100.0, 1000, t0)
+
+        persisted_timeframes = set(
+            OptionCandle.objects.filter(contract=contract).values_list("timeframe", flat=True)
+        )
+        self.assertEqual(persisted_timeframes, {"1m"})
 
     def test_group_name_is_contract_and_timeframe_specific(self):
         from .candle_aggregator import group_name
@@ -2708,28 +2748,55 @@ class OptionCandleAggregatorTests(TestCase):
         self.assertNotEqual(group_name(42, "5m"), group_name(42, "1m"))
 
 
-class OptionCandleConsumerTests(TestCase):
+class OptionCandleConsumerTests(TransactionTestCase):
     """
     apps.options.consumers.OptionCandleConsumer -- verifies group
     isolation actually holds at the WebSocket transport layer, not just
     in the group-naming helper: a broadcast to one contract+timeframe's
     group must never reach a browser connected to a DIFFERENT one.
+
+    TransactionTestCase, NOT TestCase -- same reasoning as
+    apps.auth_app.test_websockets' own WebsocketAuthenticationTests/
+    BroadcastFailureIsolationTests: AuthenticatedWebsocketConsumer's
+    per-connection re-authorization runs a real DB query via
+    database_sync_to_async, on a separate thread/connection. TestCase's
+    whole-test rollback-based isolation keeps a created User row inside
+    an uncommitted transaction that a DIFFERENT thread's connection can
+    never see (MySQL, standard isolation) -- with plain TestCase, this
+    test's own real User (added specifically to fix "connected_a is
+    False") was itself invisible to the consumer's own auth check for
+    exactly this reason, and would fail closed regardless of how
+    correctly the user/group fixture was built.
     """
 
     @override_settings(CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}})
     def test_only_matching_contract_timeframe_group_receives_broadcast(self):
         import asyncio
-        from types import SimpleNamespace
 
         from channels.layers import get_channel_layer
         from channels.routing import URLRouter
         from channels.testing import WebsocketCommunicator
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Group
 
         from .routing import websocket_urlpatterns
 
+        # AuthenticatedWebsocketConsumer._authorization_is_current()
+        # re-validates on every connect (and every server push) via a
+        # REAL DB lookup -- getattr(scope["user"], "pk", None) then
+        # common.websockets._user_id_is_authorized(pk), which requires an
+        # actual User row with dashboard RBAC group membership. A bare
+        # SimpleNamespace(is_authenticated=True) (this test's original
+        # fake) has no `pk` at all, so that check always failed closed --
+        # this test never actually exercised the group-isolation
+        # behavior it claims to, it just silently failed at connect().
+        User = get_user_model()
+        user = User.objects.create_user(username="ws_group_isolation_test", password="pw")
+        user.groups.add(Group.objects.get_or_create(name="Trader")[0])
+
         async def authenticated_scope(app, scope, receive, send):
             scope = dict(scope)
-            scope["user"] = SimpleNamespace(is_authenticated=True, is_active=True)
+            scope["user"] = user
             await app(scope, receive, send)
 
         async def scenario():

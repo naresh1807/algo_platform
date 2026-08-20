@@ -159,6 +159,94 @@ class SmartApiCircuitBreakerTests(TestCase):
         self.assertEqual(self._broker_client_module._smartapi_cooldown_until, 0.0)
 
 
+class SmartApiHardTimeoutTests(TestCase):
+    """
+    apps.market_data.broker_client._smartapi_request's hard per-call
+    timeout, and _wait_for_smartapi_slot's bounded wait for the shared
+    cross-process rate-limit slot -- both fix REAL, OBSERVED incidents:
+    apps.options.broker_client.OptionChainClient.fetch_chain_quotes
+    (routed through _smartapi_request, see that module's own comment)
+    hung for 160+ seconds with the process at 0% CPU, and separately,
+    _wait_for_smartapi_slot's distributed-lock wait loop had NO bound at
+    all and could starve indefinitely under multi-process contention.
+    On Celery's --pool=solo (one task at a time), either hang silently
+    blocked every other task queued behind it on the same worker --
+    including the heartbeat task the frontend's "Priority Worker
+    Missing" health status depends on.
+    """
+
+    def setUp(self):
+        from apps.market_data import broker_client
+
+        self._broker_client_module = broker_client
+        self._reset_module_state()
+        self.addCleanup(self._reset_module_state)
+
+        original_sleep = broker_client.time.sleep
+        broker_client.time.sleep = lambda _: None
+        self.addCleanup(setattr, broker_client.time, "sleep", original_sleep)
+
+    def _reset_module_state(self):
+        m = self._broker_client_module
+        m._smartapi_consecutive_rate_limit_exhaustions = 0
+        m._smartapi_cooldown_until = 0.0
+        m._SMARTAPI_LAST_REQUEST_AT = 0.0
+
+    def test_a_permanently_hung_call_raises_instead_of_blocking_forever(self):
+        import threading
+        import time as real_time
+
+        from apps.market_data import broker_client
+        from apps.market_data.broker_client import BrokerClient
+
+        client = BrokerClient()
+        original_timeout = broker_client._SMARTAPI_REQUEST_TIMEOUT_SECONDS
+        broker_client._SMARTAPI_REQUEST_TIMEOUT_SECONDS = 0.2
+        self.addCleanup(setattr, broker_client, "_SMARTAPI_REQUEST_TIMEOUT_SECONDS", original_timeout)
+
+        # threading.Event().wait(), NOT time.sleep() -- this class's own
+        # setUp monkey-patches broker_client.time.sleep to a no-op, but
+        # `time` is one shared module object for the whole process (there
+        # is no per-module copy), so that patch silently neuters EVERY
+        # time.sleep() call anywhere, including one made here to simulate
+        # a hang -- a real, first-draft bug in this exact test (it passed
+        # "successfully" for the wrong reason: the simulated hang never
+        # actually hung). Event.wait() is a separate blocking primitive
+        # unaffected by that patch, so it genuinely blocks the calling
+        # thread the way a real stuck network call would.
+        never_set = threading.Event()
+
+        def hangs_forever():
+            never_set.wait(30)  # deliberately far longer than the 0.2s bound above
+            return {"status": True}
+
+        started = real_time.monotonic()
+        with self.assertRaises(TimeoutError):
+            client._smartapi_request(hangs_forever, retry_rate_limits=False)
+        elapsed = real_time.monotonic() - started
+
+        self.assertLess(elapsed, 5, "a hung call must be bounded by the hard timeout, not actually wait for the real work to finish")
+
+    def test_shared_slot_wait_gives_up_after_its_own_bound_instead_of_hanging_forever(self):
+        import time as real_time
+
+        from apps.market_data import broker_client
+
+        original_timeout = broker_client._SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS
+        broker_client._SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS = 0.3
+        self.addCleanup(setattr, broker_client, "_SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS", original_timeout)
+
+        with override_settings(SMARTAPI_DISTRIBUTED_RATE_LIMIT=True):
+            # Simulates the slot being continuously held by another
+            # process: cache.add always reports "already exists".
+            with patch.object(broker_client.cache, "add", return_value=False):
+                started = real_time.monotonic()
+                broker_client._wait_for_smartapi_slot()  # must return, not hang
+                elapsed = real_time.monotonic() - started
+
+        self.assertLess(elapsed, 5, "must give up on the shared slot after its own bound, not loop forever")
+
+
 class BrokerOrderSubmissionSafetyTests(TestCase):
     @override_settings(LIVE_TRADING_ENABLED=False)
     def test_disarmed_order_is_rejected_before_connecting(self):

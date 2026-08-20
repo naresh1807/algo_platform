@@ -176,6 +176,7 @@ class OptionChainView(APIView):
             if snapshot is None:
                 continue
             leg = {
+                "contract_id": contract.id,
                 "ltp": float(snapshot.ltp),
                 "open_interest": snapshot.open_interest,
                 "change_in_oi": snapshot.change_in_oi,
@@ -202,6 +203,55 @@ class OptionChainView(APIView):
             "spot": spot,
             "rows": sorted(rows.values(), key=lambda r: r["strike"]),
         })
+
+
+class SelectedExpiryView(APIView):
+    """
+    GET/POST /api/options/selected-expiry/?underlying=NIFTY -- the
+    frontend's expiry dropdown publishes its selection here so
+    apps.market_data.broker_ws_client's dynamic subscription-refresh
+    loop (running in the separate run_live_feed OS process) picks it up
+    on its next cycle. Backed entirely by apps.options.
+    subscription_manager (Redis-backed, cross-process -- see that
+    module's own docstring for why this can't be an in-process
+    variable). POST re-validates the requested expiry through
+    apps.options.expiry_service before storing it -- the same "backend
+    is the source of truth, never trust a client-supplied date blindly"
+    convention apps.options.views.OptionChainView already uses via
+    validate_requested_expiry.
+    """
+
+    permission_classes = [IsTraderOrAdmin]
+
+    def get(self, request):
+        from .subscription_manager import get_selected_expiry
+
+        underlying = request.query_params.get("underlying", "NIFTY").strip().upper()
+        expiry = get_selected_expiry(underlying)
+        return Response({"underlying": underlying, "selected_expiry": expiry.isoformat() if expiry else None})
+
+    def post(self, request):
+        from .expiry_service import validate_requested_expiry
+        from .subscription_manager import set_selected_expiry
+
+        underlying = str(request.data.get("underlying", "NIFTY")).strip().upper()
+        expiry_str = request.data.get("expiry")
+        if not expiry_str:
+            return Response({"error": "expiry is required (YYYY-MM-DD)."}, status=400)
+        try:
+            requested = date.fromisoformat(expiry_str)
+        except ValueError:
+            return Response({"error": f"expiry {expiry_str!r} is not a valid YYYY-MM-DD date."}, status=400)
+
+        expiry, was_substituted = validate_requested_expiry(underlying, requested)
+        if expiry is None:
+            return Response(
+                {"error": f"No valid (non-expired) expiry available for {underlying} right now.", "rollover_required": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        set_selected_expiry(underlying, expiry)
+        return Response({"underlying": underlying, "selected_expiry": expiry.isoformat(), "substituted": was_substituted})
 
 
 def _parse_query_dt(raw: str | None) -> datetime | None:

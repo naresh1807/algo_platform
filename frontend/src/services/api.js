@@ -130,6 +130,12 @@ export const endpoints = {
   newsSentiment: (symbol, sentiment_label, page_size = 50) =>
     api.get("/news/sentiment/", { params: { symbol, sentiment_label, page_size } }),
   feedHealth: () => api.get("/monitoring/feed-health/"),
+  // apps.monitoring.health.SystemHealthView -- Django/MySQL/Redis/Celery
+  // worker+beat heartbeats, live Angel One feed connection state and
+  // tick staleness, subscribed option-token count, selected expiry per
+  // underlying. See hooks/useSystemHealth.js for how this is turned
+  // into a single status badge.
+  systemHealth: () => api.get("/monitoring/health/"),
   priceAlerts: () => api.get("/monitoring/price-alerts/"),
   createPriceAlert: (symbol, condition, target_price) =>
     api.post("/monitoring/price-alerts/", { symbol, condition, target_price }),
@@ -162,6 +168,13 @@ export const endpoints = {
   // to render a real message, not just a caught exception.
   optionExpiryStatus: (underlying) =>
     api.get("/options/expiry-status/", { params: { underlying }, validateStatus: (s) => s === 200 || s === 503 }),
+  // apps.options.views.SelectedExpiryView -- publishes the operator's
+  // expiry choice so apps.market_data.broker_ws_client's dynamic
+  // subscription-refresh loop (a separate OS process, see that view's
+  // own docstring) picks it up on its next cycle and re-subscribes the
+  // live feed to that expiry's strikes, without restarting anything.
+  setSelectedOptionExpiry: (underlying, expiry) =>
+    api.post("/options/selected-expiry/", { underlying, expiry }),
   optionChain: (underlying, expiry) => api.get("/options/chain/", { params: { underlying, expiry } }),
   // apps.options.views.OptionCandlesView -- one exact option contract's
   // own OHLCV candles (never the underlying's). `params` accepts either

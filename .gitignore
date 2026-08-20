@@ -1,5 +1,6 @@
 # Python / Django
 backend/venv/
+backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/**/migrations/__pycache__/
@@ -11,6 +12,9 @@ db.sqlite3
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+
+# Docker credentials -- see docker/.env.example
+docker/.env
 
 # Editors / OS
 .vscode/
@@ -28,6 +32,7 @@ backend/ml_artifacts/
 # Runtime logs
 backend/logs/
 /*.log
+/logs/
 
 # Celery beat's local schedule DB (runtime state, like db.sqlite3)
 backend/celerybeat-schedule*

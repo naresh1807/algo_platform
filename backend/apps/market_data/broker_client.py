@@ -36,6 +36,13 @@ _SMARTAPI_MIN_REQUEST_INTERVAL = 2.0  # seconds between requests across all thre
 _SMARTAPI_RETRY_ATTEMPTS = 5
 _SMARTAPI_RETRY_BACKOFF_FACTOR = 2.0
 
+# Maximum time _wait_for_smartapi_slot() will wait to acquire the shared
+# CROSS-PROCESS rate-limit slot (see that function's own comment for the
+# real incident an unbounded version of this wait caused) before giving
+# up on the distributed lock and proceeding with only the process-local
+# throttle above.
+_SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS = 15
+
 # SmartConnect accepts a `timeout` constructor arg and passes it straight
 # through to every underlying `requests.request(..., timeout=self.timeout)`
 # call (confirmed by reading the installed smartapi-python package's own
@@ -131,6 +138,27 @@ def _wait_for_smartapi_slot() -> None:
 
     if not getattr(settings, "SMARTAPI_DISTRIBUTED_RATE_LIMIT", False):
         return
+
+    # REAL, OBSERVED INCIDENT: this loop had no bound at all -- under
+    # sustained multi-process contention for the shared slot (several
+    # recurring Celery beat tasks each looping over many symbol x
+    # timeframe combinations, each call going through this same
+    # function), one caller can keep losing the race to re-acquire the
+    # slot in the ~2s window after it expires, for minutes at a time.
+    # On Celery's --pool=solo (one task at a time per worker), that
+    # single stuck wait silently blocked EVERY other task queued behind
+    # it on the same worker -- including
+    # apps.monitoring.tasks.heartbeat_priority_worker, which is what
+    # actually surfaced as the frontend's "Priority Worker Missing"
+    # status despite the worker process itself being alive and the
+    # broker session having connected successfully. Past this deadline,
+    # proceed WITHOUT the distributed slot rather than hang indefinitely
+    # -- the process-local throttle above already ran, so this is a
+    # bounded, soft degradation (slightly higher chance of hitting Angel
+    # One's own rate limit on this one call, which the retry/circuit-
+    # breaker logic in _smartapi_request already handles), not a silent
+    # correctness loss.
+    deadline = time.monotonic() + _SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS
     while True:
         try:
             acquired = cache.add(
@@ -142,6 +170,13 @@ def _wait_for_smartapi_slot() -> None:
             logger.warning("Shared SmartAPI rate limiter is unavailable; using process-local fallback.", exc_info=True)
             return
         if acquired:
+            return
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "Shared SmartAPI rate-limit slot still held by another process after %ds -- "
+                "proceeding without it for this call (process-local throttle still applies).",
+                _SMARTAPI_SHARED_SLOT_WAIT_TIMEOUT_SECONDS,
+            )
             return
         time.sleep(min(0.25, _SMARTAPI_MIN_REQUEST_INTERVAL))
 
@@ -396,7 +431,33 @@ class BrokerClient:
             attempt += 1
             _wait_for_smartapi_slot()
             try:
-                response = func(*args, **kwargs)
+                # Hard-bounded the same way _connect()'s own generateSession()
+                # call already is (see _call_with_hard_timeout's own
+                # docstring) -- REAL, OBSERVED INCIDENT: apps.options.
+                # broker_client.OptionChainClient.fetch_chain_quotes used to
+                # call connection.getMarketData(...) directly, bypassing this
+                # method's retry/circuit-breaker AND this timeout entirely.
+                # SmartConnect's own `timeout=` constructor arg is supposed
+                # to bound every call made through it, but that call hung for
+                # 160+ seconds with the process at 0% CPU (no exception ever
+                # raised) -- the same "requests/urllib3's timeout doesn't
+                # always cover a DNS-resolution hang" gap _call_with_hard_
+                # timeout's own docstring already documents for login,
+                # apparently reachable from other SmartAPI calls too. Because
+                # apps.options.tasks.ingest_option_chain_snapshots runs on
+                # Celery's --pool=solo (one task at a time), that one hung
+                # call silently blocked EVERY other task queued behind it on
+                # the same worker -- including
+                # apps.monitoring.tasks.heartbeat_priority_worker, which is
+                # what actually surfaced as the frontend's "Priority Worker
+                # Missing" status despite the worker process itself being
+                # alive. Applying the hard timeout HERE (not just in
+                # _connect()) protects every current and future call made
+                # through this method, not just this one call site.
+                response = _call_with_hard_timeout(func, _SMARTAPI_REQUEST_TIMEOUT_SECONDS, *args, **kwargs)
+            except _HardTimeout as exc:
+                logger.error("Angel One call %s did not complete within %ds -- treating as failed, not retrying indefinitely.", getattr(func, "__qualname__", func), _SMARTAPI_REQUEST_TIMEOUT_SECONDS)
+                raise TimeoutError(str(exc)) from exc
             except Exception as exc:
                 if (
                     retry_rate_limits

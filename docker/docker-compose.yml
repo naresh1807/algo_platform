@@ -10,23 +10,26 @@ version: "3.9"
 # ever needs to run somewhere other than your own machine.
 
 services:
-  # SECURITY NOTE: this file has real credentials in it (from your own
-  # local setup) rather than placeholders -- fine for a file that stays
-  # on your own machine, but do NOT push this file to a public git repo
-  # as-is. If you ever do use git, either keep this file untracked
-  # (add docker/docker-compose.yml to .gitignore) or swap these back to
-  # placeholder values and pass real ones via a local .env docker-compose
-  # also reads, the same way Django's settings.py does.
+  # Credentials come from docker/.env (see docker/.env.example -- copy it
+  # to docker/.env and fill in real values, same convention as
+  # backend/.env.example). docker/.env is gitignored, same as backend/.env.
+  #
+  # SECURITY NOTE: this file previously had REAL credentials hardcoded
+  # directly here and was committed to git -- see this repo's own
+  # incident report for the exact values and the required manual
+  # rotation steps. Never hardcode a real secret in this file again;
+  # docker-compose reads docker/.env automatically when it sits next to
+  # this file, so there is no reason to.
   mysql:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: algo_trading
-      MYSQL_USER: naresh
-      MYSQL_PASSWORD: Thanvika@1816
-      MYSQL_ROOT_PASSWORD: Haindhavi@1816
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-algo_trading}
+      MYSQL_USER: ${MYSQL_USER:?set MYSQL_USER in docker/.env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in docker/.env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in docker/.env}
     ports:
-      - "3307:3306"
+      - "${MYSQL_HOST_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
 

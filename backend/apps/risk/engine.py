@@ -68,13 +68,25 @@ def get_equity() -> AccountEquity:
     from apps.execution.models import ExecutionModeSetting, get_execution_mode
 
     execution_mode = get_execution_mode()
+    # settings.STARTING_EQUITY is a plain float (float(os.environ.get(...))
+    # in config/settings.py) -- get_or_create's `defaults` populate the
+    # returned IN-MEMORY instance directly, with no DB round-trip to coerce
+    # it through AccountEquity.current_equity's own DecimalField, so a raw
+    # float here leaves `equity.current_equity` a float until something
+    # else happens to refresh_from_db() it. That silently broke the very
+    # first real risk check on a fresh install (or the first check in any
+    # process that hadn't already normalized this row): every Decimal *
+    # equity.current_equity arithmetic call downstream (e.g. apps.risk.
+    # engine._cap_qty_to_single_symbol_exposure) raised
+    # `TypeError: unsupported operand type(s) for *: 'float' and 'decimal.Decimal'`.
+    starting_equity = Decimal(str(settings.STARTING_EQUITY))
     with transaction.atomic():
         equity, created = AccountEquity.objects.select_for_update().get_or_create(
             pk=1,
             defaults={
-                "current_equity": settings.STARTING_EQUITY,
-                "daily_start_equity": settings.STARTING_EQUITY,
-                "peak_equity": settings.STARTING_EQUITY,
+                "current_equity": starting_equity,
+                "daily_start_equity": starting_equity,
+                "peak_equity": starting_equity,
                 "trading_day": today,
                 "source_mode": ExecutionModeSetting.Mode.PAPER,
             },

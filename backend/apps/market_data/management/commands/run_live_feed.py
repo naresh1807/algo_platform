@@ -18,32 +18,22 @@ Same BROKER_MODE=live guard every other Angel-One-dependent entry
 point in this codebase uses (apps.market_data.tasks,
 apps.investing.tasks) -- there is no broker session to stream from in
 paper mode.
+
+Option token selection is apps.options.subscription_manager.
+compute_desired_option_tokens, not a raw "every contract for this
+underlying" query -- see that module's own docstring for the dropped-
+tick incident this fixes (subscribing every synced expiry's every
+strike overwhelmed the tick pipeline). broker_ws_client.LiveFeedClient
+calls this provider both on every (re)connect AND periodically while
+already connected (its own dynamic subscription-refresh loop), so an
+expiry rollover or an operator's expiry selection from the UI takes
+effect without restarting this process.
 """
 
 from __future__ import annotations
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
-
-
-def _load_option_tokens() -> dict[str, int]:
-    """
-    symbol_token -> OptionContract.id for every contract currently
-    synced against settings.WATCHLIST -- called fresh on every
-    (re)connect (see LiveFeedClient.run_forever), so a weekly
-    sync_watchlist_option_contracts rollover to a new nearest expiry is
-    picked up without restarting this process. Empty (not an error)
-    until that weekly sync has populated OptionContract at all, or
-    outside BROKER_MODE=live where nothing populates it -- an empty
-    option subscription just means candles/index prices still stream
-    normally, matching this module's own "missing config is a skip,
-    not a crash" convention elsewhere.
-    """
-    from apps.options.models import OptionContract
-
-    return dict(
-        OptionContract.objects.filter(underlying__in=settings.WATCHLIST).values_list("symbol_token", "id")
-    )
 
 
 class Command(BaseCommand):
@@ -63,12 +53,13 @@ class Command(BaseCommand):
         from apps.market_data.broker_ws_client import LiveFeedClient
         from apps.market_data.tick_aggregator import CandleAggregator
         from apps.options.live_feed import handle_option_tick
+        from apps.options.subscription_manager import compute_desired_option_tokens
 
         aggregator = CandleAggregator()
         client = LiveFeedClient(
             aggregator,
             on_index_tick=handle_index_tick,
-            option_tokens_provider=_load_option_tokens,
+            option_tokens_provider=compute_desired_option_tokens,
             on_option_tick=handle_option_tick,
         )
 

@@ -473,12 +473,14 @@ If you've only ever run Django + MySQL + Redis + the frontend, **no
 Celery worker/beat has ever run**, so `ingest_watchlist_candles`,
 `generate_signals_for_watchlist`, etc. have literally never executed —
 that alone fully explains an empty dashboard even with all migrations
-correctly applied. To actually run them continuously:
-```bash
-# two more terminals, alongside runserver/npm run dev:
-celery -A config worker -l info
-celery -A config beat -l info
-```
+correctly applied. To actually run them continuously, you need **two**
+worker processes (not one) plus beat — see "Required Windows processes"
+below for exactly why, and `scripts/start_platform.ps1` to start all of
+this (plus Docker/MySQL/Redis, Django, and the frontend) in one go
+instead of opening five terminals by hand.
+
+### Required Windows processes
+
 On Windows, `--pool=solo` is forced automatically (`config/celery.py`),
 which means that ONE worker process can only run ONE task at a time --
 a slow task (e.g. `ingest_index_chart_candles` retrying through Angel
@@ -486,13 +488,23 @@ One rate limits) blocks every other scheduled task queued behind it,
 including the option chain's own 5-minute refresh
 (`ingest_option_chain_snapshots`), which is why the option chain can
 appear to silently stop updating under real rate-limit pressure even
-though nothing is actually broken. `config/celery.py` routes that one
-task onto its own `priority` queue for exactly this reason -- run a
-**second** worker consuming just that queue so it's never starved:
-```bash
-# a 3rd terminal, alongside the default-queue worker above:
-celery -A config worker -l info -Q priority
+though nothing is actually broken. `config/celery.py` routes that task
+(plus `apps.monitoring.tasks.heartbeat_priority_worker`, so this is
+directly observable via the health endpoint below) onto its own
+`priority` queue for exactly this reason -- you need a **second**
+worker process consuming *only* that queue, alongside the default one,
+or `ingest_option_chain_snapshots` silently never runs even though
+nothing in the logs looks obviously broken:
+```bat
+celery -A config worker -l info --pool=solo -Q celery
+celery -A config worker -l info --pool=solo -Q priority
+celery -A config beat -l info
 ```
+If you only ever start the first of these three, everything scheduled
+on the default queue still runs fine and nothing errors -- the gap is
+silent. Check `GET /api/monitoring/health/` (`celery_priority_worker`)
+or the frontend's top-bar feed-status badge to confirm both workers are
+actually alive, rather than assuming from the absence of errors.
 
 For the chart/index cards to move **tick-by-tick** (not just every
 60s-3min from the Celery beat schedule above), also run the live tick
@@ -502,6 +514,28 @@ actually opens and why the Celery-beat ingestion alone can't do this):
 ```bash
 python manage.py run_live_feed
 ```
+This process now also runs a dynamic subscription manager
+(`apps.options.subscription_manager` + `LiveFeedClient._subscription_refresh_loop`)
+that keeps the live option-token subscription scoped to the resolved/
+selected expiry and a bounded strike band around ATM
+(`OPTIONS_LIVE_STRIKE_RANGE`, default 20 strikes either side) instead of
+every synced expiry's every strike -- see that module's own docstring
+for the dropped-tick incident this fixes. It re-subscribes automatically
+on expiry rollover or an operator's expiry-dropdown change, without
+needing a restart.
+
+### Health/status
+
+`GET /api/monitoring/health/` (Trader/Admin auth required) reports
+Django/MySQL/Redis connectivity, both Celery worker heartbeats, Celery
+Beat, the live Angel One feed's actual connection state and tick
+staleness, subscribed option-token count, per-underlying selected
+expiry, and the latest detected error category -- never credentials.
+The frontend's top-bar badges read this (plus the browser-to-Django
+WebSocket status, which is a **separate**, narrower signal -- see
+`frontend/src/components/ConnectionStatus.jsx`'s own docstring for why
+"the browser socket is connected" must never be read as "the broker
+feed is healthy").
 
 **To see something on the dashboard right now**, without needing real
 broker credentials yet, use the new `seed_demo_data` management
@@ -544,12 +578,15 @@ python manage.py seed_indices
 python manage.py runserver
 ```
 You'll also need Redis running locally (`redis-server`, or
-`docker compose up -d` from `docker/`) for Channels/Celery, and a
-Celery worker + beat process:
-```bash
-celery -A config worker -l info
+`docker compose up -d` from `docker/`, using `docker/.env.example` →
+`docker/.env` for real credentials — never hardcode them in
+`docker-compose.yml`) for Channels/Celery, and both Celery worker
+processes + beat (see "Required Windows processes" above for why two
+workers, not one):
+```bat
+celery -A config worker -l info --pool=solo -Q celery
+celery -A config worker -l info --pool=solo -Q priority
 celery -A config beat -l info
-celery -A config worker -l info -Q priority   # see the note above about why this second worker exists
 ```
 Plus, for real tick-by-tick chart/index-card movement (BROKER_MODE=live only):
 ```bash
@@ -564,6 +601,19 @@ npm run dev
 ```
 Then open http://localhost:3000 — the Vite dev server proxies `/api`
 and `/ws` to Django on port 8000.
+
+**Or start everything above in one command (Windows)**
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_platform.ps1
+```
+Starts Docker/MySQL/Redis, runs `manage.py check` + pending migrations,
+then Django/Daphne, both Celery workers, Celery Beat, `run_live_feed`,
+and the frontend -- each as its own tracked, logged, size-limited
+background process (`logs\<name>.log`, PID in `logs\pids\<name>.pid`).
+Re-running it skips any service already running instead of starting a
+duplicate. Stop everything it started (and only what it started) with
+`scripts\stop_platform.ps1`. See that script's own header comment for
+`-SkipDocker`/`-SkipFrontend` and every other detail.
 
 - **JARVIS Voice Assistant, first pass now implemented** (manual
   Chapter 14 -- the piece the manual itself calls the project's

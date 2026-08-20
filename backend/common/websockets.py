@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 from collections.abc import Mapping, Sequence
 
 from channels.db import database_sync_to_async
@@ -17,6 +19,69 @@ from common.authentication import token_is_expired
 from common.permissions import ADMIN_GROUP_NAME, TRADER_GROUP_NAME
 
 logger = logging.getLogger(__name__)
+
+# ONE persistent asyncio event loop, running forever on its own dedicated
+# background thread, used for EVERY Channels group_send in this codebase
+# (broadcast_group below, plus apps.market_data.tick_aggregator and
+# apps.options.candle_aggregator's own _broadcast methods -- see each of
+# those for why they route through here instead of calling
+# asgiref.sync.async_to_sync directly).
+#
+# channels_redis' RedisChannelLayer keeps its Redis connection pool keyed
+# per EVENT LOOP. This codebase's live-tick pipeline legitimately calls
+# group_send from several different persistent OS threads (each
+# TickCoalescer worker pool, the candle aggregators, Django signal
+# handlers on request threads, ...) -- calling group_send via
+# asgiref.sync.async_to_sync from a plain synchronous thread with no
+# already-associated loop makes asgiref spin up its own event loop for
+# that call, so channels_redis opens a FRESH Redis connection for it too.
+# Real, observed incident: once the tick-drop fix
+# (apps.market_data.broker_ws_client) stopped silently discarding ticks,
+# real broadcast volume (hundreds/sec across live LTP pushes + per-
+# timeframe candle updates) turned that per-call connection churn into
+# "Error 10048 connecting to 127.0.0.1:6379" -- Windows' local ephemeral
+# TCP port range exhausted by connections opened and torn down faster
+# than the OS could recycle them out of TIME_WAIT -- thousands of times
+# within minutes, silently dropping every one of those broadcasts (the
+# underlying DB write still succeeded; only the live WebSocket push was
+# lost, which is what actually shows up as "dashboard says live feed
+# stopped" / "price not moving" despite fresh data in the database).
+#
+# Routing every group_send through this ONE stable, long-lived loop
+# means channels_redis' connection pool for that loop is created once
+# and reused for the rest of the process' lifetime, no matter how many
+# different threads call broadcast_group.
+_broadcast_loop: asyncio.AbstractEventLoop | None = None
+_broadcast_loop_lock = threading.Lock()
+_BROADCAST_TIMEOUT_SECONDS = 5
+
+
+def _get_broadcast_loop() -> asyncio.AbstractEventLoop:
+    global _broadcast_loop
+    with _broadcast_loop_lock:
+        if _broadcast_loop is None or _broadcast_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, daemon=True, name="channels-broadcast-loop").start()
+            _broadcast_loop = loop
+        return _broadcast_loop
+
+
+def group_send_sync(group_name: str, event: dict, *, timeout: float = _BROADCAST_TIMEOUT_SECONDS) -> None:
+    """
+    Synchronous group_send for callers on a plain (non-async) thread --
+    the shared entry point every group_send in this codebase must use
+    instead of `async_to_sync(channel_layer.group_send)(...)` directly.
+    See this module's own comment above _broadcast_loop for why a
+    dedicated persistent loop is required, not optional, once real tick
+    volume is flowing. Raises on failure/timeout -- callers decide how
+    to handle that (broadcast_group below treats it as best-effort).
+    """
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        return
+    loop = _get_broadcast_loop()
+    future = asyncio.run_coroutine_threadsafe(channel_layer.group_send(group_name, event), loop)
+    future.result(timeout=timeout)
 
 TOKEN_SUBPROTOCOL = "drf-token"
 UNAUTHORIZED_CLOSE_CODE = 4401
@@ -203,13 +268,10 @@ def broadcast_group(group_name: str, event: dict, *, log: logging.Logger | None 
     make a successful model save appear to have failed. The return value is
     useful to direct callers/tests but signal receivers intentionally ignore it.
     """
-    from asgiref.sync import async_to_sync
-
+    if get_channel_layer() is None:
+        return False
     try:
-        channel_layer = get_channel_layer()
-        if channel_layer is None:
-            return False
-        async_to_sync(channel_layer.group_send)(group_name, event)
+        group_send_sync(group_name, event)
     except Exception:
         (log or logger).exception(
             "Failed to broadcast to WebSocket group %s; persisted data is unchanged",

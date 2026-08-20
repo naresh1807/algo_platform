@@ -9,6 +9,22 @@ import { endpoints } from "../services/api.js";
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
+ * Publishes an expiry selection to apps.options.views.SelectedExpiryView
+ * so apps.market_data.broker_ws_client's dynamic subscription-refresh
+ * loop (a separate OS process, run_live_feed) picks it up on its next
+ * cycle and re-subscribes the live feed to that expiry's strikes --
+ * without this call, the dropdown would change what the frontend
+ * REQUESTS but never what the live feed is actually SUBSCRIBED to.
+ * Best-effort: a failed publish still lets the user browse the
+ * now-selected expiry's REST-loaded chain, it just won't get live ticks
+ * for it until a retry succeeds. Exported as a standalone function (not
+ * inlined in the hook below) so it can be unit-tested directly.
+ */
+export function publishSelectedExpiry(underlying, expiry) {
+  return endpoints.setSelectedOptionExpiry(underlying, expiry).catch(() => {});
+}
+
+/**
  * The ONE shared piece of expiry-selection logic on the frontend --
  * JarvisSignalTerminal.jsx and OptionsAnalytics.jsx both used to
  * independently fetch /options/expiries/ and auto-select its first
@@ -99,10 +115,14 @@ export function useExpiryStatus(underlying) {
     };
   }, [fetchStatus]);
 
-  const setExpiry = useCallback((value) => {
-    userPickedRef.current = true;
-    setExpiryState(value);
-  }, []);
+  const setExpiry = useCallback(
+    (value) => {
+      userPickedRef.current = true;
+      setExpiryState(value);
+      if (value) publishSelectedExpiry(underlying, value);
+    },
+    [underlying]
+  );
 
   return {
     expiry,

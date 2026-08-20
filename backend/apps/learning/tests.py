@@ -685,10 +685,13 @@ class EvaluateAndOpenScalpTests(TestCase):
 
     def test_approved_case_opens_a_real_position(self):
         from datetime import date, timedelta
+        from decimal import Decimal
         from unittest.mock import patch
 
+        from django.utils import timezone
+
         from apps.execution.models import OpenPosition
-        from apps.options.models import OptionContract
+        from apps.options.models import OptionChainSnapshot, OptionContract
         from apps.risk.engine import RiskDecision
         from common.constants import PositionSide, SignalStatus
 
@@ -698,6 +701,17 @@ class EvaluateAndOpenScalpTests(TestCase):
             underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=100,
             option_type="CE", symbol_token="tok_ce_100b", tradingsymbol="NIFTY100CE",
             lot_size=25,
+        )
+        # apps.risk.engine.validate_signal_for_execution's execution-time
+        # liquidity check (real safety hardening) requires a fresh
+        # OptionChainSnapshot with a tight bid/ask spread and real OI for
+        # any option_contract signal -- without one it rejects with "No
+        # option quote snapshot exists for execution-time liquidity
+        # validation," which this test's fixture never provided.
+        OptionChainSnapshot.objects.create(
+            contract=contract, timestamp=timezone.now(), ltp=Decimal("5.0"),
+            bid=Decimal("4.9"), ask=Decimal("5.0"), open_interest=1000,
+            change_in_oi=0, volume=100,
         )
         suggestion = {
             "suggested": {"contract_id": contract.pk, "strike": 100.0, "ltp": 5.0, "delta": 0.5},
@@ -713,7 +727,12 @@ class EvaluateAndOpenScalpTests(TestCase):
             )
 
         # open_position_from_signal marks it EXECUTED once the real
-        # position opens (it was APPROVED right up until that call).
+        # position opens (it was APPROVED right up until that call) --
+        # but it does so on ITS OWN freshly select_for_update()-loaded
+        # copy of the signal, not the object reference this test/
+        # evaluate_and_open_scalp already holds, so that mutation is
+        # only visible after a real refresh from the DB.
+        signal.refresh_from_db()
         self.assertEqual(signal.status, SignalStatus.EXECUTED)
         self.assertEqual(signal.option_contract_id, contract.pk)
         self.assertEqual(signal.position_size, 50)  # 2 lots x 25

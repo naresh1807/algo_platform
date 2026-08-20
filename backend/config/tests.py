@@ -46,6 +46,39 @@ class ApiUrlNamespaceTests(SimpleTestCase):
                 self.assertEqual(reverse(view_name), expected_path)
 
 
+class CeleryRoutingTests(SimpleTestCase):
+    """
+    config/celery.py's task_routes -- fix-list item 7 ("make the
+    configuration and documentation consistent" for the priority queue).
+    A routing-table assertion, not a live Celery/Redis integration test
+    (no broker involved) -- verifies the exact tasks that must never be
+    starved by slow default-queue work are actually routed to "priority".
+    """
+
+    def test_option_chain_ingestion_routed_to_priority_queue(self):
+        from config.celery import app
+
+        route = app.conf.task_routes["apps.options.tasks.ingest_option_chain_snapshots"]
+        self.assertEqual(route["queue"], "priority")
+
+    def test_priority_worker_heartbeat_routed_to_priority_queue(self):
+        from config.celery import app
+
+        route = app.conf.task_routes["apps.monitoring.tasks.heartbeat_priority_worker"]
+        self.assertEqual(route["queue"], "priority")
+
+    def test_default_worker_heartbeat_is_not_routed_to_priority(self):
+        from config.celery import app
+
+        self.assertNotIn("apps.monitoring.tasks.heartbeat_default_worker", app.conf.task_routes)
+
+    def test_both_heartbeats_are_scheduled(self):
+        from config.celery import app
+
+        self.assertIn("heartbeat-default-worker-every-minute", app.conf.beat_schedule)
+        self.assertIn("heartbeat-priority-worker-every-minute", app.conf.beat_schedule)
+
+
 class SecuritySettingsTests(SimpleTestCase):
     def _settings_import(self, command="import config.settings", **overrides):
         child_environment = os.environ.copy()

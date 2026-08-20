@@ -33,6 +33,22 @@ Reuses apps.market_data.tick_aggregator's own bucket-boundary math
 option's 09:15-anchored bucket boundaries can never drift from the
 underlying's -- there must be exactly one definition of "when does a 5m
 bucket start," not two that could quietly disagree.
+
+DB WRITES -- 1m ONLY: this used to persist all six INTRADAY_LIVE_
+TIMEFRAMES to MySQL independently, every ~2 seconds, for every live
+contract -- with 100+ subscribed contracts that is hundreds of upserts
+per second sustained, real load this platform's own incident history
+flagged (manual fix-list item 5: "excessive MySQL and Redis work").
+1-minute is now the ONE canonical persisted live timeframe; every other
+timeframe still aggregates and BROADCASTS in memory on every tick (so a
+chart open on any timeframe keeps moving in real time, unchanged from
+before), it is simply never written to OptionCandle. Completed higher-
+timeframe history is instead served by apps.options.candle_service's
+existing Angel-One-backed fetch/cache path (get_option_candles), which
+already upserts real OHLCV for whichever timeframe a chart actually
+requests -- reusing that path here would have meant re-deriving the
+same data twice; not writing it live and letting the on-demand path
+supply it is the smaller, coherent change.
 """
 
 from __future__ import annotations
@@ -42,16 +58,20 @@ import threading
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.utils import timezone as django_timezone
 
 from apps.market_data.tick_aggregator import INTRADAY_LIVE_TIMEFRAMES, _bucket_start
+from common.websockets import group_send_sync
 
 logger = logging.getLogger(__name__)
 
 _MIN_PERSIST_INTERVAL = timedelta(seconds=2)
 _MIN_BROADCAST_INTERVAL = timedelta(milliseconds=250)
+
+# The one timeframe live ticks persist to OptionCandle -- see this
+# module's own docstring ("DB WRITES -- 1m ONLY") for why.
+_LIVE_PERSIST_TIMEFRAME = "1m"
 
 
 def group_name(contract_id: int, timeframe: str) -> str:
@@ -119,8 +139,11 @@ class OptionCandleAggregator:
                 state.update(ltp, cum_volume)
 
             should_persist = (
-                is_new_bucket or state.last_persisted_at is None
-                or (now - state.last_persisted_at) >= _MIN_PERSIST_INTERVAL
+                timeframe == _LIVE_PERSIST_TIMEFRAME
+                and (
+                    is_new_bucket or state.last_persisted_at is None
+                    or (now - state.last_persisted_at) >= _MIN_PERSIST_INTERVAL
+                )
             )
             if should_persist:
                 state.last_persisted_at = now
@@ -135,7 +158,8 @@ class OptionCandleAggregator:
             candle = state.as_dict(contract_id, timeframe)
 
         if rollover_candle is not None:
-            self._persist(rollover_candle)
+            if timeframe == _LIVE_PERSIST_TIMEFRAME:
+                self._persist(rollover_candle)
             self._broadcast(rollover_candle)
         if should_broadcast:
             self._broadcast(candle)
@@ -143,10 +167,16 @@ class OptionCandleAggregator:
             self._persist(candle)
 
     def _broadcast(self, candle: dict) -> None:
-        channel_layer = get_channel_layer()
-        if channel_layer is None:
+        # See common.websockets.group_send_sync's own module-level
+        # comment for why every group_send in this codebase routes
+        # through one persistent event loop/connection pool instead of
+        # a raw async_to_sync(channel_layer.group_send) call here --
+        # this aggregator's own broadcast volume (up to 6 timeframes x
+        # every live-subscribed contract) was a real contributor to the
+        # Redis-connection-exhaustion incident that fix resolves.
+        if get_channel_layer() is None:
             return
-        async_to_sync(channel_layer.group_send)(
+        group_send_sync(
             group_name(candle["contract_id"], candle["timeframe"]),
             {
                 "type": "candle_update",

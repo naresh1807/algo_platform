@@ -6,18 +6,28 @@ apps.market_data.broker_ws_client.LiveFeedClient calls
 handle_option_tick() for every SNAP_QUOTE tick it receives for a
 subscribed option contract (see that module's `on_option_tick`).
 
-Deliberately writes an OptionChainSnapshot row (throttled) rather than
-inventing a new broadcast path: apps/options/signals.py's post_save
-receiver already broadcasts every new OptionChainSnapshot to the
-"options_live" Channels group (computing Greeks server-side too) --
-that whole path needed zero changes for this to reach the frontend,
-same reasoning apps.investing.live_feed gives for IndexPriceSnapshot.
+FAST/SLOW SPLIT (this is the fix for "the UI must receive LTP before
+DB/IV processing," and for the tick-drop incident described in
+apps.market_data.broker_ws_client's own module docstring): every tick
+first broadcasts a lightweight LTP update straight from the tick's own
+fields and the caller-supplied contract identity (`meta`, resolved once
+by apps.options.subscription_manager -- no DB query on this path at
+all), THEN does the slower work (candle aggregation, throttled
+OptionChainSnapshot persistence, local IV solve). A DB hiccup or an IV
+solver failure in the slow path can never block or delay the fast
+broadcast that already happened before either ran.
 
-The per-snapshot fields (change_in_oi vs. the previous snapshot, local
-IV solve when the broker doesn't supply one) are the SAME two
-computations apps.options.tasks.ingest_option_chain_snapshots already
-does for its REST-poll path -- reused here, not reimplemented, so the
-live and polled paths can never silently compute these differently.
+The fast broadcast reuses the SAME "chain_update" message shape and
+Channels group ("options_live") the throttled OptionChainSnapshot path
+already broadcasts via apps/options/signals.py's post_save receiver --
+deliberately not a new message type -- so the existing frontend merge
+(OptionsAnalytics.jsx / JarvisSignalTerminal.jsx) needs no new handler,
+only a field-level merge instead of a whole-leg replace (see those
+files' own comments). Fields the fast path cannot know yet
+(change_in_oi, iv, greeks -- all need a DB read or a real computation)
+are OMITTED from the payload entirely, not set to null, specifically so
+the frontend's merge preserves whatever the last full snapshot said
+instead of blanking those columns out between snapshots.
 """
 
 from __future__ import annotations
@@ -31,26 +41,73 @@ from django.utils import timezone as django_timezone
 logger = logging.getLogger(__name__)
 
 # Matches apps.market_data.tick_aggregator's _MIN_PERSIST_INTERVAL --
-# same reasoning: an index option chain can have 100+ live contracts,
-# and Angel One can tick several times a second per contract, so this
-# bounds DB writes/broadcasts to a sane rate regardless of tick volume.
+# an index option chain can have 100+ live contracts, and Angel One can
+# tick several times a second per contract, so this bounds DB
+# writes/full-snapshot broadcasts to a sane rate regardless of tick
+# volume. Does NOT throttle the fast LTP broadcast above -- that runs on
+# every tick.
 _MIN_SNAPSHOT_INTERVAL = timedelta(seconds=2)
 
 _lock = threading.Lock()
 _last_snapshot_at: dict[int, object] = {}  # contract_id -> last snapshot datetime
 
 
-def handle_option_tick(contract_id: int, ltp: float, oi: int, volume: int, bid: float | None, ask: float | None) -> None:
+def _broadcast_fast_ltp(meta: dict, ltp: float, oi: int, volume: int, bid: float | None, ask: float | None, now) -> None:
+    from common.websockets import broadcast_group
+
+    broadcast_group(
+        "options_live",
+        {
+            "type": "chain_update",  # must match apps.options.consumers.LiveOptionChainConsumer's method name
+            "data": {
+                "contract_id": meta["contract_id"],
+                "underlying": meta["underlying"],
+                "expiry": meta["expiry"],
+                "strike": meta["strike"],
+                "option_type": meta["option_type"],
+                "timestamp": now.isoformat(),
+                "ltp": ltp,
+                "open_interest": oi,
+                "volume": volume,
+                "bid": bid,
+                "ask": ask,
+                # change_in_oi / iv / greeks deliberately absent -- see
+                # module docstring. The slow-path OptionChainSnapshot
+                # broadcast (apps/options/signals.py) fills them in
+                # moments later without the frontend ever showing a
+                # blank/reset value in between.
+            },
+        },
+        log=logger,
+    )
+
+
+def handle_option_tick(
+    meta: dict, ltp: float, oi: int, volume: int, bid: float | None, ask: float | None,
+    exchange_timestamp_ms: int | None = None,
+) -> None:
+    """
+    `meta`: {"contract_id", "underlying", "expiry" (ISO string),
+    "strike" (float), "option_type"} -- resolved once by
+    apps.options.subscription_manager when the token was subscribed, not
+    re-fetched from the DB on every tick (see this module's own
+    docstring for why that matters).
+    """
     now = django_timezone.now()
+    contract_id = meta["contract_id"]
+
+    try:
+        _broadcast_fast_ltp(meta, ltp, oi, volume, bid, ask, now)
+    except Exception:
+        logger.exception("handle_option_tick: fast LTP broadcast failed for contract_id=%s", contract_id)
 
     # Candle aggregation runs on EVERY tick, unthrottled by the
-    # OptionChainSnapshot interval below (that throttle is about how
-    # often we persist a full OI/IV/bid-ask snapshot, not about candle
-    # accuracy) -- apps.options.candle_aggregator.OptionCandleAggregator
-    # does its own internal persist/broadcast throttling, the same
-    # "every tick updates the in-memory bucket, DB writes are rate
-    # limited independently" split apps.market_data.tick_aggregator
-    # already uses for the underlying's own live candles.
+    # OptionChainSnapshot interval below -- apps.options.candle_aggregator
+    # .OptionCandleAggregator does its own internal persist/broadcast
+    # throttling, the same "every tick updates the in-memory bucket, DB
+    # writes are rate limited independently" split
+    # apps.market_data.tick_aggregator already uses for the underlying's
+    # own live candles.
     try:
         from .candle_aggregator import get_option_candle_aggregator
 
@@ -79,7 +136,9 @@ def handle_option_tick(contract_id: int, ltp: float, oi: int, volume: int, bid: 
 
     # Same local-IV-solve fallback as ingest_option_chain_snapshots
     # (apps/options/tasks.py) -- Angel One's tick payload has no IV
-    # field either, same documented gap as its REST quote payload.
+    # field either, same documented gap as its REST quote payload. A
+    # failure here must never block the fast LTP broadcast above -- it
+    # already happened, unconditionally, before this line ever runs.
     iv = None
     latest_underlying = HistoricalData.objects.filter(symbol=contract.underlying).order_by("-timestamp").first()
     spot = float(latest_underlying.close) if latest_underlying else None

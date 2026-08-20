@@ -6,6 +6,7 @@ import StatusBadge from "../components/StatusBadge.jsx";
 import EmptyState from "../components/EmptyState.jsx";
 import { useExpiryStatus } from "../hooks/useExpiryStatus.js";
 import { useLiveIndexSpot } from "../hooks/useLiveIndexSpot.js";
+import { useLiveOptionChainMerge } from "../hooks/useLiveOptionChainMerge.js";
 import { endpoints } from "../services/api.js";
 import { useLiveStore } from "../store/liveStore.js";
 
@@ -79,7 +80,6 @@ export default function OptionsAnalytics() {
   // re-render on write) since it's only ever read to DIFF against the
   // next tick, never rendered itself.
   const [flash, setFlash] = useState({});
-  const prevLtpRef = useRef({});
   // Guards fetchBestStrike against out-of-order responses: clicking
   // Bullish then Bearish before the first request resolves previously
   // let the slower Bullish response land last and overwrite `bestStrike`
@@ -135,51 +135,12 @@ export default function OptionsAnalytics() {
     };
   }, [underlying, expiry]);
 
-  // Merge live snapshot pushes (apps/options/consumers.py) into the
-  // already-loaded chain grid -- same "REST loads history, WebSocket
-  // keeps it fresh" pattern as Dashboard.jsx's candle handling.
-  useEffect(() => {
-    if (!latestOptionUpdate) return;
-    if (latestOptionUpdate.underlying !== underlying || latestOptionUpdate.expiry !== expiry) return;
-
-    const side = latestOptionUpdate.option_type === "CE" ? "call" : "put";
-    const flashKey = `${latestOptionUpdate.strike}-${side}`;
-    const prevLtp = prevLtpRef.current[flashKey];
-    if (prevLtp != null && latestOptionUpdate.ltp != null && latestOptionUpdate.ltp !== prevLtp) {
-      const direction = latestOptionUpdate.ltp > prevLtp ? "up" : "down";
-      setFlash((f) => ({ ...f, [flashKey]: direction }));
-      setTimeout(() => {
-        setFlash((f) => {
-          if (f[flashKey] !== direction) return f; // a newer flash already replaced this one
-          const { [flashKey]: _drop, ...rest } = f;
-          return rest;
-        });
-      }, 650);
-    }
-    prevLtpRef.current[flashKey] = latestOptionUpdate.ltp;
-
-    setChainRows((prev) => {
-      const idx = prev.findIndex((r) => r.strike === latestOptionUpdate.strike);
-      const updatedLeg = {
-        ltp: latestOptionUpdate.ltp,
-        open_interest: latestOptionUpdate.open_interest,
-        change_in_oi: latestOptionUpdate.change_in_oi,
-        volume: latestOptionUpdate.volume,
-        iv: latestOptionUpdate.iv,
-        bid: latestOptionUpdate.bid,
-        ask: latestOptionUpdate.ask,
-        timestamp: latestOptionUpdate.timestamp,
-        greeks: latestOptionUpdate.greeks,
-      };
-      if (idx === -1) {
-        const row = { strike: latestOptionUpdate.strike, call: null, put: null, [side]: updatedLeg };
-        return [...prev, row].sort((a, b) => a.strike - b.strike);
-      }
-      const next = [...prev];
-      next[idx] = { ...next[idx], [side]: updatedLeg };
-      return next;
-    });
-  }, [latestOptionUpdate, underlying, expiry]);
+  // Merge live snapshot/LTP pushes (apps/options/consumers.py,
+  // apps/options/live_feed.py) into the already-loaded chain grid --
+  // same "REST loads history, WebSocket keeps it fresh" pattern as
+  // Dashboard.jsx's candle handling. See hooks/useLiveOptionChainMerge.js
+  // for why this must be a field-level merge, not a whole-leg replace.
+  useLiveOptionChainMerge({ latestOptionUpdate, underlying, expiry, setChainRows, setFlash });
 
   const fetchBestStrike = (direction) => {
     if (!expiry) return;

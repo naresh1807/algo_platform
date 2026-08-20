@@ -190,14 +190,35 @@ DATABASES = {
 # Channels -- real-time layer (live candles, signal updates, risk alerts,
 # kill-switch status -- see manual section 10)
 # ---------------------------------------------------------------------------
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")],
+# REAL, OBSERVED INCIDENT: this used to point at the real Redis instance
+# UNCONDITIONALLY, with no TESTING-time isolation -- unlike CACHES just
+# above, which already had exactly this LocMemCache-under-TESTING split.
+# Every apps.*.signals post_save receiver (apps.signals.signals,
+# apps.options.signals, apps.investing.signals, ...) broadcasts via
+# channel_layer.group_send the moment a model is saved, including from
+# test fixtures (e.g. apps/options/tests.py and apps/execution/tests.py
+# both create TradingSignal rows with entry_price=Decimal("313.73")/
+# Decimal("110") as test data). With this pointed at the real Redis
+# instance during `manage.py test`, those fixture saves broadcast REAL
+# WebSocket messages to the SAME "signals_live"/"options_live"/
+# "market_data_live" groups a real, live browser session is subscribed
+# to -- a user with the dashboard open while tests ran saw fake
+# "🟢 BUY NIFTY (CE)" signal popups with test-fixture prices, genuinely
+# indistinguishable from a real approved signal. InMemoryChannelLayer
+# during tests is process-local and torn down with the test process, so
+# a test run can never again leak a broadcast into a real user's session.
+CHANNEL_LAYERS = (
+    {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+    if TESTING
+    else {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")],
+            },
         },
-    },
-}
+    }
+)
 
 # DRF throttling and the option-fetch/cooldown locks must be shared by
 # every web process. Django's built-in Redis backend uses the already
@@ -409,6 +430,67 @@ OPTIONS_EXPIRY_SYNC_COUNT = max(4, int(os.environ.get("OPTIONS_EXPIRY_SYNC_COUNT
 # an entire trading day.
 OPTIONS_SYNC_LOCK_TIMEOUT_SECONDS = int(os.environ.get("OPTIONS_SYNC_LOCK_TIMEOUT_SECONDS", "300"))
 
+# ---------------------------------------------------------------------------
+# Live option-feed subscription scope (apps.options.subscription_manager /
+# apps.market_data.broker_ws_client) -- see subscription_manager's own module
+# docstring for the root-cause incident this fixes: subscribing every synced
+# expiry's every strike (1000+ live SNAP_QUOTE tokens) overwhelmed the option
+# tick pipeline and produced millions of dropped ticks. These bound the live
+# WebSocket subscription to only what the dashboard can actually show.
+# ---------------------------------------------------------------------------
+# Strikes above/below ATM to keep subscribed, per side (CE+PE) -- 20 is a
+# generous default for a single index chain (Angel One index option strikes
+# are typically 50-100 points apart, so 20 either side covers a wide real
+# trading range) while still cutting subscription count by an order of
+# magnitude versus "every strike in every synced expiry."
+OPTIONS_LIVE_STRIKE_RANGE = max(0, int(os.environ.get("OPTIONS_LIVE_STRIKE_RANGE", "20")))
+
+# Angel One's SmartWebSocketV2.subscribe()/unsubscribe() accept a token list
+# per call; kept well under any documented per-connection cap so a single
+# subscribe/unsubscribe request is never oversized, and one bad chunk can
+# never fail the whole batch.
+OPTIONS_LIVE_MAX_TOKENS_PER_SUBSCRIBE = max(1, int(os.environ.get("OPTIONS_LIVE_MAX_TOKENS_PER_SUBSCRIBE", "50")))
+
+# How often run_live_feed's dynamic subscription manager re-resolves the
+# desired option-token set (expiry rollover, operator expiry selection,
+# ATM drift) and diffs it against what's currently subscribed -- short
+# enough that a rollover or an expiry change from the UI takes effect
+# without restarting run_live_feed, long enough to never be a meaningful
+# source of broker-request load on its own (this is a local DB read plus a
+# small subscribe/unsubscribe delta, not a broker REST call).
+OPTIONS_LIVE_SUBSCRIPTION_REFRESH_SECONDS = max(5, int(os.environ.get("OPTIONS_LIVE_SUBSCRIPTION_REFRESH_SECONDS", "15")))
+
+# Worker threads draining apps.market_data.tick_coalescer.TickCoalescer for
+# option ticks -- several can run concurrently since the coalescer only ever
+# hands a given token to one worker at a time (see that module's docstring).
+OPTIONS_LIVE_TICK_WORKERS = max(1, int(os.environ.get("OPTIONS_LIVE_TICK_WORKERS", "4")))
+
+# Same TickCoalescer shape as the option side, applied to the ~8 index
+# symbols (apps.market_data.broker_client.SYMBOL_TOKENS) -- observed for
+# real that even 8 symbols can burst enough at market open (09:15-09:20
+# IST) to overwhelm a single worker doing DB writes per tick
+# (apps.investing.live_feed.handle_index_tick + CandleAggregator.on_tick),
+# see broker_ws_client's own module docstring. Fewer workers than the
+# option side by default since there are far fewer distinct symbols to
+# ever have queued up concurrently.
+LIVE_INDEX_TICK_WORKERS = max(1, int(os.environ.get("LIVE_INDEX_TICK_WORKERS", "2")))
+
+# How often run_live_feed publishes its heartbeat/stats into the shared
+# cache for apps.monitoring's health endpoint (apps.market_data.feed_stats).
+OPTIONS_LIVE_HEARTBEAT_SECONDS = max(2, int(os.environ.get("OPTIONS_LIVE_HEARTBEAT_SECONDS", "10")))
+
+# Throttles how often a live index/option tick publishes its "last tick at"
+# timestamp into feed_stats -- publishing on EVERY tick would turn the fast,
+# in-process tick path into a Redis round-trip per tick, defeating the point
+# of the fast path. A couple of seconds of staleness on a HEALTH indicator is
+# irrelevant; it is never used to gate the actual LTP broadcast.
+OPTIONS_LIVE_STATS_PUBLISH_INTERVAL_SECONDS = max(1, int(os.environ.get("OPTIONS_LIVE_STATS_PUBLISH_INTERVAL_SECONDS", "2")))
+
+# apps.monitoring.health: how stale a heartbeat/last-tick timestamp must be
+# before it's reported unhealthy/stale rather than ok.
+LIVE_FEED_STALE_SECONDS = max(5, int(os.environ.get("LIVE_FEED_STALE_SECONDS", "45")))
+CELERY_HEARTBEAT_STALE_SECONDS = max(30, int(os.environ.get("CELERY_HEARTBEAT_STALE_SECONDS", "150")))
+
 # Where apps.learning.ml_train serializes trained win-probability model
 # artifacts (joblib files) -- kept out of the DB / git on purpose, same
 # reasoning as ModelRegistry.artifact_path's docstring: the registry
@@ -538,3 +620,39 @@ FIELD_ENCRYPTION_KEY = os.environ.get("FIELD_ENCRYPTION_KEY", "")
 # convention as NEWSAPI_KEY/BROKER_MODE elsewhere in this file.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+
+# ---------------------------------------------------------------------------
+# Logging -- explicit config (Django's implicit default was fine for dev but
+# gave no place to hook a redaction filter) so that a log line built from an
+# exception's str(), a raw broker response, or an HTTP header dict can never
+# leak an Authorization header, JWT, API key, password, or TOTP secret into
+# a log file. common.log_filters.RedactSensitiveDataFilter scans every
+# formatted record for a small set of known-sensitive patterns and replaces
+# the value with "***REDACTED***" -- applied to every handler below, not
+# just one, so nothing bypasses it by using a different logger name.
+# ---------------------------------------------------------------------------
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "redact_sensitive": {
+            "()": "common.log_filters.RedactSensitiveDataFilter",
+        },
+    },
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+            "filters": ["redact_sensitive"],
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO"),
+    },
+}

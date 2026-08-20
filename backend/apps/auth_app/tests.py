@@ -53,13 +53,32 @@ class TokenAuthTests(APITestCase):
             200,
         )
 
-    @override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {"login": "2/minute"}})
     def test_authenticated_request_cannot_bypass_login_rate_limit(self):
+        """
+        DRF's SimpleRateThrottle subclasses (LoginRateThrottle here) read
+        their rate from a THROTTLE_RATES CLASS ATTRIBUTE that is bound
+        once, at import time, from api_settings.DEFAULT_THROTTLE_RATES --
+        `@override_settings(REST_FRAMEWORK=...)` fires DRF's own
+        setting_changed reload for api_settings itself, but does NOT
+        retroactively update a throttle class's already-bound
+        THROTTLE_RATES attribute (a well-known DRF testing gotcha), so
+        the previous version of this test silently never actually
+        throttled anything -- every attempt returned 400 (wrong
+        password), never 429. Patching LoginRateThrottle.THROTTLE_RATES
+        directly is what actually takes effect per-request, since DRF
+        instantiates a fresh throttle object on every request and reads
+        this attribute then.
+        """
+        from unittest.mock import patch
+
+        from .views import LoginRateThrottle
+
         self.client.force_authenticate(self.user)
         payload = {"username": "trader1", "password": "wrong-password"}
-        self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 400)
-        self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 400)
-        self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 429)
+        with patch.object(LoginRateThrottle, "THROTTLE_RATES", {"login": "2/minute"}):
+            self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 400)
+            self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 400)
+            self.assertEqual(self.client.post("/api/auth/token/", payload).status_code, 429)
 
     def test_protected_endpoint_rejects_missing_token(self):
         response = self.client.get("/api/risk/equity/")

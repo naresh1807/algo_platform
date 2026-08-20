@@ -92,7 +92,21 @@ class IndexSerializer(serializers.ModelSerializer):
         latest = obj.price_snapshots.order_by("-timestamp").first()
         if latest is None:
             return None
-        return {"ltp": latest.ltp, "change": latest.change, "change_pct": latest.change_pct, "timestamp": latest.timestamp}
+        # ltp/change are DecimalField -- DRF's JSON encoder serializes a
+        # raw Decimal as a STRING, unlike every other price field in this
+        # codebase (apps.options.views, apps.options.signals, etc.), which
+        # all explicitly float()-cast before returning. Left un-cast here,
+        # frontend code that does `spot.toFixed(...)` on this value (a
+        # Number-only method) would throw -- and with no React error
+        # boundary in place (see RouteErrorBoundary.jsx), an uncaught
+        # render exception like that used to take down the whole app,
+        # nav bars included, not just the one page.
+        return {
+            "ltp": float(latest.ltp),
+            "change": float(latest.change) if latest.change is not None else None,
+            "change_pct": latest.change_pct,
+            "timestamp": latest.timestamp,
+        }
 
     def get_constituent_count(self, obj):
         return obj.constituents.count()

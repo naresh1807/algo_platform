@@ -48,6 +48,7 @@ def broadcast_new_snapshot(sender, instance: OptionChainSnapshot, created: bool,
         {
             "type": "chain_update",  # must match the consumer method name exactly
             "data": {
+                "contract_id": contract.id,
                 "underlying": contract.underlying,
                 "expiry": contract.expiry.isoformat(),
                 "strike": float(contract.strike),

@@ -9,7 +9,6 @@ compute on at all.
 import logging
 from datetime import datetime
 
-from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from celery import shared_task
 from django.conf import settings
@@ -17,6 +16,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone as django_timezone
 
 from apps.monitoring.models import FeedHealthCheck
+from common.websockets import group_send_sync
 
 from .broker_client import BrokerClient, get_broker_client
 from .models import HistoricalData
@@ -258,10 +258,12 @@ def _upsert_candles(candles: list[dict]) -> int:
             ):
                 latest_changed[key] = candle
 
-        channel_layer = get_channel_layer()
-        if channel_layer is not None:
+        # Routed through common.websockets.group_send_sync -- see that
+        # helper's own module-level comment for why every group_send in
+        # this codebase shares one persistent event loop/connection pool.
+        if get_channel_layer() is not None:
             for candle in latest_changed.values():
-                async_to_sync(channel_layer.group_send)(
+                group_send_sync(
                     "market_data_live",
                     {
                         "type": "candle_update",

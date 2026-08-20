@@ -33,9 +33,10 @@ import threading
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.utils import timezone as django_timezone
+
+from common.websockets import group_send_sync
 
 from .models import HistoricalData
 
@@ -193,10 +194,14 @@ class CandleAggregator:
             self._persist(candle)
 
     def _broadcast(self, candle: dict) -> None:
-        channel_layer = get_channel_layer()
-        if channel_layer is None:
+        # Routed through common.websockets.group_send_sync (a single
+        # persistent event loop/connection pool for the whole process)
+        # rather than a raw async_to_sync(channel_layer.group_send)
+        # call here -- see that helper's own module-level comment for
+        # the real Redis-connection-exhaustion incident this fixes.
+        if get_channel_layer() is None:
             return
-        async_to_sync(channel_layer.group_send)(
+        group_send_sync(
             "market_data_live",
             {
                 "type": "candle_update",
