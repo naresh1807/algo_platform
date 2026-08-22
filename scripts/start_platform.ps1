@@ -68,6 +68,26 @@ function Backup-LargeLog {
     }
 }
 
+# What each tracked process's command line must still contain to be
+# considered the SAME service that started it, not just any process
+# that happens to be alive under a recycled PID -- same table
+# stop_platform.ps1 uses for the same reason (see that script's header
+# comment: a PID is not a stable identity across a reboot/long gap).
+# Without this check, Test-TrackedProcessAlive below would treat an
+# unrelated process that happened to land on a stale recorded PID
+# (observed for real: run_live_feed's PID got recycled by an unrelated
+# VS Code helper process) as "still running" and silently skip starting
+# the actual service -- the platform then LOOKS fully started (every
+# name appears in the summary table) while one entry is actually dead.
+$ExpectedMarkers = @{
+    "django"                   = @("manage.py", "runserver")
+    "celery_worker_default"    = @("celery", "worker")
+    "celery_worker_priority"   = @("celery", "worker", "priority")
+    "celery_beat"              = @("celery", "beat")
+    "run_live_feed"            = @("manage.py", "run_live_feed")
+    "frontend"                 = @("npm", "run", "dev")
+}
+
 function Test-TrackedProcessAlive {
     param([string]$Name)
     $pidFile = Join-Path $PidDir "$Name.pid"
@@ -75,7 +95,21 @@ function Test-TrackedProcessAlive {
     $recordedId = Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $recordedId) { return $false }
     $proc = Get-Process -Id $recordedId -ErrorAction SilentlyContinue
-    return $null -ne $proc
+    if (-not $proc) { return $false }
+
+    $markers = $ExpectedMarkers[$Name]
+    if (-not $markers) { return $true }
+    $commandLine = ""
+    try {
+        $commandLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $recordedId" -ErrorAction Stop).CommandLine
+    } catch {
+        $commandLine = ""
+    }
+    if (-not $commandLine) { return $false }
+    foreach ($marker in $markers) {
+        if ($commandLine -notlike "*$marker*") { return $false }
+    }
+    return $true
 }
 
 function Format-ProcessArgument {
