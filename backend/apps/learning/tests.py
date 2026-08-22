@@ -719,9 +719,16 @@ class EvaluateAndOpenScalpTests(TestCase):
         }
         risk_decision = RiskDecision(approved=True, risk_score=1.0, reasons=[], position_size=50)
 
+        # apps.risk.engine.validate_signal_for_execution's execution-time
+        # checks include a real is_market_open() veto -- without mocking
+        # it, this test only passes when actually run during NSE hours
+        # (09:15-15:30 IST), a real, discovered flakiness unrelated to
+        # what this test is meant to verify (that an approved signal
+        # opens a real position).
         with patch("apps.options.signals_engine.nearest_expiry", return_value=date.today() + timedelta(days=7)), \
              patch("apps.options.strike_selector.suggest_best_strike", return_value=suggestion), \
-             patch("apps.risk.engine.check_pre_trade", return_value=risk_decision):
+             patch("apps.risk.engine.check_pre_trade", return_value=risk_decision), \
+             patch("apps.market_data.market_hours.is_market_open", return_value=(True, "")):
             signal = evaluate_and_open_scalp(
                 "ema_momentum_scalp", lambda s, tf: self._fake_idea(), "NIFTY",
             )
@@ -773,3 +780,93 @@ class EvaluateAndOpenScalpTests(TestCase):
             evaluate_and_open_scalp("ema_momentum_scalp", lambda s, tf: self._fake_idea(), "NIFTY")
 
         self.assertEqual(HypotheticalTrade.objects.count(), 0)
+
+    def test_low_ml_confidence_rejects_before_opening_a_real_position(self):
+        """
+        Real bug fix: this path used to skip straight from "risk-approved"
+        to a real paper OpenPosition with no confidence check at all --
+        exactly how a rule-approved setup with e.g. 28% ML win-probability
+        could end up with status=Opened. Same
+        apps.learning.ml_predict.should_reject_for_low_confidence gate
+        apps.signals.engine.generate_signal and apps.options.
+        index_direction_strategy already apply must now also apply here.
+        """
+        from datetime import date, timedelta
+        from unittest.mock import patch
+
+        from apps.execution.models import OpenPosition
+        from apps.options.models import OptionContract
+        from apps.risk.engine import RiskDecision
+        from common.constants import SignalStatus
+
+        from .scalp_execution import evaluate_and_open_scalp
+
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=100,
+            option_type="CE", symbol_token="tok_ce_100d", tradingsymbol="NIFTY100CE",
+            lot_size=25,
+        )
+        suggestion = {
+            "suggested": {"contract_id": contract.pk, "strike": 100.0, "ltp": 5.0, "delta": 0.5},
+            "reason": "test suggestion",
+        }
+        risk_decision = RiskDecision(approved=True, risk_score=1.0, reasons=[], position_size=50)
+
+        with patch("apps.options.signals_engine.nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch("apps.options.strike_selector.suggest_best_strike", return_value=suggestion), \
+             patch("apps.risk.engine.check_pre_trade", return_value=risk_decision), \
+             patch("apps.learning.ml_predict.predict_win_probability", return_value=0.28):
+            signal = evaluate_and_open_scalp(
+                "sar_volume_burst_scalp", lambda s, tf: self._fake_idea(), "BANKNIFTY",
+            )
+
+        self.assertEqual(signal.status, SignalStatus.REJECTED)
+        self.assertEqual(signal.rejection_stage, "ml_confidence")
+        self.assertEqual(signal.ml_win_probability, 0.28)
+        self.assertIn("28%", signal.reason)
+        self.assertIn("No real order placed", signal.reason)
+        self.assertEqual(OpenPosition.objects.count(), 0)
+
+    def test_high_ml_confidence_still_opens_a_real_position(self):
+        from datetime import date, timedelta
+        from decimal import Decimal
+        from unittest.mock import patch
+
+        from django.utils import timezone
+
+        from apps.execution.models import OpenPosition
+        from apps.options.models import OptionChainSnapshot, OptionContract
+        from apps.risk.engine import RiskDecision
+        from common.constants import SignalStatus
+
+        from .scalp_execution import evaluate_and_open_scalp
+
+        contract = OptionContract.objects.create(
+            underlying="NIFTY", expiry=date.today() + timedelta(days=7), strike=100,
+            option_type="CE", symbol_token="tok_ce_100e", tradingsymbol="NIFTY100CE",
+            lot_size=25,
+        )
+        OptionChainSnapshot.objects.create(
+            contract=contract, timestamp=timezone.now(), ltp=Decimal("5.0"),
+            bid=Decimal("4.9"), ask=Decimal("5.0"), open_interest=1000,
+            change_in_oi=0, volume=100,
+        )
+        suggestion = {
+            "suggested": {"contract_id": contract.pk, "strike": 100.0, "ltp": 5.0, "delta": 0.5},
+            "reason": "test suggestion",
+        }
+        risk_decision = RiskDecision(approved=True, risk_score=1.0, reasons=[], position_size=50)
+
+        with patch("apps.options.signals_engine.nearest_expiry", return_value=date.today() + timedelta(days=7)), \
+             patch("apps.options.strike_selector.suggest_best_strike", return_value=suggestion), \
+             patch("apps.risk.engine.check_pre_trade", return_value=risk_decision), \
+             patch("apps.market_data.market_hours.is_market_open", return_value=(True, "")), \
+             patch("apps.learning.ml_predict.predict_win_probability", return_value=0.72):
+            signal = evaluate_and_open_scalp(
+                "ema_momentum_scalp", lambda s, tf: self._fake_idea(), "NIFTY",
+            )
+
+        self.assertEqual(signal.ml_win_probability, 0.72)
+        signal.refresh_from_db()
+        self.assertEqual(signal.status, SignalStatus.EXECUTED)
+        self.assertEqual(OpenPosition.objects.count(), 1)

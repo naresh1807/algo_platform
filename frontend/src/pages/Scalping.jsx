@@ -64,6 +64,18 @@ export default function Scalping() {
           the current best performer is marked below. See apps.learning.strategy_methods'
           SCALPING_METHOD_FUNCS.
         </p>
+        <p style={{
+          fontSize: 12, color: "var(--amber)", marginTop: 0, marginBottom: 12,
+          background: "rgba(245, 158, 11, 0.08)", border: "1px solid var(--amber)",
+          borderRadius: 6, padding: "8px 10px",
+        }}>
+          Research/comparison sandbox, not real trades. Every idea below is simulated
+          unconditionally against the underlying index price so each method's raw predictive
+          power can be measured -- unlike real signals, these are never blocked by AI
+          confidence. "Win Prob" is informational only and never decided whether a row opened.
+          The Option column is a reference suggestion only; the Entry/Stop/Target columns are
+          underlying index levels, not that option's premium.
+        </p>
         {loading ? (
           <p style={{ color: "var(--muted)" }}>Loading...</p>
         ) : (
@@ -101,7 +113,7 @@ export default function Scalping() {
                   )}
                   {openCount > 0 && (
                     <div style={{ marginTop: 8, fontSize: 12 }}>
-                      <span className="badge badge-muted">{openCount} open now</span>
+                      <span className="badge badge-muted">{openCount} simulated open now</span>
                     </div>
                   )}
                 </div>
@@ -112,15 +124,16 @@ export default function Scalping() {
       </div>
 
       <div className="panel">
-        <h3>Open Scalps ({openTrades.length})</h3>
+        <h3>Simulated Scalps -- Currently Open ({openTrades.length})</h3>
         {openTrades.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No open scalping trades right now.</p>
         ) : (
           <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--muted)" }}>
-                <th>Method</th><th>Symbol</th><th>Entry</th><th>Stop</th><th>Target</th>
-                <th>Option</th><th>Win Prob</th><th>Opened</th>
+                <th>Method</th><th>Symbol</th><th>Underlying Entry</th><th>Underlying Stop</th>
+                <th>Underlying Target</th><th>Option (ref. only)</th><th>Win Prob (info only)</th>
+                <th>Simulated Open</th>
               </tr>
             </thead>
             <tbody>
@@ -164,7 +177,7 @@ export default function Scalping() {
       </div>
 
       <div className="panel">
-        <h3>Recent Closed Scalps</h3>
+        <h3>Recent Closed Scalps (Simulated)</h3>
         {closedTrades.length === 0 ? (
           <p style={{ color: "var(--muted)" }}>No closed scalping trades yet.</p>
         ) : (

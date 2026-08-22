@@ -185,14 +185,61 @@ def evaluate_and_open_scalp(method: str, generate_idea, underlying: str) -> Trad
             **ind_fields,
         )
 
-    lots = risk_decision.position_size // resolved_contract.lot_size if resolved_contract.lot_size else 0
-    if lots < 1:
+    # ML confidence gate -- SIGNAL != TRADE. Every other real-money path
+    # (apps.signals.engine.generate_signal, apps.options.
+    # index_direction_strategy.evaluate_index_direction_trade) already
+    # vetoes a rule-approved setup here if the win-probability model
+    # rates it below MIN_WIN_PROBABILITY_TO_TRADE; this path used to skip
+    # straight from "risk-approved" to opening a real paper OpenPosition
+    # with no confidence check at all, which is exactly how a signal with
+    # e.g. 28% ML win-probability could still end up with status=Opened.
+    # Reusing apps.learning.ml_predict's single gate function (not a
+    # second, local threshold) keeps the confidence rule centralized in
+    # one place, same as the two sibling call sites.
+    from types import SimpleNamespace
+
+    from apps.learning.ml_predict import (
+        MIN_WIN_PROBABILITY_TO_TRADE,
+        ml_confidence_size_multiplier,
+        predict_win_probability,
+        should_reject_for_low_confidence,
+    )
+
+    provisional = SimpleNamespace(
+        technical_score=technical_score, sentiment_score=sentiment_score,
+        risk_score=risk_score, options_score=options_score, regime=regime, symbol=underlying,
+        **ind_fields,
+    )
+    ml_probability = predict_win_probability(provisional)
+
+    if should_reject_for_low_confidence(ml_probability):
         return _create_signal(
+            _ml_probability=ml_probability,
             symbol=underlying, signal_type=SignalType.NO_TRADE,
             entry_price=option_entry_price, stop_loss=option_stop_loss,
             option_side=side, strike_price=suggested_strike_price,
             total_score=total_score, technical_score=technical_score, sentiment_score=sentiment_score,
             risk_score=risk_score, options_score=options_score, regime=regime, status=SignalStatus.REJECTED,
+            rejection_stage=TradingSignal.RejectionStage.ML_CONFIDENCE,
+            reason=(
+                f"[{method} real-execution, {side} side] Rule-based and risk checks passed but "
+                f"ML win-probability model rates this setup {ml_probability:.0%}, below the "
+                f"{MIN_WIN_PROBABILITY_TO_TRADE:.0%} learning-loop threshold -- similar past "
+                f"setups mostly lost. No real order placed."
+            ),
+            **ind_fields,
+        )
+
+    lots = risk_decision.position_size // resolved_contract.lot_size if resolved_contract.lot_size else 0
+    if lots < 1:
+        return _create_signal(
+            _ml_probability=ml_probability,
+            symbol=underlying, signal_type=SignalType.NO_TRADE,
+            entry_price=option_entry_price, stop_loss=option_stop_loss,
+            option_side=side, strike_price=suggested_strike_price,
+            total_score=total_score, technical_score=technical_score, sentiment_score=sentiment_score,
+            risk_score=risk_score, options_score=options_score, regime=regime, status=SignalStatus.REJECTED,
+            rejection_stage=TradingSignal.RejectionStage.LOT_SIZE,
             reason=(
                 f"[{method} real-execution, {side} side] Sized quantity "
                 f"({risk_decision.position_size}) rounds down to under one lot "
@@ -203,7 +250,13 @@ def evaluate_and_open_scalp(method: str, generate_idea, underlying: str) -> Trad
         )
     position_size = lots * resolved_contract.lot_size
 
+    ml_note = (
+        f" ML win-probability {ml_probability:.0%} (size x{ml_confidence_size_multiplier(ml_probability)})."
+        if ml_probability is not None else ""
+    )
+
     signal = _create_signal(
+        _ml_probability=ml_probability,
         symbol=underlying, signal_type=SignalType.BUY,
         entry_price=option_entry_price, stop_loss=option_stop_loss,
         target_1=option_target, position_size=position_size,
@@ -212,7 +265,7 @@ def evaluate_and_open_scalp(method: str, generate_idea, underlying: str) -> Trad
         risk_score=risk_score, options_score=options_score, regime=regime, status=SignalStatus.APPROVED,
         reason=(
             f"[{method} real-execution, {side} side] {strike_detail} "
-            f"risk-approved at {lots} lot(s) ({position_size} qty). "
+            f"risk-approved at {lots} lot(s) ({position_size} qty).{ml_note} "
             f"Executes as a real BUY order on {resolved_contract.tradingsymbol} "
             f"at premium {option_entry_price}, paper mode only "
             f"(see apps.learning.scalp_execution's module docstring)."
