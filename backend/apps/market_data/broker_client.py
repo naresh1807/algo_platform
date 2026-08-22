@@ -866,6 +866,26 @@ class BrokerClient:
         """
         if not settings.LIVE_TRADING_ENABLED and not risk_reducing:
             raise PermissionError("Live order placement is disarmed by server configuration.")
+        # Second, independent gate (apps.paper_trading's own fail-closed
+        # requirement) -- ANDed with the check above, not a replacement
+        # for it. Deliberately given the SAME risk_reducing exception as
+        # LIVE_TRADING_ENABLED above (an already-open LIVE position must
+        # still be exitable even while new entries are disarmed) rather
+        # than tightening that pre-existing, deliberate safety behavior.
+        # settings.ALLOW_LIVE_ORDERS defaults to false and apps.paper_
+        # trading never sets it true -- if any future code anywhere in
+        # the codebase tried to place a non-risk-reducing order while it
+        # stays false, this is what stops it, and the security audit
+        # event below is what makes the attempt visible after the fact.
+        if not settings.ALLOW_LIVE_ORDERS and not risk_reducing:
+            from apps.admin_tools.audit import log_action
+
+            log_action(
+                "blocked_live_order_attempt",
+                actor_label="broker_client:place_order",
+                details={"symbol": symbol, "transaction_type": transaction_type, "qty": qty},
+            )
+            raise PermissionError("Live order placement is disarmed (ALLOW_LIVE_ORDERS=false).")
 
         qty = int(qty)
         if qty <= 0:

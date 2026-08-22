@@ -22,6 +22,7 @@ import os
 import sys
 from datetime import time as _time
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -121,6 +122,7 @@ INSTALLED_APPS = [
     "apps.risk",
     "apps.execution",
     "apps.learning",
+    "apps.paper_trading",
     "apps.monitoring",
     "apps.analytics",
     "apps.admin_tools",
@@ -577,6 +579,74 @@ PAPER_OPTION_SLIPPAGE_BPS_PER_SIDE = os.environ.get(
 PAPER_OPTION_FEES_BPS_PER_SIDE = os.environ.get(
     "PAPER_OPTION_FEES_BPS_PER_SIDE", "10.0",
 )
+
+# ---------------------------------------------------------------------
+# apps.paper_trading -- the autonomous AI paper-trading subsystem. A
+# FULLY SEPARATE vertical from EXECUTION_MODE/apps.execution above (its
+# own PaperAccount/PaperOrder/PaperPosition tables, never OpenPosition),
+# with its own hard boundaries the AI may never override (see
+# apps.paper_trading.services.paper_risk_engine). Angel One is used by
+# this subsystem for market data ONLY -- see apps/paper_trading/
+# services/angel_one_guard.py for how real order routing is structurally
+# impossible from this app, and ALLOW_LIVE_ORDERS below for the second,
+# independent config-level guard on top of that.
+# ---------------------------------------------------------------------
+TRADING_MODE = os.environ.get("TRADING_MODE", "paper")
+if TRADING_MODE != "paper":
+    raise RuntimeError(
+        "TRADING_MODE must be 'paper' -- live order routing is not implemented "
+        "or authorized in this codebase. See apps/paper_trading's module docs."
+    )
+MARKET_DATA_PROVIDER = os.environ.get("MARKET_DATA_PROVIDER", "angelone")
+ORDER_EXECUTION_PROVIDER = os.environ.get("ORDER_EXECUTION_PROVIDER", "paper")
+if ORDER_EXECUTION_PROVIDER != "paper":
+    raise RuntimeError("ORDER_EXECUTION_PROVIDER must be 'paper' in this codebase.")
+
+# Second, independent flag ANDed with LIVE_TRADING_ENABLED inside
+# apps.market_data.broker_client.BrokerClient.place_order/cancel_order
+# (see that module) -- both must be true for ANY real order to reach
+# Angel One. apps.paper_trading's own settings below never enable this;
+# it exists so that even a hypothetical future bug that wired a broker
+# call into this app would still be blocked at the configuration layer,
+# not just by this app structurally never importing broker_client.
+ALLOW_LIVE_ORDERS = os.environ.get("ALLOW_LIVE_ORDERS", "false").strip().lower() == "true"
+
+INITIAL_PAPER_CAPITAL = Decimal(os.environ.get("INITIAL_PAPER_CAPITAL", "100000"))
+
+# One-lot / one-position / no-averaging rules (spec's non-negotiable
+# trading rules). These are hard boundaries -- apps.paper_trading.
+# services.ai_signal_service's model/heuristic policy can select WHICH
+# action to take, never override any of these.
+LOTS_PER_TRADE = max(1, int(os.environ.get("LOTS_PER_TRADE", "1")))
+MAX_CONCURRENT_POSITIONS = max(1, int(os.environ.get("MAX_CONCURRENT_POSITIONS", "1")))
+MAX_TRADES_PER_DAY = max(0, int(os.environ.get("MAX_TRADES_PER_DAY", "0")))  # 0 = unlimited
+ALLOW_REENTRY = os.environ.get("ALLOW_REENTRY", "true").strip().lower() == "true"
+ALLOW_AVERAGING = os.environ.get("ALLOW_AVERAGING", "false").strip().lower() == "true"
+ALLOW_PYRAMIDING = os.environ.get("ALLOW_PYRAMIDING", "false").strip().lower() == "true"
+ALLOW_MARTINGALE = os.environ.get("ALLOW_MARTINGALE", "false").strip().lower() == "true"
+ALLOW_OPTION_SELLING = os.environ.get("ALLOW_OPTION_SELLING", "false").strip().lower() == "true"
+if ALLOW_AVERAGING or ALLOW_PYRAMIDING or ALLOW_MARTINGALE or ALLOW_OPTION_SELLING:
+    raise RuntimeError(
+        "ALLOW_AVERAGING/ALLOW_PYRAMIDING/ALLOW_MARTINGALE/ALLOW_OPTION_SELLING must "
+        "all stay false -- apps.paper_trading has no code path implementing any of "
+        "these, enabling one would only silently no-op it, not actually allow it."
+    )
+
+# Paper-specific risk hard limits (apps.paper_trading.services.
+# paper_risk_engine) -- deliberately its own settings block, not reused
+# from RISK_HARD_LIMITS above, since that dict governs apps.risk/
+# apps.execution's separate real-money-shaped pipeline.
+AI_PAPER_DAILY_LOSS_LIMIT_PCT = float(os.environ.get("AI_PAPER_DAILY_LOSS_LIMIT_PCT", "3.0"))
+AI_PAPER_MAX_DRAWDOWN_PCT = float(os.environ.get("AI_PAPER_MAX_DRAWDOWN_PCT", "15.0"))
+AI_PAPER_MAX_CONSECUTIVE_LOSSES = max(1, int(os.environ.get("AI_PAPER_MAX_CONSECUTIVE_LOSSES", "3")))
+AI_PAPER_COOLDOWN_MINUTES = max(1, int(os.environ.get("AI_PAPER_COOLDOWN_MINUTES", "30")))
+
+# Realistic-fill simulation (apps.paper_trading.services.execution_engine).
+AI_PAPER_SLIPPAGE_BPS = float(os.environ.get("AI_PAPER_SLIPPAGE_BPS", "5"))
+AI_PAPER_SPREAD_FALLBACK_BPS = float(os.environ.get("AI_PAPER_SPREAD_FALLBACK_BPS", "20"))
+AI_PAPER_EXECUTION_LATENCY_MS = max(0, int(os.environ.get("AI_PAPER_EXECUTION_LATENCY_MS", "250")))
+AI_PAPER_FILL_MODEL_VERSION = os.environ.get("AI_PAPER_FILL_MODEL_VERSION", "v1")
+AI_PAPER_STALE_QUOTE_SECONDS = max(5, int(os.environ.get("AI_PAPER_STALE_QUOTE_SECONDS", "120")))
 
 ANGEL_ONE_API_KEY = os.environ.get("ANGEL_ONE_API_KEY", "")
 ANGEL_ONE_CLIENT_ID = os.environ.get("ANGEL_ONE_CLIENT_ID", "")

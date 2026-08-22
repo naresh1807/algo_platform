@@ -219,4 +219,13 @@ export const endpoints = {
   jarvisHistory: () => api.get("/jarvis/history/"),
   deleteJarvisHistory: () => api.delete("/jarvis/history/"),
   jarvisSuggested: (category) => api.get("/jarvis/suggested/", { params: category ? { category } : {} }),
+  // apps.paper_trading -- read-only autonomous paper-trading dashboard.
+  // No mutating endpoint exists anywhere in this app on purpose (see
+  // PaperTradingDashboard.jsx's own module docstring).
+  paperAccount: () => api.get("/paper-trading/account/"),
+  paperPositions: (params) => api.get("/paper-trading/positions/", { params: { page_size: 50, ...params } }),
+  paperOrders: (params) => api.get("/paper-trading/orders/", { params: { page_size: 50, ...params } }),
+  paperTrades: (params) => api.get("/paper-trading/trades/", { params: { page_size: 50, ...params } }),
+  paperDailySummaries: () => api.get("/paper-trading/daily-summaries/", { params: { page_size: 30 } }),
+  paperDecisions: (params) => api.get("/paper-trading/decisions/", { params: { page_size: 50, ...params } }),
 };

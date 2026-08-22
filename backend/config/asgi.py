@@ -26,6 +26,7 @@ from apps.risk.routing import websocket_urlpatterns as risk_ws  # noqa: E402
 from apps.options.routing import websocket_urlpatterns as options_ws  # noqa: E402
 from apps.jarvis.routing import websocket_urlpatterns as jarvis_ws  # noqa: E402
 from apps.investing.routing import websocket_urlpatterns as investing_ws  # noqa: E402
+from apps.paper_trading.routing import websocket_urlpatterns as paper_trading_ws  # noqa: E402
 from common.websockets import TokenAuthMiddleware  # noqa: E402
 
 application = ProtocolTypeRouter(
@@ -41,6 +42,7 @@ application = ProtocolTypeRouter(
                         + options_ws
                         + jarvis_ws
                         + investing_ws
+                        + paper_trading_ws
                     )
                 )
             )

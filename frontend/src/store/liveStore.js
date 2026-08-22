@@ -35,6 +35,7 @@ const SOCKET_DEFS = [
   { key: "risk", path: "/ws/risk/live/", handle: handleRiskMessage },
   { key: "options", path: "/ws/options/live/", handle: (set) => (msg) => set({ latestOptionUpdate: msg }) },
   { key: "investing", path: "/ws/investing/index-live/", handle: (set) => (msg) => set({ latestIndexUpdate: msg }) },
+  { key: "paperTrading", path: "/ws/paper-trading/live/", handle: handlePaperTradingMessage },
 ];
 
 export const useLiveStore = create((set, get) => ({
@@ -46,6 +47,13 @@ export const useLiveStore = create((set, get) => ({
   positionsPnl: {},
   riskAlerts: [],
   feedHealthy: true,
+  // apps.paper_trading's own read-only push -- see handlePaperTradingMessage
+  // below. paperPosition is the CURRENT open position snapshot (or null
+  // once closed -- the backend always pushes the position row's own
+  // `status` field, so a page can tell "closed" from "not loaded yet").
+  paperAccount: null,
+  paperPosition: null,
+  paperLatestDecision: null,
 
   // `connected` is true only once EVERY socket is open, and flips false
   // the moment any one of them drops -- a single shared boolean written
@@ -141,6 +149,22 @@ function handleRiskMessage(set) {
       set({ feedHealthy: msg.is_healthy });
     } else {
       set((state) => ({ riskAlerts: [msg, ...state.riskAlerts].slice(0, 50) }));
+    }
+  };
+}
+
+// apps/paper_trading/signals.py broadcasts one of three "kind"s on the
+// same group -- account/position/decision -- rather than three separate
+// WebSocket endpoints, matching this store's existing "one message,
+// branch on a discriminator field" convention (handleRiskMessage above).
+function handlePaperTradingMessage(set) {
+  return (msg) => {
+    if (msg.kind === "account") {
+      set({ paperAccount: msg });
+    } else if (msg.kind === "position") {
+      set({ paperPosition: msg });
+    } else if (msg.kind === "decision") {
+      set({ paperLatestDecision: msg });
     }
   };
 }

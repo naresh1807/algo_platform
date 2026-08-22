@@ -69,6 +69,10 @@ app.conf.task_routes = {
     "apps.options.tasks.ingest_option_chain_snapshots": {"queue": "priority"},
     "apps.execution.tasks.flatten_open_positions": {"queue": "priority"},
     "apps.execution.tasks.square_off_intraday_positions": {"queue": "priority"},
+    # apps.paper_trading's own equivalent -- same reasoning as the line
+    # above (must never be stuck behind other default-queue work near
+    # market close).
+    "apps.paper_trading.tasks.paper_square_off_intraday": {"queue": "priority"},
     # apps.monitoring.tasks.heartbeat_priority_worker below -- deliberately
     # routed here too (NOT to the default queue) so its own freshness is
     # direct, observable proof the priority worker process is actually
@@ -198,6 +202,40 @@ app.conf.beat_schedule = {
     "trading-cycle-every-5-minutes": {
         "task": "apps.execution.tasks.run_trading_cycle",
         "schedule": 300.0,
+    },
+    # apps.paper_trading -- the autonomous AI paper-trading subsystem,
+    # a fully separate vertical from the trading-cycle entry above (its
+    # own tables, its own state machine; never touches OpenPosition).
+    # 5-minute cadence matches its own decision timeframe default
+    # ("5m") -- AI decisions happen once per completed candle, not on
+    # every incomplete one (see apps.paper_trading.tasks's own docs).
+    "paper-trading-cycle-every-5-minutes": {
+        "task": "apps.paper_trading.tasks.run_paper_trading_cycle",
+        "schedule": 300.0,
+    },
+    # Scalp-mode sibling of the entry above -- apps.paper_trading.tasks.
+    # run_paper_trading_scalp_cycle, sourcing entries from apps.learning.
+    # strategy_methods.SCALPING_METHOD_FUNCS on 1m candles instead of the
+    # swing task's 5m heuristic. Same 1-minute cadence as apps.learning.
+    # tasks.run_scalping_real_execution/run_scalping_strategy_comparison
+    # for the identical reason: checking a scalp's stop/target only every
+    # 5 minutes would defeat the point. Fully additive to the swing entry
+    # above -- same account/state-machine/one-open-position slot, see
+    # that task's own docstring for how the two compete for it.
+    "paper-trading-scalp-cycle-every-1-minute": {
+        "task": "apps.paper_trading.tasks.run_paper_trading_scalp_cycle",
+        "schedule": 60.0,
+    },
+    "paper-trading-intraday-square-off": {
+        "task": "apps.paper_trading.tasks.paper_square_off_intraday",
+        "schedule": crontab(hour=15, minute="20,25", day_of_week="1-5"),
+    },
+    # After market close, once the day's real candles are all in --
+    # finalizes outcomes, labels decisions, trains/evaluates/promotes-
+    # or-rejects a challenger, writes PaperDailySummary.
+    "paper-trading-daily-learning-report": {
+        "task": "apps.paper_trading.tasks.generate_daily_learning_report",
+        "schedule": crontab(hour=15, minute=45, day_of_week="1-5"),
     },
     # Two idempotent attempts before NSE closes. This avoids relying on a
     # five-minute polling boundary (or broker auto-square-off) to close

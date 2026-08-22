@@ -307,3 +307,53 @@ class HypotheticalTrade(models.Model):
     def __str__(self):
         state = "open" if self.is_open else f"closed pnl={self.pnl}"
         return f"[{self.method}] {self.symbol} ({state})"
+
+
+class TrainingSample(models.Model):
+    """
+    Generic, environment-agnostic ML training sample -- deliberately
+    the ONE new shared table apps.paper_trading's daily learning
+    pipeline is allowed to add (its own module docs explicitly forbid
+    a "paper_ml_models"/"paper_model_registry"-style paper-only ML
+    table): a trained model must be able to continue from paper data to
+    a future authorized LIVE data source without starting from zero,
+    which requires the training-sample shape itself to not be paper-
+    specific. `source_environment` is what distinguishes them -- only
+    "PAPER" is ever populated today; "LIVE" is reserved for a future,
+    explicitly authorized live-trading data source and nothing in this
+    codebase currently writes or reads LIVE rows.
+
+    Populated by apps.paper_trading.services.daily_learning_service from
+    finalized apps.paper_trading.models.PaperAIDecision rows (both real
+    trades AND hypothetical HOLD/SKIP outcomes) once their outcome is
+    known -- this table is the actual dataset
+    apps.paper_trading.services.model_training_service trains against,
+    kept separate from PaperAIDecision (the operational decision log)
+    so a schema change to one doesn't ripple into the other.
+    """
+
+    class SourceEnvironment(models.TextChoices):
+        PAPER = "PAPER", "Paper"
+        LIVE = "LIVE", "Live"
+
+    source_environment = models.CharField(max_length=8, choices=SourceEnvironment.choices, default=SourceEnvironment.PAPER, db_index=True)
+    model_name = models.CharField(max_length=100, db_index=True, help_text="Matches the ModelRegistry.model_name this sample was collected for, e.g. 'paper_trading_policy'.")
+    decision_ref = models.CharField(max_length=64, blank=True, help_text="The source decision's UUID (e.g. PaperAIDecision.decision_id) as a string -- no cross-app FK, same reasoning as apps.admin_tools.audit's target_type/target_id pattern.")
+    symbol = models.CharField(max_length=32, db_index=True)
+    timestamp = models.DateTimeField(db_index=True, help_text="The decision moment this sample was captured at -- training splits are always ordered by this field, never by created_at.")
+    feature_schema_version = models.CharField(max_length=16)
+    feature_vector_json = models.JSONField(default=dict)
+    label = models.IntegerField(help_text="1 = win / correct-to-trade, 0 = loss / correct-to-skip -- the binary classification target.")
+    net_r = models.FloatField(null=True, blank=True, help_text="net_pnl_after_charges / initial_risk -- stored alongside the binary label for regression-style or R-weighted training.")
+    is_hypothetical = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "training_samples"
+        ordering = ["timestamp"]
+        indexes = [
+            models.Index(fields=["model_name", "source_environment", "timestamp"], name="training_sample_lookup_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.model_name}/{self.source_environment} {self.symbol} @ {self.timestamp} label={self.label}"

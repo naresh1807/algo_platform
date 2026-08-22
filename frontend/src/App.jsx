@@ -18,6 +18,7 @@ const Learning = lazy(() => import("./pages/Learning.jsx"));
 const Login = lazy(() => import("./pages/Login.jsx"));
 const News = lazy(() => import("./pages/News.jsx"));
 const OptionsAnalytics = lazy(() => import("./pages/OptionsAnalytics.jsx"));
+const PaperTradingDashboard = lazy(() => import("./pages/PaperTradingDashboard.jsx"));
 const StockInvesting = lazy(() => import("./pages/StockInvesting.jsx"));
 const Positions = lazy(() => import("./pages/Positions.jsx"));
 const Reports = lazy(() => import("./pages/Reports.jsx"));
@@ -95,6 +96,7 @@ function AppShell() {
                 <Route path="/signals" element={<Signals />} />
                 <Route path="/news" element={<News />} />
                 <Route path="/options" element={<OptionsAnalytics />} />
+              <Route path="/paper-trading" element={<PaperTradingDashboard />} />
                 <Route path="/investing" element={<StockInvesting />} />
                 <Route path="/positions" element={<Positions />} />
                 <Route path="/scalping" element={<Scalping />} />

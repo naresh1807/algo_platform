@@ -629,10 +629,18 @@ class LiveExecutionSafetyGateTests(TestCase):
         exists" comment) -- it still runs the full cycle and reports
         the block via skipped_exposure, opening nothing and making no
         broker call, which is what this test actually needs to verify.
+
+        Mocks is_market_open (apps.execution.tasks.py's own market-hours
+        gate takes precedence over the live_trading_disarmed reason this
+        test asserts -- discovered flakiness, real and pre-existing,
+        whenever this test happens to run outside NSE hours).
         """
+        from unittest.mock import patch
+
         from .tasks import run_trading_cycle
 
-        result = run_trading_cycle()
+        with patch("apps.market_data.market_hours.is_market_open", return_value=(True, "")):
+            result = run_trading_cycle()
 
         self.assertEqual(result["mode"], "live")
         self.assertEqual(result["opened"], [])

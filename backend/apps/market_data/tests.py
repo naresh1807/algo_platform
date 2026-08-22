@@ -263,7 +263,7 @@ class BrokerOrderSubmissionSafetyTests(TestCase):
 
         connect.assert_not_called()
 
-    @override_settings(LIVE_TRADING_ENABLED=True)
+    @override_settings(LIVE_TRADING_ENABLED=True, ALLOW_LIVE_ORDERS=True)
     def test_state_changing_submission_is_called_once_without_rate_limit_retry(self):
         from apps.market_data.broker_client import BrokerClient
 

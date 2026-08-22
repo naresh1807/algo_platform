@@ -1,5 +1,5 @@
 import {
-  Activity, BarChart3, Bot, GraduationCap, LayoutDashboard, LineChart,
+  Activity, BarChart3, Bot, Cpu, GraduationCap, LayoutDashboard, LineChart,
   Newspaper, Settings as SettingsIcon, ShieldAlert, TrendingUp, Wallet,
 } from "lucide-react";
 
@@ -21,6 +21,7 @@ export const NAV_SECTIONS = [
     label: "Trading",
     items: [
       { to: "/jarvis-signals", label: "Trading Workspace", icon: LineChart },
+      { to: "/paper-trading", label: "AI Paper Trading", icon: Cpu },
       { to: "/signals", label: "Signals", icon: Activity },
       { to: "/options", label: "Options Analytics", icon: BarChart3 },
       { to: "/scalping", label: "Scalping Strategies", icon: TrendingUp },
