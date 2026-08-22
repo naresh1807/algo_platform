@@ -111,8 +111,8 @@ export default function Signals() {
             const statusTone = s.status === "approved" || s.status === "executed" ? "ok" : s.status === "rejected" ? "bad" : "muted";
             return (
               <div key={s.id} className={`card card-accent-${accent}`}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 15, fontWeight: 700 }}>{s.symbol}</span>
                     <StatusBadge tone={isBuy ? "ok" : isSell ? "bad" : "muted"}>{s.signal_type}</StatusBadge>
                     {s.option_side && (
