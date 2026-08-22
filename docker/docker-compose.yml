@@ -29,7 +29,13 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in docker/.env}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in docker/.env}
     ports:
-      - "${MYSQL_HOST_PORT:-3307}:3306"
+      # 127.0.0.1: prefix (not just "host:container") -- without it,
+      # Docker's default publish binds to 0.0.0.0, exposing this to
+      # every device on the same WiFi/LAN, not just this machine. Django
+      # and the React dev server both run on THIS host (see this file's
+      # own top comment), so nothing legitimate ever needs to reach this
+      # port from another machine.
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
 
@@ -37,7 +43,12 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      # Same 127.0.0.1-only reasoning as mysql above -- doubly important
+      # here since this image runs with NO password by default (no
+      # requirepass set), so an unbound 0.0.0.0 publish would let anyone
+      # on the LAN read/write Celery's broker and Channels' layer with
+      # zero authentication at all.
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
 

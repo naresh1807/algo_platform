@@ -32,7 +32,12 @@ class DailyPnLReportView(APIView):
 
         from .services import compute_daily_performance
 
-        days = int(request.query_params.get("days", 30))
+        try:
+            days = int(request.query_params.get("days", 30))
+        except (TypeError, ValueError):
+            return Response({"error": "days must be an integer."}, status=400)
+        if not 1 <= days <= 3650:
+            return Response({"error": "days must be between 1 and 3650."}, status=400)
         today = timezone.localdate()
         compute_daily_performance(today)
 
@@ -82,7 +87,12 @@ class SharpeRatioView(APIView):
     def get(self, request):
         from .services import compute_calmar_ratio, compute_sharpe_ratio, compute_sortino_ratio
 
-        lookback_days = int(request.query_params.get("lookback_days", 30))
+        try:
+            lookback_days = int(request.query_params.get("lookback_days", 30))
+        except (TypeError, ValueError):
+            return Response({"error": "lookback_days must be an integer."}, status=400)
+        if not 1 <= lookback_days <= 3650:
+            return Response({"error": "lookback_days must be between 1 and 3650."}, status=400)
         return Response({
             "lookback_days": lookback_days,
             "sharpe_ratio": compute_sharpe_ratio(lookback_days=lookback_days),
@@ -108,7 +118,12 @@ class PerformanceBreakdownView(APIView):
             compute_regime_breakdown, compute_strategy_breakdown, compute_time_of_day_breakdown,
         )
 
-        lookback_days = int(request.query_params.get("lookback_days", 30))
+        try:
+            lookback_days = int(request.query_params.get("lookback_days", 30))
+        except (TypeError, ValueError):
+            return Response({"error": "lookback_days must be an integer."}, status=400)
+        if not 1 <= lookback_days <= 3650:
+            return Response({"error": "lookback_days must be between 1 and 3650."}, status=400)
         return Response({
             "lookback_days": lookback_days,
             "by_regime": compute_regime_breakdown(lookback_days=lookback_days),

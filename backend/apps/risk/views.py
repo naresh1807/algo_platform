@@ -25,12 +25,16 @@ class RiskEventViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewset
 class KillSwitchStatusView(APIView):
     """
     GET returns current kill-switch state for the dashboard.
-    Deliberately NOT exposing a way to *activate* the kill switch via
-    the API in this scaffold -- activation should only ever happen from
-    inside the risk engine itself (a hard limit breach), never from an
-    external call. Deactivation (re-arming) is a separate, deliberately
-    manual-only management command, not an API endpoint, per the
-    manual's safety rules.
+
+    POST activates it -- any authenticated Trader or Admin may trigger
+    an emergency stop (force-flattening every open position), not just
+    Admin, same "de-risking an already-active setting should never have
+    friction" principle apps.execution.views.ExecutionModeView documents
+    for its own paper<-live toggle: making the platform SAFER is never
+    the action that needs a privilege check to slow down. Re-arming
+    (deactivating) is the opposite direction and stays a deliberately
+    manual-only management command, not an API endpoint at all, per the
+    manual's safety rules -- only activation is reachable from here.
     """
     permission_classes = [IsTraderOrAdmin]
 

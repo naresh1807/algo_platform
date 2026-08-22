@@ -133,6 +133,12 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # must sit above CommonMiddleware
     "django.middleware.security.SecurityMiddleware",
+    # Before SessionMiddleware so a brute-forced/throttled admin-login
+    # POST is rejected before Django spends any session/CSRF work on it
+    # -- see common/admin_security.py's module docstring for why the
+    # Django admin login needs this at all (it has no throttle of its
+    # own, unlike apps.auth_app's API login).
+    "common.admin_security.AdminLoginRateLimitMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -185,6 +191,19 @@ DATABASES = {
         "OPTIONS": {
             "charset": "utf8mb4",
         },
+        # Without this, Django opens a brand-new TCP connection to MySQL
+        # on every single request (the default CONN_MAX_AGE=0) and tears
+        # it down at the end -- real, measurable per-request overhead
+        # that compounds badly on pages like Dashboard.jsx, which fire
+        # 8-9 parallel API calls on load (9 fresh connect/auth/close
+        # round-trips instead of 9 requests reusing a handful of already-
+        # open connections). 60s keeps a connection alive and reused
+        # across requests within that window; CONN_HEALTH_CHECKS pings it
+        # before reuse so a connection MySQL silently dropped (e.g. after
+        # its own wait_timeout, or a Docker restart) is detected and
+        # replaced instead of raising on the next query.
+        "CONN_MAX_AGE": 60,
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 
