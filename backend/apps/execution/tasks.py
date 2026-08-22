@@ -57,6 +57,20 @@ def run_trading_cycle(timeframe: str = "5m"):
     live_entry_armed = bool(settings.LIVE_TRADING_ENABLED)
     manage_live_risk = False
     reconciliation = []
+    # Same "safe default, conditionally overridden" idiom as
+    # manage_live_risk/reconciliation above -- every execution_mode=="live"
+    # path below unconditionally reassigns these before they're read again
+    # (~line 193), so this default is unreachable today, but it's a
+    # fail-closed guard (entries stay blocked, never silently allowed)
+    # against a future code path skipping that assignment, and satisfies
+    # static analysis that can't trace the invariant across two separate
+    # execution_mode=="live" checks this far apart.
+    broker_positions_ok = False
+    broker_position_reason = "not_yet_checked"
+    equity_sync: dict = {"synced": False, "reason": "not_yet_checked"}
+    # Only ever actually imported/called on the execution_mode=="live"
+    # path (below), same reasoning as the three defaults above.
+    sync_live_account_equity = None
     if execution_mode == "paper":
         from .paper_executor import check_and_close_positions, flatten_all_positions, open_position_from_signal
         opener, closer, flattener = open_position_from_signal, check_and_close_positions, flatten_all_positions

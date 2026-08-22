@@ -1,0 +1,19 @@
+{
+  "reportIncompatibleVariableOverride": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportOptionalCall": "none",
+  "reportArgumentType": "none",
+  "reportCallIssue": "none",
+  "reportReturnType": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOperatorIssue": "none",
+  "reportOptionalOperand": "none",
+  "reportIndexIssue": "none",
+  "reportTypedDictNotRequiredAccess": "none",
+  "reportOptionalIterable": "none",
+  "reportFunctionMemberAccess": "none",
+  "reportPossiblyUnboundVariable": true,
+  "reportUndefinedVariable": true
+}

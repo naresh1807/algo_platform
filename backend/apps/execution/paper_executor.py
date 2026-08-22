@@ -119,6 +119,11 @@ def open_position_from_signal(
     from .models import ExecutionModeSetting
 
     rejection_error: str | None = None
+    # Every reachable path either sets rejection_error (raised below,
+    # before position is ever read) or assigns a real position -- same
+    # "safe default, exhaustively overridden before use" idiom as
+    # rejection_error's own None default just above.
+    position: OpenPosition | None = None
     with transaction.atomic():
         mode_row, _ = ExecutionModeSetting.objects.select_for_update().get_or_create(pk=1)
         if mode_row.mode != ExecutionModeSetting.Mode.PAPER:

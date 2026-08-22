@@ -503,6 +503,15 @@ def open_position_live(
     # The singleton mode-row lock also serializes exposure checks across
     # workers, eliminating the old APPROVED->EXECUTING crash window.
     rejection_error: str | None = None
+    # Every reachable path either sets rejection_error (raised below,
+    # before any of these four are read) or assigns all four together
+    # inside the single `if rejection_error is None:` block further
+    # down -- same "safe default, exhaustively overridden before use"
+    # idiom as rejection_error's own None default above.
+    qty: int | None = None
+    position_symbol: str | None = None
+    order_side: str | None = None
+    journal: BrokerOrder | None = None
     try:
         with transaction.atomic():
             mode_row, _ = ExecutionModeSetting.objects.select_for_update().get_or_create(pk=1)

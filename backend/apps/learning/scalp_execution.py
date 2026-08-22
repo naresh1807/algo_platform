@@ -108,6 +108,11 @@ def evaluate_and_open_scalp(method: str, generate_idea, underlying: str) -> Trad
     # apps.learning.tasks._suggest_option_for_idea already uses.
     side = "CE"
     reasons: list[str] = []
+    # Only unbound if `reasons` is non-empty, in which case the NO_TRADE
+    # branch right below returns before risk_decision is ever read --
+    # same "safe default, exhaustively overridden before use" idiom used
+    # throughout this codebase's cascading-rejection-gate functions.
+    risk_decision = None
     resolved_contract = None
     option_entry_price = None
     option_stop_loss = None

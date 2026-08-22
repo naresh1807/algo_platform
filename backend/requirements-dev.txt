@@ -1,0 +1,16 @@
+# Editor/type-checking tooling only -- never required to RUN the app
+# (Django doesn't need these at runtime), so kept separate from
+# requirements.txt. Install with: pip install -r requirements-dev.txt
+
+# Pyright/Pylance (see .vscode/settings.json's typeCheckingMode) can't
+# resolve Django's ORM manager/FK/custom-User-model magic or Celery's
+# @shared_task-added .delay()/.apply_async() without these -- without
+# them, VS Code's Problems panel fills with hundreds of false
+# "no overloads match"/"Cannot access attribute" errors on completely
+# correct Django/DRF/Celery code. See backend/pyrightconfig.json for
+# the remaining rule categories disabled after an exhaustive audit
+# (2026-08-22) traced every sampled occurrence to a confirmed
+# framework-dynamism false positive, not a real bug.
+django-stubs
+djangorestframework-stubs
+celery-types

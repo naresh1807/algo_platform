@@ -372,6 +372,11 @@ def evaluate_index_direction_trade(underlying: str, timeframe: str = DIRECTION_T
     technical_score = direction_result["score"]
 
     reasons: list[str] = []
+    # Only unbound if `reasons` is non-empty, in which case the NO_TRADE
+    # branch right below returns before risk_decision is ever read --
+    # same "safe default, exhaustively overridden before use" idiom used
+    # throughout this codebase's cascading-rejection-gate functions.
+    risk_decision = None
     # Tracks the FIRST pipeline stage that added a reason -- since
     # success_rate/sentiment below can both add to `reasons` before the
     # first `if not reasons:` gate further down, "first to add" (not

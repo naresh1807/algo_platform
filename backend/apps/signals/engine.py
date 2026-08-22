@@ -332,6 +332,11 @@ def generate_signal(symbol: str, timeframe: str = "5m") -> TradingSignal:
     stop_loss = entry_price - Decimal(str(ind["atr"] * ATR_STOP_MULTIPLIER))
 
     reasons: list[str] = []
+    # Only unbound if `reasons` is non-empty, in which case the NO_TRADE
+    # branch right below returns before risk_decision is ever read --
+    # same "safe default, exhaustively overridden before use" idiom used
+    # throughout this codebase's cascading-rejection-gate functions.
+    risk_decision = None
 
     # High-volatility regime holds setups to a higher technical bar
     # (manual section 12's "stricter filters" half) on top of the
