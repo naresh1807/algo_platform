@@ -126,7 +126,15 @@ def _run_cycle(underlying: str | None, timeframe: str, evaluate_fn) -> dict:
 
     execution_engine.check_pending_limit_orders()
 
-    open_position = PaperPosition.objects.filter(account=account, status=PaperPosition.Status.OPEN).first()
+    # select_related("contract") -- _manage_open_position always touches
+    # open_position.contract (quote lookup, underlying features, and the
+    # PaperPositionSerializer.get_contract_label the post_save signal
+    # fires on every mark-to-market save) at least once per cycle;
+    # without it, that first access is a per-cycle N+1 query.
+    open_position = (
+        PaperPosition.objects.filter(account=account, status=PaperPosition.Status.OPEN)
+        .select_related("contract").first()
+    )
     if open_position is not None:
         return _manage_open_position(account, open_position, timeframe)
 

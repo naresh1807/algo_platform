@@ -16,6 +16,10 @@ may not exist yet mid-session) and the daily model retrain.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import PaperDailySummary
 
 
 def label_hypothetical_decisions(trading_day, timeframe: str = "5m", horizon_bars: int = 12) -> int:
@@ -77,7 +81,7 @@ def build_training_samples_for_day(trading_day, model_name: str = "paper_trading
     return created
 
 
-def run_end_of_day(trading_day=None) -> "PaperDailySummary":  # noqa: F821
+def run_end_of_day(trading_day=None) -> PaperDailySummary:
     from django.utils import timezone
 
     from . import model_evaluation_service, model_promotion_service, model_training_service, paper_risk_engine
@@ -89,7 +93,11 @@ def run_end_of_day(trading_day=None) -> "PaperDailySummary":  # noqa: F821
     samples_created = build_training_samples_for_day(trading_day)
 
     account = PaperAccount.objects.get(pk=1)
-    trades = list(PaperTrade.objects.filter(closed_at__date=trading_day))
+    # select_related("result") -- every trade below is checked for
+    # hasattr(t, "result") across three separate loops (holding time,
+    # avg MFE, avg MAE); without this each trade's first such check is
+    # its own query for PaperTradeResult (N+1 across the day's trades).
+    trades = list(PaperTrade.objects.filter(closed_at__date=trading_day).select_related("result"))
     wins = [t for t in trades if t.net_pnl > 0]
     losses = [t for t in trades if t.net_pnl <= 0]
     gross_win = sum((t.net_pnl for t in wins), Decimal(0))

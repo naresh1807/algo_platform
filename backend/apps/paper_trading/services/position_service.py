@@ -83,6 +83,13 @@ def close_position(account, position: PaperPosition, reason: str):
     # entry's own already-committed deduction. Real bug, caught by
     # tests_idempotency_and_ledger.py's reconciliation test.
     account = PaperAccount.objects.select_for_update().get(pk=account.pk)
+    # NOTE: deliberately NOT select_related("contract") here -- on MySQL,
+    # select_for_update() combined with select_related() locks every
+    # joined table's matched row (Django's of=(...) scoping is Postgres/
+    # Oracle-only and raises on MySQL), which would take an unwanted
+    # FOR UPDATE lock on the OptionContract row too and could contend
+    # with apps.options.contract_sync. The extra query this costs is one
+    # per position close (not per cycle), a low-value trade for that risk.
     position = PaperPosition.objects.select_for_update().get(pk=position.pk)
     if position.status != PaperPosition.Status.OPEN:
         raise ValueError("position is already closed")
