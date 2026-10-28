@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
+import { getBackendOrigin, isWrappedApp } from "../config/backendOrigin.js";
 import { endpoints } from "../services/api.js";
 
 const CONFIRM_PHRASE = "ENABLE LIVE TRADING";
@@ -15,6 +17,7 @@ const CONFIRM_PHRASE = "ENABLE LIVE TRADING";
  * things riskier should.
  */
 export default function Settings() {
+  const navigate = useNavigate();
   const [current, setCurrent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -173,6 +176,33 @@ export default function Settings() {
 
         {error && <p style={{ color: "var(--red)", marginTop: 12 }}>{error}</p>}
       </div>
+
+      {/* Only rendered inside Electron/Capacitor -- the plain browser
+          build is always same-origin and has nothing to configure here.
+          This is the ONLY way to reach ServerSettings.jsx once logged
+          in -- previously it was only reachable from the pre-login
+          screen, leaving no way to change it once authenticated (a real
+          gap: found via a live user report -- "already logged in, no
+          server settings option anywhere"). */}
+      {isWrappedApp() && (
+        <div className="panel" style={{ marginTop: 16 }}>
+          <h3>Backend Server</h3>
+          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: -4 }}>
+            Currently connected to:{" "}
+            <strong>{getBackendOrigin() || "(not set)"}</strong>
+          </p>
+          <button
+            onClick={() => navigate("/server-settings")}
+            style={{
+              padding: "8px 16px", borderRadius: 6, cursor: "pointer",
+              border: "1px solid var(--border)", background: "transparent",
+              color: "var(--text)", fontWeight: 600,
+            }}
+          >
+            Change server address
+          </button>
+        </div>
+      )}
     </div>
   );
 }

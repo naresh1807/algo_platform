@@ -2,13 +2,33 @@
   "name": "algo-trading-dashboard",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "electron:dev": "vite build && electron electron/main.js",
+    "electron:build": "vite build && electron-builder"
+  },
+  "build": {
+    "appId": "com.algoplatform.desktop",
+    "productName": "Algo Trading Platform",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
     "axios": "^1.19.0",
     "lightweight-charts": "^4.2.3",
     "lucide-react": "^1.31.0",
@@ -19,6 +39,8 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^44.1.0",
+    "electron-builder": "^26.15.3",
     "vite": "^7.3.2",
     "vitest": "^4.1.11"
   }

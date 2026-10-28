@@ -4,10 +4,10 @@ import { endpoints } from "../services/api.js";
 import { createAuthenticatedWebSocket } from "../utils/websocket.js";
 
 /**
- * JARVIS panel state: the visible conversation, the live announcement
+ * Drishti panel state: the visible conversation, the live announcement
  * feed pushed over /ws/jarvis/live/ (manual 14.16), and the mic
  * listening flag. Kept separate from liveStore.js (market/signal/risk
- * pushes) since JARVIS is its own subsystem with its own socket and
+ * pushes) since Drishti is its own subsystem with its own socket and
  * its own request/response REST call, matching how apps/jarvis is a
  * separate Django app on the backend rather than folded into an
  * existing one.
@@ -18,8 +18,8 @@ import { createAuthenticatedWebSocket } from "../utils/websocket.js";
  * drives the FAB badge, `toasts` drives a brief floating card near the
  * FAB, and high-priority kinds are spoken aloud immediately (see
  * `HIGH_PRIORITY_KINDS` below) -- matching manual 14.2's "voice ద్వారా
- * Platform మొత్తం Control చేయగలగాలి" vision and 14.16's "JARVIS
- * Announces" being something JARVIS does TO the user, not something
+ * Platform మొత్తం Control చేయగలగాలి" vision and 14.16's "Drishti
+ * Announces" being something Drishti does TO the user, not something
  * the user has to go ask for.
  */
 
@@ -42,7 +42,7 @@ export const useJarvisStore = create((set, get) => ({
   listening: false,
   sending: false,
   connected: false,
-  pendingConfirmText: null, // set when JARVIS is waiting on a confirm
+  pendingConfirmText: null, // set when Drishti is waiting on a confirm
   _socket: null,
   _reconnectTimer: null,
   _generation: 0,
@@ -71,7 +71,7 @@ export const useJarvisStore = create((set, get) => ({
       for (const row of rows) {
         if (row.raw_text) hydrated.push({ role: "user", text: row.raw_text });
         if (row.result_text) {
-          hydrated.push({ role: "jarvis", text: row.result_text, needsConfirmation: row.needs_confirmation });
+          hydrated.push({ role: "jarvis", text: row.result_text?.replace(/\bjarvis\b/gi, "Drishti"), needsConfirmation: row.needs_confirmation });
         }
       }
       if (hydrated.length > 0 && get().messages.length === 0) {
@@ -122,7 +122,7 @@ export const useJarvisStore = create((set, get) => ({
       }
       speak(data.text);
     } catch (err) {
-      const detail = err.response?.data?.detail || "JARVIS couldn't reach the backend.";
+      const detail = err.response?.data?.detail || "Drishti couldn't reach the backend.";
       set((state) => ({ messages: [...state.messages, { role: "jarvis", text: detail }] }));
     } finally {
       set({ sending: false });

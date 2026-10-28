@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 from common.constants import PositionSide
@@ -279,3 +280,20 @@ class BrokerOrder(models.Model):
 
     def __str__(self):
         return f"{self.purpose} {self.side} {self.symbol} x{self.quantity} [{self.status}]"
+
+
+class OptionTradeRequest(models.Model):
+    """Durable client request: repeating a UUID never submits another order."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    payload = models.JSONField()
+    status = models.CharField(max_length=16, default="processing")
+    execution_mode = models.CharField(max_length=8)
+    signal = models.ForeignKey("signals.TradingSignal", null=True, on_delete=models.PROTECT)
+    position = models.ForeignKey("execution.OpenPosition", null=True, on_delete=models.PROTECT)
+    message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]

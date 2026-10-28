@@ -1,0 +1,8 @@
+{
+  "appId": "com.algoplatform.app",
+  "appName": "Algo Trading Platform",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true
+  }
+}

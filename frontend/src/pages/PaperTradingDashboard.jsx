@@ -3,6 +3,7 @@ import {
   Activity, AlertTriangle, Bot, Brain, ShieldAlert, Sparkles, Wallet, Wifi,
 } from "lucide-react";
 
+import DrishtiMonitor from "../components/DrishtiMonitor.jsx";
 import DataTable from "../components/DataTable.jsx";
 import EmptyState from "../components/EmptyState.jsx";
 import ErrorState from "../components/ErrorState.jsx";
@@ -125,6 +126,7 @@ export default function PaperTradingDashboard() {
 
   return (
     <div>
+      <DrishtiMonitor />
       <div className="panel">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>

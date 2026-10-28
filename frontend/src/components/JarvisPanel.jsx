@@ -29,7 +29,7 @@ const SPEECH_RECOGNITION = window.SpeechRecognition || window.webkitSpeechRecogn
 // below); this hardcoded list existed permanently before, now it's
 // just the first paint.
 const FALLBACK_SUGGESTED = [
-  "show risk", "open portfolio", "today's profit", "AI status",
+  "market summary", "market outlook", "market status", "show nifty",
   "kill switch status", "current strategy",
 ];
 
@@ -59,7 +59,7 @@ export default function JarvisPanel() {
 
   useEffect(() => {
     // Connects immediately on mount, regardless of whether the panel is
-    // open -- JARVIS's announcements (manual 14.16) are proactive, not a
+    // open -- Drishti's announcements (manual 14.16) are proactive, not a
     // response to the user opening the panel or typing a command.
     connectAnnouncements();
     // Past conversation from the backend's own log (apps.jarvis.
@@ -78,7 +78,8 @@ export default function JarvisPanel() {
     // NotificationBell (TopBar) dispatches this instead of holding its
     // own "is the panel open" flag -- keeps that single piece of state
     // owned here, where the panel's own FAB/close button already live.
-    const handler = () => {
+    const handler = (event) => {
+      if (typeof event.detail?.question === "string") setText(event.detail.question);
       setOpen(true);
       markAnnouncementsSeen();
     };
@@ -120,7 +121,7 @@ export default function JarvisPanel() {
   };
 
   // Toasts render regardless of panel open/closed state -- this is what
-  // lets JARVIS "tell you directly" (manual 14.16) without you having
+  // lets Drishti "tell you directly" (manual 14.16) without you having
   // to open the panel or issue any command first.
   const toastStack = (
     <div className="jarvis-toast-stack">
@@ -150,9 +151,10 @@ export default function JarvisPanel() {
             setOpen(true);
             markAnnouncementsSeen();
           }}
-          title="Open JARVIS"
+          title="Open Drishti"
+          aria-label="Open Drishti assistant"
         >
-          <Bot size={16} /> JARVIS
+          <Bot size={18} /><span className="jarvis-fab-label">Drishti</span>
           {unseenCount > 0 && <span className="jarvis-badge">{unseenCount > 9 ? "9+" : unseenCount}</span>}
         </button>
       </>
@@ -167,14 +169,14 @@ export default function JarvisPanel() {
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <Bot size={15} />
             <span className={`status-dot ${connected ? "ok" : "bad"}`} />
-            JARVIS
+            Drishti
           </span>
           <span style={{ display: "flex", gap: 4 }}>
             <button
               className="jarvis-clear"
               disabled={messages.length === 0}
               onClick={() => {
-                if (window.confirm("Clear your JARVIS chat history? This can't be undone.")) {
+                if (window.confirm("Clear your Drishti chat history? This can't be undone.")) {
                   clearHistory();
                 }
               }}
@@ -182,7 +184,7 @@ export default function JarvisPanel() {
             >
               <Trash2 size={13} />
             </button>
-            <button className="jarvis-close" onClick={() => setOpen(false)} aria-label="Close JARVIS panel">
+            <button className="jarvis-close" onClick={() => setOpen(false)} aria-label="Close Drishti panel">
               <X size={16} />
             </button>
           </span>
@@ -223,10 +225,11 @@ export default function JarvisPanel() {
           }}
         >
           <input
+            autoFocus
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={pendingConfirmText ? `Confirm: ${pendingConfirmText}` : "Ask JARVIS…"}
-            aria-label="Message JARVIS"
+            placeholder={pendingConfirmText ? `Confirm: ${pendingConfirmText}` : "Ask Drishti…"}
+            aria-label="Message Drishti"
           />
           {SPEECH_RECOGNITION && (
             <button

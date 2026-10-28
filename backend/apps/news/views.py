@@ -45,3 +45,18 @@ class MarketSummaryView(APIView):
         except ValueError:
             return Response({"detail": "date must use YYYY-MM-DD format."}, status=400)
         return Response({"date": for_date.isoformat(), "summary": generate_market_summary(for_date)})
+
+
+class WarHeadlinesView(APIView):
+    permission_classes = [IsTraderOrAdmin]
+
+    def get(self, request):
+        from django.core.cache import cache
+        from .rss_client import fetch_war_headlines
+        key = "war-headlines-v1"
+        result = cache.get(key)
+        if result is None:
+            result = {"results": fetch_war_headlines(), "fetched_at": django_timezone.now().isoformat(),
+                      "window_hours": 24, "scoring": "Raw headlines; sentiment not scored."}
+            cache.set(key, result, timeout=300)
+        return Response(result)

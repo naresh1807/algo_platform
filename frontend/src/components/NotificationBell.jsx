@@ -3,10 +3,10 @@ import { Bell } from "lucide-react";
 import { useJarvisStore } from "../store/jarvisStore.js";
 
 /**
- * Reuses JARVIS's real proactive-announcement feed (apps.jarvis, pushed
+ * Reuses Drishti's real proactive-announcement feed (apps.jarvis, pushed
  * over /ws/jarvis/live/, already wired in jarvisStore.js) as this
  * platform's notification system rather than inventing a second,
- * parallel one -- clicking it opens the same JARVIS panel that already
+ * parallel one -- clicking it opens the same Drishti panel that already
  * lists them (JarvisPanel.jsx handles its own open/close state; this
  * dispatches a DOM event it listens for, avoiding a new global store
  * field just for "is the panel open").
@@ -18,8 +18,8 @@ export default function NotificationBell() {
     <button
       type="button"
       className="icon-btn"
-      aria-label={unseenCount > 0 ? `${unseenCount} unread JARVIS notifications` : "Notifications"}
-      title="JARVIS notifications"
+      aria-label={unseenCount > 0 ? `${unseenCount} unread Drishti notifications` : "Notifications"}
+      title="Drishti notifications"
       onClick={() => window.dispatchEvent(new CustomEvent("jarvis:open"))}
     >
       <Bell size={16} />

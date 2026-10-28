@@ -10,25 +10,10 @@ Three checks, all required for the market to be open:
   2. Time-of-day (09:15-15:30 IST) -- NSE's regular equity/index session.
   3. Not an NSE trading holiday.
 
-HONESTY NOTE on holidays, same spirit as this codebase's other external
--data caveats (apps.investing.fundamentals_client's NSE-scraping note,
-apps.news.rss_client's "feeds can change" note): NSE publishes an
-official holiday circular every December for the following calendar
-year, and most of those dates are festival-calendar-based (Holi, Eid,
-Diwali, Dussehra, Guru Nanak Jayanti, ...) that move every year and
-cannot be reliably computed or guessed -- only looked up from that
-official circular. NSE_HOLIDAYS below only includes the small set of
-FIXED-DATE national holidays (same calendar date every year) that can
-be stated with confidence; movable festival holidays for the current
-year must be added by hand from NSE's actual published circular
-(nseindia.com publishes it, though see that module's own note on why
-this codebase can't currently fetch it automatically -- Akamai bot
-protection blocks scripted requests to nseindia.com entirely). Until
-those are added, is_market_open() will return True (market treated as
-open) on an actual movable-date holiday -- a false positive, not a
-false negative, so nothing gets silently blocked that shouldn't be;
-the cost of the gap is a handful of harmless no-op signal-generation
-cycles on unlisted holidays, not a missed trading day.
+The NSE equity holiday calendar for 2026 was verified against the
+exchange's official published calendar on 6 October 2026. Update the
+calendar when new exchange closures are announced and before next year.
+BTST explicitly refuses an unverified calendar year.
 """
 
 from __future__ import annotations
@@ -46,10 +31,15 @@ MARKET_CLOSE_TIME = time(15, 30)
 # December for the following year); format is a plain set of
 # datetime.date, so any real date can be added directly regardless of
 # how it was determined.
+# NSE equity calendar for 2026, verified 6 October 2026.
+# https://www.nseindia.com/resources/exchange-communication-holidays
 NSE_HOLIDAYS: set[date] = {
-    date(2026, 1, 26),   # Republic Day
-    date(2026, 8, 15),   # Independence Day
-    date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 1, 15), date(2026, 1, 26), date(2026, 3, 3),
+    date(2026, 3, 26), date(2026, 3, 31), date(2026, 4, 3),
+    date(2026, 4, 14), date(2026, 5, 1), date(2026, 5, 28),
+    date(2026, 6, 26), date(2026, 9, 14), date(2026, 10, 2),
+    date(2026, 10, 20), date(2026, 11, 8), date(2026, 11, 10),
+    date(2026, 11, 24), date(2026, 12, 25),
 }
 
 

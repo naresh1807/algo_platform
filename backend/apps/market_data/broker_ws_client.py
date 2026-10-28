@@ -188,6 +188,19 @@ class LiveFeedClient:
         # reconnects.
         self._broker_client = BrokerClient()
         self._consecutive_failures = 0
+        # Last state passed to _set_connection_state below -- re-published
+        # on every _heartbeat_loop cycle (see that method) so a healthy,
+        # long-lived connection doesn't silently read back as unknown/null
+        # once feed_stats' 120s cache TTL elapses. Every module-level
+        # feed_stats.set_connection_state(...) call in this class was a
+        # one-shot write on a state TRANSITION only, unlike
+        # mark_heartbeat()/mark_index_tick()/etc., which are refreshed
+        # continuously -- so a connection that stayed "connected" for
+        # more than 2 minutes without erroring or reconnecting had its
+        # own connection_state expire out of cache while still healthy,
+        # making SystemHealthView (and the dashboard) report it as
+        # stopped/unknown even though ticks were actively flowing.
+        self._connection_state = "connecting"
 
         self._index_coalescer = TickCoalescer()
         self._option_coalescer = TickCoalescer()
@@ -224,6 +237,14 @@ class LiveFeedClient:
         threading.Thread(target=self._heartbeat_loop, daemon=True, name="live-feed-heartbeat").start()
         threading.Thread(target=self._subscription_refresh_loop, daemon=True, name="live-feed-sub-refresh").start()
 
+    def _set_connection_state(self, state: str) -> None:
+        """Records the state for _heartbeat_loop's periodic re-publish
+        AND writes it immediately (so a state change is visible right
+        away, not just at the next heartbeat tick) -- see this state's
+        own docstring in __init__ for why re-publishing matters at all."""
+        self._connection_state = state
+        feed_stats.set_connection_state(state)
+
     def run_forever(self) -> None:
         """
         Blocking. Reconnects with exponential backoff on any error or
@@ -233,7 +254,7 @@ class LiveFeedClient:
         while True:
             is_open, reason = is_market_open()
             if not is_open:
-                feed_stats.set_connection_state("market_closed")
+                self._set_connection_state("market_closed")
                 logger.info("run_live_feed: market closed (%s) -- checking again in %ds.", reason, _MARKET_CLOSED_POLL_INTERVAL)
                 time.sleep(_MARKET_CLOSED_POLL_INTERVAL)
                 continue
@@ -246,14 +267,14 @@ class LiveFeedClient:
                 self._broker_client = BrokerClient()
                 self._consecutive_failures = 0
 
-            feed_stats.set_connection_state("connecting")
+            self._set_connection_state("connecting")
             try:
                 self._connect_and_subscribe()
                 backoff = _RECONNECT_BACKOFF_INITIAL
                 self._consecutive_failures = 0
             except Exception as exc:
                 logger.exception("Live feed connection dropped -- reconnecting in %ds.", backoff)
-                feed_stats.set_connection_state("reconnecting")
+                self._set_connection_state("reconnecting")
                 feed_stats.record_error("connection_error", str(exc))
                 self._consecutive_failures += 1
                 time.sleep(backoff)
@@ -315,7 +336,7 @@ class LiveFeedClient:
                 logger.info("Angel One live feed: subscribing to %d option contracts.", len(desired))
                 self._subscribe_tokens(sws, list(desired.keys()))
             self._ws_ready.set()
-            feed_stats.set_connection_state("connected")
+            self._set_connection_state("connected")
             feed_stats.set_subscribed_token_count(len(desired))
 
         def on_data(wsapp, message):
@@ -454,6 +475,11 @@ class LiveFeedClient:
         while True:
             try:
                 feed_stats.mark_heartbeat()
+                # Re-publish (not just set-once-on-transition) so a
+                # connection that's stayed healthy longer than feed_stats'
+                # 120s cache TTL doesn't silently expire back to null --
+                # see _set_connection_state's own docstring.
+                feed_stats.set_connection_state(self._connection_state)
                 with self._sub_lock:
                     token_count = len(self._option_tokens)
                 feed_stats.set_subscribed_token_count(token_count)

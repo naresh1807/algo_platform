@@ -28,6 +28,14 @@ class EntityExtractionTests(TestCase):
         self.assertIn("banking", result["sectors"])
         self.assertIn("macro", result["sectors"])
 
+    def test_extracts_geopolitical_sector_from_war_headline(self):
+        result = extract_entities("Israel Iran conflict escalates, oil prices surge")
+        self.assertIn("geopolitical", result["sectors"])
+
+    def test_extracts_geopolitical_sector_from_bare_war_word(self):
+        result = extract_entities("Markets on edge as Russia Ukraine war drags on")
+        self.assertIn("geopolitical", result["sectors"])
+
     def test_time_horizon_classification(self):
         self.assertEqual(classify_time_horizon("Sensex opens higher this morning"), "intraday")
         self.assertEqual(classify_time_horizon("Company reports Q2 quarterly results"), "multi_day")
@@ -76,6 +84,20 @@ class SentimentAggregationTests(TestCase):
             sentiment_label="negative", sentiment_score=-0.9, confidence=0.9,
         )
         analyze_impact(news)  # "macro" sector ("fed hike"/"global markets") -> index_impact="NIFTY_DOWN"
+
+        result = aggregate_sentiment("NIFTY")
+        self.assertEqual(result["headline_count"], 1)
+        self.assertTrue(result["has_contradictory_headline"])
+
+    def test_war_headline_is_treated_as_macro_and_vetoes_nifty(self):
+        news = NewsSentiment.objects.create(
+            symbol="NIFTY", headline="Israel Iran war fears spark global markets selloff",
+            source="test", published_at=timezone.now(),
+            sentiment_label="negative", sentiment_score=-0.9, confidence=0.9,
+        )
+        analysis = analyze_impact(news)  # "geopolitical" sector -> trade_relevance=MACRO, index_impact="NIFTY_DOWN"
+        self.assertEqual(analysis.trade_relevance, NewsImpactAnalysis.TradeRelevance.MACRO)
+        self.assertEqual(analysis.index_impact, "NIFTY_DOWN")
 
         result = aggregate_sentiment("NIFTY")
         self.assertEqual(result["headline_count"], 1)

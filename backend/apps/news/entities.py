@@ -72,6 +72,30 @@ SECTOR_KEYWORDS: dict[str, list[str]] = {
         "us jobs data", "us inflation", "bond yield", "bond yields",
         "global markets", "china economy", "geopolitical", "opec",
     ],
+    # Split out from "macro" (2026-08-22, same "extend as gaps are found"
+    # maintenance this module's docstring describes) -- war/conflict
+    # headlines are exactly the "indirectly affects the market" macro
+    # case (oil-supply shock -> import bill/inflation -> RBI policy ->
+    # index prices; a flight-to-safety FII outflow), but a bare
+    # "geopolitical" keyword rarely appears in the actual headline text
+    # (real coverage says "Israel Iran strikes" or "Russia Ukraine war",
+    # not the word "geopolitical" itself) -- see rss_sources.py's own
+    # query strings, extended the same day to actually fetch these.
+    # Kept as its own sector (not folded into "macro"'s list) so the
+    # News page's "Sectors: ..." badge shows *why* a headline was
+    # flagged, not just an anonymous "macro" tag -- apps.news.
+    # impact_engine.py treats "geopolitical" identically to "macro" for
+    # trade_relevance/index_impact purposes, both being index-wide,
+    # no-single-stock-named drivers.
+    "geopolitical": [
+        "war", "russia ukraine", "israel iran", "israel gaza", "israel hamas",
+        "middle east tension", "middle east conflict", "middle east crisis",
+        "military conflict", "military strike", "missile attack", "missile strike",
+        "airstrike", "invasion", "ceasefire", "conflict escalation",
+        "geopolitical tension", "geopolitical risk", "geopolitical crisis",
+        "sanctions on russia", "strait of hormuz", "oil supply disruption",
+        "border conflict", "nuclear tension", "houthi", "hormuz", "airstrikes", "gulf tensions", "military attacks",
+    ],
 }
 
 # Words/phrases signaling how long an event's effect is likely to

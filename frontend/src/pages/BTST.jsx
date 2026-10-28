@@ -1,0 +1,12 @@
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { endpoints } from "../services/api.js";
+export default function BTST() {
+  const [feed,setFeed]=useState(null);const [error,setError]=useState("");
+  useEffect(()=>{let active=true;const load=()=>endpoints.btstSignals().then(res=>{if(active){setFeed(res.data);setError("");}}).catch(()=>{if(active)setError("Could not load BTST signals.");});load();const timer=setInterval(load,60000);return()=>{active=false;clearInterval(timer);};},[]);
+  const money=value=>Number(value).toLocaleString("en-IN",{maximumFractionDigits:2});
+  return <div className="delivery-workspace"><div className="panel"><span className="badge badge-accent">SIGNALS ONLY</span><h2>Buy today, sell next session</h2><p>Scans at 2:30 PM IST on NSE market days. Uses fresh intraday prices and prior daily trend, volume, and four BTST setups.</p><p>Setups: 20-day trend breakout, inside-day breakout, EMA20 pullback recovery, and opening-range breakout above VWAP.</p><p>Add NSE stocks to your <Link to="/delivery">stock watchlist</Link> to include them. Up to 50 watchlisted stocks are scanned per day.</p><p>Reference prices are not order fills. Overnight gaps can cross a stop price; no automatic orders are placed.</p></div>{error&&<p role="alert">{error}</p>}
+    <div className="panel"><h3>Your BTST signals</h3>{feed?.results.map(signal=><article className="delivery-record" key={signal.id}><div><strong>{signal.symbol}</strong><p>{(signal.evidence.strategies ?? ["trend_breakout"]).map(key => feed.strategies?.[key] ?? key).join(" / ")}</p><p>Signal: {signal.date} / Planned exit session: {signal.exit_session}</p><p>Reference INR {money(signal.entry_reference)} / Stop INR {money(signal.stop_loss)} / Target INR {money(signal.target_price)}</p><small>Volume ratio {Number(signal.evidence.volume_ratio).toFixed(2)} / Risk {Number(signal.evidence.risk_pct).toFixed(2)}%</small></div></article>)}{feed&&!feed.results.length&&<p>No qualifying BTST signals yet. The next scheduled scan will appear here after it completes.</p>}</div>
+    <div className="panel"><h3>Recent scheduled scans</h3>{feed?.runs.map(run=><article className="delivery-record" key={run.date}><strong>{run.date}</strong><span>{run.status} / {run.scanned} scanned / {run.signals} signals</span></article>)}{feed&&!feed.runs.length&&<p>No scans recorded yet.</p>}</div>
+  </div>;
+}

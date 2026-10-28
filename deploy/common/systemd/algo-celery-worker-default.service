@@ -1,0 +1,18 @@
+[Unit]
+Description=Algo Trading Platform - Celery worker (default queue)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__/backend
+# No --pool=solo here -- that's a Windows-only workaround forced in
+# backend/config/celery.py when platform.system() == "Windows" (billiard
+# prefork breaks there). Linux uses Celery's normal prefork pool.
+ExecStart=__REPO_ROOT__/backend/.venv/bin/celery -A config worker -l info -Q celery
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

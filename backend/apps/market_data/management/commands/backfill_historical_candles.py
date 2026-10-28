@@ -91,6 +91,9 @@ class Command(BaseCommand):
         timeframes = [options["timeframe"]] if options["timeframe"] else list(settings.CHART_TIMEFRAMES)
         total_days = options["days"]
 
+        if total_days <= 0:
+            raise CommandError("--days must be positive.")
+
         client = BrokerClient()
         grand_total = 0
         failures = []
@@ -127,11 +130,14 @@ class Command(BaseCommand):
                         candles = []
 
                     if candles:
+                        timestamps = [c["timestamp"] for c in candles]
+                        before = HistoricalData.objects.filter(symbol=symbol, timeframe=timeframe, timestamp__in=timestamps).count()
                         with transaction.atomic():
                             created = HistoricalData.objects.bulk_create(
                                 [HistoricalData(**c) for c in candles], ignore_conflicts=True,
                             )
-                        symbol_tf_inserted += len(created)
+                        after = HistoricalData.objects.filter(symbol=symbol, timeframe=timeframe, timestamp__in=timestamps).count()
+                        symbol_tf_inserted += max(0, after - before)
                         self.stdout.write(
                             f"  chunk {chunk_num}/{num_chunks} ({chunk_days}d ending {to_date.date()}): "
                             f"{len(candles)} candles returned."

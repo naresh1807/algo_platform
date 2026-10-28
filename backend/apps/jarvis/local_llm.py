@@ -1,5 +1,5 @@
 """
-JARVIS's free-form fallback: a self-hosted, open-source LLM running
+Drishti's free-form fallback: a self-hosted, open-source LLM running
 locally via Ollama (https://ollama.com) -- NOT a paid external API.
 Used ONLY when apps.jarvis.intent's rule-based matcher finds no
 command match for what was typed/said (see engine.py's process()) --
@@ -59,7 +59,7 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 75  # CPU-only local inference is slow, and Ollama unloads an idle model from memory after a few minutes (its own default keep_alive) -- a cold-start reload plus generation measured ~30-40s on this hardware even before grounding context existed. Bumped from the original 45s once _build_learning_context() (below) started routinely pushing warm-model generation to ~40s on its own -- 45s was cutting it too close and started producing real, reproducible timeouts, not just a dead-Ollama safety margin.
-MAX_ANSWER_CHARS = 800  # This is a chat panel, not a document -- keeps a rambling model output from dominating the JARVIS panel.
+MAX_ANSWER_CHARS = 800  # This is a chat panel, not a document -- keeps a rambling model output from dominating the Drishti panel.
 
 CANDLES_PER_SYMBOL = 6  # a short recent timeline, not a full chart -- enough to say "up/down over the last half hour," not meant to replace the actual Dashboard chart.
 NEWS_LOOKBACK = timedelta(hours=3)
@@ -67,7 +67,7 @@ NEWS_ITEM_LIMIT = 6
 DRIFT_LOOKBACK = timedelta(days=7)
 
 SYSTEM_PROMPT = (
-    "You are JARVIS, the assistant panel inside a personal algo-trading platform "
+    "You are Drishti, the assistant panel inside a personal algo-trading platform "
     "that trades NIFTY/BANKNIFTY index options in India (paper trading by default, "
     "real trades only when explicitly enabled). You are a FALLBACK for questions "
     "that don't match this platform's built-in commands.\n\n"
@@ -239,7 +239,7 @@ def ask(question: str) -> str | None:
     request times out, or the model errors -- callers (engine.py) treat
     None exactly like "no local LLM available" and fall back to the
     standard not-recognized message. Never raises -- a local model
-    being down must not turn into a 500 for the whole JARVIS chat.
+    being down must not turn into a 500 for the whole Drishti chat.
     """
     try:
         context = _build_grounding_context()

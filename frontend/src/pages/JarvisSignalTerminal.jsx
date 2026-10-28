@@ -41,9 +41,9 @@ const selectStyle = {
 };
 
 /**
- * JARVIS AI Signal Terminal -- the professional trading-terminal view
+ * Drishti AI Signal Terminal -- the professional trading-terminal view
  * the redesign asked for: underlying analysis -> option chain -> exact
- * resolved contract -> risk-validated JARVIS signal, all in one place,
+ * resolved contract -> risk-validated Drishti signal, all in one place,
  * instead of a bare "NIFTY -> BUY" line. Deliberately built by
  * REUSING the pieces that already exist rather than duplicating them.
  *

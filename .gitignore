@@ -36,3 +36,19 @@ backend/logs/
 
 # Celery beat's local schedule DB (runtime state, like db.sqlite3)
 backend/celerybeat-schedule*
+
+# Electron desktop build output (frontend/electron/main.js + preload.js
+# are source, kept; this is electron-builder's generated installer)
+frontend/release/
+
+# Capacitor Android -- the android/ project itself is checked in (it
+# holds app-specific config: AndroidManifest.xml, res/, build.gradle
+# customizations -- not regenerable from capacitor.config.json alone),
+# but build outputs and machine-specific files are not:
+frontend/android/local.properties
+frontend/android/**/build/
+frontend/android/.gradle/
+frontend/android/captures/
+frontend/android/app/src/main/assets/public/
+*.apk
+*.aab

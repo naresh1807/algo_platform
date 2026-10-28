@@ -157,7 +157,7 @@ def evaluate_entry(account, underlying: str, timeframe: str) -> AIDecisionResult
         return result
 
     option_type = "CE" if result.action == Action.BUY_CE_ONE_LOT else "PE"
-    candidate, selection_reason = contract_selection.select_contract(underlying, option_type)
+    candidate, selection_reason = contract_selection.select_contract(underlying, option_type, account=account)
     if candidate is None:
         return AIDecisionResult(
             Action.SKIP_SIGNAL, result.confidence, result.expected_return,
@@ -300,7 +300,7 @@ def evaluate_scalp_entry(account, underlying: str) -> AIDecisionResult:
         return result
 
     # All fired scalp ideas are long-only -> CE (see decide_scalp_direction).
-    candidate, selection_reason = contract_selection.select_contract(underlying, "CE")
+    candidate, selection_reason = contract_selection.select_contract(underlying, "CE", account=account)
     if candidate is None:
         return AIDecisionResult(
             Action.SKIP_SIGNAL, result.confidence, result.expected_return,

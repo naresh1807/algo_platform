@@ -44,20 +44,37 @@ GENERAL_MARKET_FEEDS = [
 # Nifty" -- these are what "indirectly affects the market" means in
 # practice (US Fed policy -> FII flows -> Nifty; crude oil -> import
 # bill/inflation -> RBI policy -> Bank Nifty; etc.).
+
+# War/conflict terms, appended to both symbols' "indirect" query below
+# (2026-08-22) -- these headlines were already SUPPOSED to be in scope
+# (this module's own docstring names "geopolitical shocks" as a macro
+# driver, and entities.py's "macro" sector keyword list has carried a
+# bare "geopolitical" entry since 2026-08-08), but neither query string
+# actually included a term that would surface one: real war coverage
+# says "Israel Iran strikes" or "Russia Ukraine war", not the word
+# "geopolitical" itself, so nothing was actually being fetched. See
+# entities.py's new "geopolitical" sector for the matching classification
+# half of this fix.
+GEOPOLITICAL_QUERY_TERMS = (
+    'war OR "Russia Ukraine" OR "Israel Iran" OR "Israel Gaza" OR "Middle East tensions" '
+    'OR "military conflict" OR "missile strike" OR ceasefire OR "geopolitical tensions" '
+    'OR sanctions'
+)
+
 SYMBOL_SEARCH_QUERIES = {
     "NIFTY": {
         "direct": '"Nifty 50" OR Sensex OR "NSE India" OR "Indian stock market" OR FII OR FPI',
         "indirect": (
             '"Federal Reserve" OR "Fed rate" OR "crude oil price" OR "US markets" '
             'OR "dollar index" OR "rupee" OR "US inflation" OR "China economy" '
-            'OR "global markets"'
+            'OR "global markets" OR ' + GEOPOLITICAL_QUERY_TERMS
         ),
     },
     "BANKNIFTY": {
         "direct": '"Bank Nifty" OR "Nifty Bank" OR "Indian banking sector" OR RBI OR "bank stocks"',
         "indirect": (
             '"RBI repo rate" OR "interest rate" OR "Federal Reserve" OR "bond yields" '
-            'OR "credit growth" OR "NPA banking" OR "liquidity crisis"'
+            'OR "credit growth" OR "NPA banking" OR "liquidity crisis" OR ' + GEOPOLITICAL_QUERY_TERMS
         ),
     },
 }

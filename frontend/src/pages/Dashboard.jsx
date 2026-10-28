@@ -11,6 +11,7 @@ import PriceAlertsPanel from "../components/PriceAlertsPanel.jsx";
 import IndexTickerBar from "../components/IndexTickerBar.jsx";
 import MarketOutlookPanel from "../components/MarketOutlookPanel.jsx";
 import MetricCard from "../components/MetricCard.jsx";
+import HomeOverview from "../components/HomeOverview.jsx";
 import EmptyState from "../components/EmptyState.jsx";
 import ErrorState from "../components/ErrorState.jsx";
 import LoadingSkeleton from "../components/LoadingSkeleton.jsx";
@@ -95,7 +96,7 @@ export default function Dashboard() {
         strategyRes, riskRes, summaryRes, equityRes,
       ]) => {
         if (signalsRes.status === "fulfilled") setSignals(signalsRes.value.data.results ?? []);
-        if (positionsRes.status === "fulfilled") setPositions(positionsRes.value.data.results ?? []);
+        if (positionsRes.status === "fulfilled") setPositions((positionsRes.value.data.results ?? []).filter((position) => position.is_open));
         if (perfRes.status === "fulfilled") setPerformance(perfRes.value.data.results?.[0] ?? null);
         if (reviewRes.status === "fulfilled") setDailyReview(reviewRes.value.data.results?.[0] ?? null);
         if (driftRes.status === "fulfilled") setDriftEvents(driftRes.value.data.results ?? []);
@@ -193,12 +194,14 @@ export default function Dashboard() {
   }
 
   return (
-    <div>
+    <div className="dashboard-page">
+      <IndexTickerBar />
+      <HomeOverview />
       {loadError && <ErrorState title="Couldn't load the dashboard" detail={loadError} onRetry={loadAll} />}
 
       <div className="metric-grid">
         <MetricCard
-          title="Available Balance"
+          title="Account equity"
           icon={Wallet}
           loading={loading}
           value={formatMoney(equity?.current_equity)}
@@ -236,10 +239,10 @@ export default function Dashboard() {
           icon={PieChart}
           loading={loading}
           value={exposurePct === null ? null : `${exposurePct.toFixed(1)}%`}
-          sub="of available balance"
+          sub="of account equity"
         />
         <MetricCard
-          title="AI Signals Today"
+          title="Recent AI signals"
           icon={Bot}
           loading={loading}
           value={signals.length}
@@ -252,8 +255,6 @@ export default function Dashboard() {
           value={riskLabel}
         />
       </div>
-
-      <IndexTickerBar />
 
       <MarketOutlookPanel />
 
@@ -286,7 +287,7 @@ export default function Dashboard() {
         ) : candles.length === 0 ? (
           <EmptyState
             title={`No ${symbol} ${timeframe} candles yet`}
-            detail="Run the ingestion task (BROKER_MODE=live) or the backfill command to populate candle history."
+            detail="Price history is not available for this symbol and timeframe yet."
           />
         ) : (
           <>

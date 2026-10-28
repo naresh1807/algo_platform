@@ -123,6 +123,18 @@ def _run_cycle(underlying: str | None, timeframe: str, evaluate_fn) -> dict:
         if not state_machine.cooldown_expired():
             return {"skipped": "cooldown"}
         state_machine.transition(session.State.FLAT, reason="cooldown expired")
+    elif session.state == session.State.MARKET_CLOSED:
+        # MARKET_CLOSED's only allowed outgoing transition is "flat"
+        # (state_machine._ALLOWED_TRANSITIONS) -- without this bridge,
+        # the very next line that jumps straight to ANALYZING once the
+        # market reopens raised an uncaught "Illegal paper-trading state
+        # transition: market_closed -> analyzing" ValueError every single
+        # cycle, forever, the first time this ever ran past a market
+        # close: nothing ever transitions OUT of market_closed back to
+        # flat on its own, so the dashboard was permanently stuck showing
+        # "Market Closed" even during regular trading hours on any day
+        # after the first. Real bug, found via the dashboard report.
+        state_machine.transition(session.State.FLAT, reason="market reopened")
 
     execution_engine.check_pending_limit_orders()
 

@@ -745,3 +745,6 @@ LOGGING = {
         "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO"),
     },
 }
+
+# User-selected public name for the trading learning model.
+TRADING_MODEL_DISPLAY_NAME = "Drishti"

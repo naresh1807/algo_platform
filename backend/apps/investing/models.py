@@ -337,3 +337,57 @@ class IPOListing(models.Model):
 
     def __str__(self):
         return f"{self.company_name} [{self.status}]"
+
+
+class DeliveryPaperAccount(models.Model):
+    user = models.OneToOneField("auth.User", on_delete=models.CASCADE)
+    cash = models.DecimalField(max_digits=16, decimal_places=2, default=100000)
+
+
+class DeliveryHolding(models.Model):
+    account = models.ForeignKey(DeliveryPaperAccount, on_delete=models.CASCADE)
+    stock = models.ForeignKey(Stock, on_delete=models.PROTECT)
+    quantity = models.PositiveIntegerField(default=0)
+    average_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    realized_pnl = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["account", "stock"], name="unique_delivery_holding")]
+
+
+class DeliveryPaperOrder(models.Model):
+    account = models.ForeignKey(DeliveryPaperAccount, on_delete=models.CASCADE)
+    request_id = models.UUIDField(unique=True)
+    stock = models.ForeignKey(Stock, on_delete=models.PROTECT)
+    action = models.CharField(max_length=4)
+    quantity = models.PositiveIntegerField()
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    reference_date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class BTSTRun(models.Model):
+    trading_date = models.DateField(unique=True)
+    scheduled_for = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True)
+    status = models.CharField(max_length=20, default="running")
+    scanned = models.PositiveIntegerField(default=0)
+    details = models.JSONField(default=dict)
+
+
+class BTSTSignal(models.Model):
+    run = models.ForeignKey(BTSTRun, on_delete=models.CASCADE, related_name="signals")
+    stock = models.ForeignKey(Stock, on_delete=models.PROTECT)
+    entry_reference = models.DecimalField(max_digits=12, decimal_places=2)
+    stop_loss = models.DecimalField(max_digits=12, decimal_places=2)
+    target_price = models.DecimalField(max_digits=12, decimal_places=2)
+    exit_session = models.DateField()
+    strategy = models.CharField(max_length=32, default="trend_breakout_btst")
+    evidence = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["run", "stock"], name="unique_btst_signal")]

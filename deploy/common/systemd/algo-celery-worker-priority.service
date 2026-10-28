@@ -1,0 +1,15 @@
+[Unit]
+Description=Algo Trading Platform - Celery worker (priority queue -- square-off/flatten/reconcile tasks, see backend/config/celery.py's task_routes)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__/backend
+ExecStart=__REPO_ROOT__/backend/.venv/bin/celery -A config worker -l info -Q priority
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

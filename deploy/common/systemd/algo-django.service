@@ -1,0 +1,17 @@
+[Unit]
+Description=Algo Trading Platform - Django/Daphne (ASGI, via runserver -- see backend/config/settings.py's INSTALLED_APPS comment on why daphne makes runserver ASGI-capable)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__/backend
+ExecStart=__REPO_ROOT__/backend/.venv/bin/python __REPO_ROOT__/backend/manage.py runserver 127.0.0.1:8000
+# 127.0.0.1 only -- Caddy (deploy/gcp/Caddyfile) is the one public entry
+# point, matching provision_vm.sh's firewall rules (80/443 only).
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

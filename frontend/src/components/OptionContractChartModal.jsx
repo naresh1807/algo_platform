@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { X } from "lucide-react";
 
 import MACDPanel from "../charts/MACDPanel.jsx";
@@ -51,7 +52,7 @@ function mergeLiveCandle(candles, liveCandle) {
  * strike no longer exists on the new expiry. `chainRows` is the page's
  * already-loaded chain for `expiry`, used only for that fallback.
  */
-export default function OptionContractChartModal({ contract, underlying, expiry, chainRows = [], onClose }) {
+export default function OptionContractChartModal({ contract, underlying, expiry, chainRows = [], onClose, embedded = false, onBuy, onSell, tradingDisabled = false, canSell = false }) {
   const theme = useThemeStore((s) => s.theme);
   const [timeframe, setTimeframe] = useState("5m");
   const [chartType, setChartType] = useState("candlestick");
@@ -67,6 +68,7 @@ export default function OptionContractChartModal({ contract, underlying, expiry,
     optionType,
     timeframe,
     chainRows,
+    allowFallback: !embedded,
   });
 
   const merged = useMemo(() => mergeLiveCandle(candles, liveCandle), [candles, liveCandle]);
@@ -86,17 +88,17 @@ export default function OptionContractChartModal({ contract, underlying, expiry,
   return (
     <div
       style={{
-        position: "fixed", inset: 0, background: "var(--overlay-scrim)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+        position: embedded ? "relative" : "fixed", inset: embedded ? undefined : 0, background: embedded ? "transparent" : "var(--overlay-scrim)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: embedded ? undefined : 1000,
       }}
-      onClick={onClose}
+      onClick={embedded ? undefined : onClose}
     >
       <div
         className="panel"
-        role="dialog"
-        aria-modal="true"
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-labelledby={titleId}
-        style={{ width: "min(920px, 95vw)", margin: 0 }}
+        style={{ width: embedded ? "100%" : "min(920px, 95vw)", margin: 0, maxHeight: embedded ? undefined : "90dvh", overflowY: embedded ? undefined : "auto", boxSizing: "border-box", minWidth: 0 }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
@@ -111,9 +113,9 @@ export default function OptionContractChartModal({ contract, underlying, expiry,
               </span>
             )}
           </h3>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+          {!embedded && <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
             <X size={16} />
-          </button>
+          </button>}
         </div>
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, margin: "10px 0" }}>
@@ -138,6 +140,17 @@ export default function OptionContractChartModal({ contract, underlying, expiry,
             </div>
             <TimeframeSelector options={CONTRACT_TIMEFRAMES} value={timeframe} onChange={setTimeframe} />
           </div>
+        </div>
+
+        <div className="chart-trade-actions">
+          {embedded ? <>
+            <button type="button" className="btn chart-buy" disabled={tradingDisabled} onClick={onBuy}>Buy {optionType}</button>
+            <button type="button" className="btn btn-danger" disabled={tradingDisabled || !canSell} onClick={onSell}>Sell to close</button>
+            <span>{canSell ? "Review your order before confirming." : "Sell becomes available when you hold this contract."}</span>
+          </> : <>
+            <Link className="btn chart-buy" onClick={onClose} to={`/option-trading?${new URLSearchParams({ underlying: resolved?.underlying ?? underlying, expiry: resolved?.expiry ?? expiry, strike: resolved?.strike ?? strike, side: resolved?.option_type ?? optionType, action: "buy" })}`}>Buy this option</Link>
+            <Link className="btn btn-danger" onClick={onClose} to={`/option-trading?${new URLSearchParams({ underlying: resolved?.underlying ?? underlying, expiry: resolved?.expiry ?? expiry, strike: resolved?.strike ?? strike, side: resolved?.option_type ?? optionType, action: "sell" })}`}>Sell to close</Link>
+          </>}
         </div>
 
         {loading ? (

@@ -1,6 +1,12 @@
 import { create } from "zustand";
 
+import { getBackendOrigin } from "../config/backendOrigin.js";
 import { createAuthenticatedWebSocket } from "../utils/websocket.js";
+
+// How many quick retries (~1+2+4+8 = 15s of backoff) a socket gets
+// before this store starts suspecting the token itself, not just a
+// transient blip, is the problem.
+const AUTH_CHECK_RETRY_THRESHOLD = 4;
 
 /**
  * Holds everything that changes via WebSocket push (manual section 10:
@@ -105,6 +111,12 @@ export const useLiveStore = create((set, get) => ({
 }));
 
 function wsBase() {
+  // getBackendOrigin() returns "" for the plain same-origin browser
+  // build (unchanged behavior below); inside Electron/Capacitor it's an
+  // absolute http(s)://host:port pointing at wherever the backend
+  // actually runs -- see config/backendOrigin.js.
+  const origin = getBackendOrigin();
+  if (origin) return origin.replace(/^http/, "ws");
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${window.location.host}`;
 }
@@ -113,6 +125,35 @@ function setSocketOpen(key, isOpen, set, get) {
   const socketStatus = { ...get().socketStatus, [key]: isOpen };
   const connected = Object.values(socketStatus).every(Boolean);
   set({ socketStatus, connected });
+}
+
+// Guards against every socket that crosses AUTH_CHECK_RETRY_THRESHOLD
+// around the same moment (the common case: all 6 fail together right
+// after connect()) firing its own redundant health check.
+let _authCheckInFlight = false;
+
+// A WebSocket handshake rejected before accept() (an expired/invalid
+// token -- see common.websockets.AuthenticatedWebsocketConsumer's own
+// pre-accept close) surfaces to the browser as a generic abnormal-
+// closure, NOT the server's intended 4401 code -- close codes are only
+// visible here for a socket that was accepted first and revalidated
+// later (e.g. per-push in AuthenticatedWebsocketConsumer.send). That
+// makes "was this close caused by auth?" unanswerable from the close
+// event alone, so after enough consecutive failures this piggybacks on
+// the REST API's own already-working 401 handling (api.js's response
+// interceptor already clears the token and redirects to /login)
+// instead of trying to guess from a WebSocket close code, or -- the
+// real bug this fixes -- silently retrying an expired token forever
+// with no user-visible signal beyond scary console noise.
+function checkSessionIfLikelyExpired(attempt) {
+  if (attempt !== AUTH_CHECK_RETRY_THRESHOLD || _authCheckInFlight) return;
+  _authCheckInFlight = true;
+  import("../services/api.js")
+    .then(({ endpoints }) => endpoints.systemHealth())
+    .catch(() => {}) // a genuine 401 is already handled by api.js's own interceptor; anything else here is a non-auth connectivity problem, not this function's concern
+    .finally(() => {
+      _authCheckInFlight = false;
+    });
 }
 
 function openWithRetry(key, url, onMessage, set, get, generation, attempt = 0) {
@@ -133,6 +174,7 @@ function openWithRetry(key, url, onMessage, set, get, generation, attempt = 0) {
   socket.onclose = () => {
     setSocketOpen(key, false, set, get);
     if (!get()._active || get()._generation !== generation) return; // disconnect() already tore this down
+    checkSessionIfLikelyExpired(attempt);
     // Exponential backoff, capped at 30s, so a backend restart doesn't
     // get hammered with reconnect attempts.
     const delay = Math.min(30000, 1000 * 2 ** attempt);

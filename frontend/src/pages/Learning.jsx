@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import TradeLearning from "../components/TradeLearning.jsx";
 import { api, endpoints } from "../services/api.js";
 
 // apps.learning.strategy_methods.METHOD_FUNCS's three comparison
@@ -49,6 +50,7 @@ export default function Learning() {
 
   return (
     <>
+      <TradeLearning />
       <div className="panel">
         <h3>Strategy Versions</h3>
         {strategyVersions.length === 0 ? (

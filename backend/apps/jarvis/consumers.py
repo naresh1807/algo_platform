@@ -1,6 +1,6 @@
 """
-WebSocket consumer for JARVIS push notifications (manual 14.16:
-"JARVIS Announces" -- market open/close, trade executed, signal
+WebSocket consumer for Drishti push notifications (manual 14.16:
+"Drishti Announces" -- market open/close, trade executed, signal
 generated, risk warning, kill switch, AI training completed). Same
 group-broadcast pattern as apps.risk.consumers.RiskAlertConsumer and
 apps.market_data.consumers -- one group, JSON payloads tagged by

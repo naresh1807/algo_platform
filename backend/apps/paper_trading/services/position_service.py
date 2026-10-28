@@ -104,6 +104,10 @@ def close_position(account, position: PaperPosition, reason: str):
     trade = pnl_service.settle_trade(account, position, exit_order, reason)
     result = outcome_service.finalize_trade_outcome(trade, position, reason)
     _backfill_entry_decision(position, trade, result)
+    from apps.learning.trade_feedback import collect_trade_feedback
+    # Run only after settlement commits. Periodic collection remains a retry
+    # path if the queue is temporarily unavailable.
+    transaction.on_commit(lambda: collect_trade_feedback.apply_async(retry=False), robust=True)
     return trade
 
 

@@ -96,21 +96,21 @@ export default function IndexTickerBar() {
     return (
       <div className="panel" style={{ marginBottom: 12 }}>
         <p style={{ color: "var(--muted)", fontSize: 13 }}>
-          No indices seeded yet -- run <code>python manage.py seed_indices</code> on the backend.
+          Market indices are not available yet. Prices will appear when market data is ready.
         </p>
       </div>
     );
   }
 
   return (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+    <div className="market-index-strip">
+      <div className="index-strip-heading"><strong>Market watch</strong>
         <span className={`status-dot ${connected ? "ok" : "bad"}`} />
         <span style={{ fontSize: 11, color: "var(--muted)" }}>
           {connected ? "Live" : "Reconnecting…"}
         </span>
       </div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+      <div className="index-strip-row">
         {indices.map((idx) => {
           const price = idx.latest_price;
           const up = price?.change_pct != null && price.change_pct >= 0;
@@ -118,6 +118,7 @@ export default function IndexTickerBar() {
           return (
             <button
               key={idx.id}
+              className="index-ticker-card"
               onClick={() => openCard(idx)}
               style={{
                 cursor: "pointer", textAlign: "left", minWidth: 150,
@@ -129,7 +130,7 @@ export default function IndexTickerBar() {
               {price ? (
                 <>
                   <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)" }}>
-                    {Number(price.ltp).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                    {Number(price.ltp).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
                   </div>
                   <div style={{ fontSize: 12, color: up ? "var(--green)" : "var(--red)" }}>
                     {price.change != null && `${up ? "+" : ""}${Number(price.change).toFixed(2)} `}
@@ -140,7 +141,7 @@ export default function IndexTickerBar() {
                 <div style={{ fontSize: 12, color: "var(--muted)" }}>not synced yet</div>
               )}
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                {idx.constituent_count} stock(s)
+                {idx.constituent_count != null ? `${idx.constituent_count} stocks` : "View constituents"}
               </div>
             </button>
           );
@@ -148,7 +149,7 @@ export default function IndexTickerBar() {
       </div>
 
       {openIndex && (
-        <div className="panel" style={{ marginTop: 10 }}>
+        <div className="panel index-constituent-panel" style={{ marginTop: 10 }}>
           <h3>{openIndex.name} — Constituents</h3>
           {constituentsLoading ? (
             <p style={{ color: "var(--muted)" }}>Loading…</p>

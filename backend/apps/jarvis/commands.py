@@ -1,7 +1,7 @@
 """
 The command registry (manual 14.23 priority #1: Command Engine).
 
-This is the single source of truth for "what can JARVIS actually do" --
+This is the single source of truth for "what can Drishti actually do" --
 categories mirror the manual's own sections 14.8 through 14.15 exactly,
 so the dashboard's "Suggested Commands" panel (14.19) and the intent
 parser (intent.py) both read from here rather than keeping their own
@@ -30,9 +30,9 @@ AUTOMATION = "automation"
 
 CATEGORIES = [NAVIGATION, MARKET, PORTFOLIO, PAPER_TRADING, AI, RISK, STRATEGY, AUTOMATION]
 
-# manual 14.21: JARVIS must always ask confirmation for these, even
+# manual 14.21: Drishti must always ask confirmation for these, even
 # though the underlying action itself (e.g. closing a position) is
-# something the platform can already do -- the restriction is on JARVIS
+# something the platform can already do -- the restriction is on Drishti
 # executing it unprompted, not on the action existing.
 RESTRICTED_ACTIONS = {
     "reset_portfolio",
@@ -42,11 +42,11 @@ RESTRICTED_ACTIONS = {
 }
 
 # manual 14.21: these are hard-refused, not confirmation-gated -- no
-# confirmation flag can ever make JARVIS do them, because they'd bypass
+# confirmation flag can ever make Drishti do them, because they'd bypass
 # apps.risk's own governance (kill-switch re-arm is deliberately a
 # management-command-only action per apps/risk/management/commands/
 # rearm_kill_switch.py; changing RISK_HARD_LIMITS or placing a live
-# order are not exposed to JARVIS at all -- see engine.py).
+# order are not exposed to Drishti at all -- see engine.py).
 #
 # NONE of these four names are ever registered as keys in COMMANDS
 # below -- so intent.detect_intent() can never actually return one from
@@ -172,7 +172,7 @@ COMMANDS = {
     "sharpe_ratio": {"category": RISK, "phrases": ["sharpe ratio", "risk adjusted return"]},
 
     # 14.14 Strategy Commands (version 1.0: report-only -- manual never
-    # gives JARVIS write access to StrategyVersion; that stays a human
+    # gives Drishti write access to StrategyVersion; that stays a human
     # admin action via the existing API, per common/permissions.py)
     "current_strategy": {"category": STRATEGY, "phrases": ["current strategy", "active strategy"]},
     "strategy_performance": {"category": STRATEGY, "phrases": ["strategy performance"]},

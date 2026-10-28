@@ -109,6 +109,57 @@ class InputRequestDictBugFixTests(unittest.TestCase):
         self.assertEqual(sws.input_request_dict[SUBSCRIBE_MODE_SNAP_QUOTE][2], ["1", "2", "3"])
 
 
+class ConnectionStateRepublishTests(unittest.TestCase):
+    """
+    Real bug, found via a live dashboard report ("live feed stopped"
+    while the feed was actually healthy and streaming ticks):
+    feed_stats.set_connection_state was only ever called once per state
+    TRANSITION (on connect/reconnect/market-closed), unlike
+    mark_heartbeat/mark_index_tick/etc, which are refreshed continuously
+    -- every feed_stats key shares the same 120s cache TTL, so a
+    connection that stayed healthy longer than that had its
+    connection_state silently expire back to null while still actively
+    streaming ticks, making apps.monitoring.health.SystemHealthView (and
+    the dashboard) report it as stopped/unknown. Fixed by tracking the
+    current state on the client and re-publishing it every
+    _heartbeat_loop cycle, the same way the heartbeat timestamp itself
+    already gets refreshed.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+    def test_set_connection_state_updates_instance_attribute_and_cache(self):
+        from apps.market_data import feed_stats
+
+        client = LiveFeedClient.__new__(LiveFeedClient)
+        client._set_connection_state("connected")
+
+        self.assertEqual(client._connection_state, "connected")
+        self.assertEqual(feed_stats.read_status()["connection_state"], "connected")
+
+    def test_republishing_restores_state_after_the_cache_entry_expires(self):
+        from django.core.cache import cache
+
+        from apps.market_data import feed_stats
+
+        client = LiveFeedClient.__new__(LiveFeedClient)
+        client._set_connection_state("connected")
+
+        # Simulate the cache entry expiring mid-connection (exactly what
+        # feed_stats._TIMEOUT does 120s after the last write) while the
+        # client's own tracked state says the connection is still healthy.
+        cache.delete("livefeed:connection_state")
+        self.assertIsNone(feed_stats.read_status()["connection_state"])
+
+        feed_stats.set_connection_state(client._connection_state)  # one _heartbeat_loop cycle's worth
+
+        self.assertEqual(feed_stats.read_status()["connection_state"], "connected")
+
+
 class SubscriptionRefreshTests(unittest.TestCase):
     def setUp(self):
         _FakeSmartWebSocketV2.input_request_dict.clear()

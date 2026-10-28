@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import NavigationSearch from "./NavigationSearch.jsx";
 import { AlertOctagon, LineChart, Menu } from "lucide-react";
 
 import { endpoints } from "../services/api.js";
@@ -101,49 +103,24 @@ export default function TopBar() {
   const killSwitchActive = useLiveStore((s) => s.killSwitchActive);
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-
   return (
-    <>
-      {killSwitchActive && (
-        <div className="kill-switch-banner">
-          <AlertOctagon size={14} style={{ verticalAlign: -2, marginRight: 6 }} />
-          KILL SWITCH ACTIVE — all entries halted. Re-arming requires a manual backend action.
-        </div>
-      )}
+    <div className="app-header">
+      {killSwitchActive && <div className="kill-switch-banner" role="alert"><AlertOctagon size={15} /> Kill switch active ? New entries are halted.</div>}
       <header className="topbar">
-        <div className="topbar-section">
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={toggleSidebar}
-            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            <Menu size={16} />
-          </button>
-          <span className="brand">
-            <span className="brand-mark">
-              <LineChart size={16} />
-            </span>
-            <span className="brand-text">Algo Trading Platform</span>
-          </span>
-          <div className="topbar-divider" />
-          <MarketStatus />
-          <IndiaVixBadge />
+        <div className="topbar-section topbar-brand">
+          <button type="button" className="icon-btn desktop-menu-toggle" onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><Menu size={19} /></button>
+          <Link className="brand" to="/" aria-label="AlgoTrade home"><span className="brand-mark"><LineChart size={21} /></span>
+            <span className="brand-text">Algo<span>Trade</span><small>YOUR TRADING WORKSPACE</small></span>
+          </Link>
         </div>
-
-        <div className="topbar-section">
-          <ConnectionStatus />
-          <div className="topbar-divider" />
-          <TradingModeSwitch />
-          <TodaysPnlBadge />
-          <div className="topbar-divider" />
-          <NotificationBell />
-          <ThemeToggle />
-          <KillSwitchButton />
-          <UserMenu />
-        </div>
+        <NavigationSearch />
+        <div className="topbar-section topbar-actions"><NotificationBell /><ThemeToggle /><KillSwitchButton /><UserMenu /></div>
       </header>
-    </>
+      <div className="market-status-strip" aria-label="Market and account status">
+        <div className="market-status-primary"><MarketStatus /><TradingModeSwitch /><IndiaVixBadge /><TodaysPnlBadge /></div>
+        <ConnectionStatus />
+      </div>
+    </div>
   );
 }

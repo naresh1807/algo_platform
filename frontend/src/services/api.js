@@ -1,5 +1,6 @@
 import axios from "axios";
 
+import { getBackendOrigin } from "../config/backendOrigin.js";
 import { clearAuthenticationToken } from "../utils/websocket.js";
 
 /**
@@ -8,6 +9,15 @@ import { clearAuthenticationToken } from "../utils/websocket.js";
  * -- no environment-specific base URL branching needed in dev, and in
  * production the same relative path works as long as Django is served
  * from the same origin (or behind the same reverse proxy).
+ *
+ * getBackendOrigin() returns "" in that same-origin case (zero change
+ * in behavior) and an absolute http(s)://host:port only inside the
+ * Electron/Capacitor wrapper shells -- see config/backendOrigin.js.
+ * It's read once here, at module load, rather than per-request: the one
+ * place that changes it (pages/ServerSettings.jsx) does a full page
+ * reload afterwards specifically so this module re-initializes with the
+ * new value, the same pattern AppShell's handleSessionChange already
+ * uses for an account-token change.
  */
 // No timeout was set at all before this (axios defaults to 0 = never
 // times out) -- meaning a single stalled request (a DB lock held by
@@ -22,7 +32,7 @@ import { clearAuthenticationToken } from "../utils/websocket.js";
 const REQUEST_TIMEOUT_MS = 20000;
 
 export const api = axios.create({
-  baseURL: "/api",
+  baseURL: `${getBackendOrigin()}/api`,
   timeout: REQUEST_TIMEOUT_MS,
 });
 
@@ -74,6 +84,18 @@ export async function logoutSession() {
 }
 
 export const endpoints = {
+  paperJournalChart: (id) => api.get(`/paper-trading/journal/${id}/chart/`),
+  drishtiMonitoring: () => api.get("/paper-trading/drishti-monitoring/"),
+  tradeFeedback: () => api.get("/learning/trade-feedback/"),
+  btstSignals: () => api.get("/investing/btst/"),
+  warHeadlines: () => api.get("/news/war-headlines/"),
+  deliveryStocks: (search = "", watchlist = false) => api.get("/investing/delivery/stocks/", { params: { search, watchlist } }),
+  deliveryAccount: () => api.get("/investing/delivery/account/"),
+  deliveryOrders: () => api.get("/investing/delivery/orders/"),
+  placeDeliveryOrder: (ticket) => api.post("/investing/delivery/orders/", ticket),
+  previewOptionOrder: (ticket) => api.post("/execution/option-preview/", ticket),
+  optionOrders: () => api.get("/execution/option-orders/"),
+  placeOptionOrder: (order) => api.post("/execution/option-orders/", order, { timeout: 90000 }),
   // page_size=2000 -- without this, DRF's project-wide PAGE_SIZE=100
   // default would silently truncate any symbol with more candles
   // ingested than that to just its most recent 100 (see

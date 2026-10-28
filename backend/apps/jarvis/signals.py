@@ -1,6 +1,6 @@
 """
-Turns real events from OTHER apps into JARVIS announcements (manual
-14.16: "JARVIS Announces" -- Trade Executed, Signal Generated, Risk
+Turns real events from OTHER apps into Drishti announcements (manual
+14.16: "Drishti Announces" -- Trade Executed, Signal Generated, Risk
 Warning, Kill Switch, AI Training Completed). Registered in
 apps/jarvis/apps.py's ready().
 

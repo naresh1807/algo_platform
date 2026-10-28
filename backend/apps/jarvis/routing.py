@@ -1,4 +1,4 @@
-"""WebSocket routes for JARVIS push notifications."""
+"""WebSocket routes for Drishti push notifications."""
 
 from django.urls import re_path
 

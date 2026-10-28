@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import WarNews from "../components/WarNews.jsx";
 import { endpoints } from "../services/api.js";
 
 const SYMBOL_OPTIONS = [
@@ -53,6 +54,7 @@ function formatIst(isoString) {
  * driving it.
  */
 export default function News() {
+  const [warNews, setWarNews] = useState(false);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -123,6 +125,8 @@ export default function News() {
 
   return (
     <div>
+      <div className="segmented-tabs" style={{ marginBottom: 16 }}><button className="btn" aria-pressed={!warNews} onClick={() => setWarNews(false)}>Market news</button><button className="btn" aria-pressed={warNews} onClick={() => setWarNews(true)}>War & geopolitical news</button></div>
+      {warNews ? <WarNews /> : <>
       {marketSummary && (
         <div className="panel" style={{ marginBottom: 12 }}>
           <h3>Today's Market Summary</h3>
@@ -206,6 +210,7 @@ export default function News() {
           </div>
         )}
       </div>
+      </>}
     </div>
   );
 }

@@ -3,7 +3,7 @@ Market Intelligence -- "మన వెబ్సైట్లో పూర్తి
 డిపెండ్ అయ్యే వర్క్ అవుతుంది... ఇది ఎప్పటికప్పుడు అన్ని స్టాక్స్
 ఆప్షన్స్ ఇండెక్స్ పైన మరియు న్యూస్ పైన అబ్జర్వ్ చేసి మార్కెట్ ఏ
 విధంగా ఉండబోతుందో... విశ్లేషించి సరైన సమాధానం చెప్పి" -- the trader
-asked for JARVIS/ML to continuously watch stocks, options, indices,
+asked for Drishti/ML to continuously watch stocks, options, indices,
 and news together and explain what the market looks like and what's
 worth buying, because one person can't watch everything at once.
 
@@ -138,7 +138,7 @@ def market_outlook() -> dict:
     "options_idea", "stock_idea", "summary"}. Always returns something
     (never raises for "no data yet" cases) -- individual sections say
     "not enough data" rather than the whole function failing, matching
-    how every other JARVIS handler in this codebase degrades.
+    how every other Drishti handler in this codebase degrades.
     """
     index_bias = _index_bias()
     news = _news_context()
@@ -166,7 +166,7 @@ def _options_idea_for_bias(bias: str) -> dict | None:
     (Bullish/Bearish) -- a Neutral market has no honest directional
     options idea to give, and this says so rather than picking one
     arbitrarily. Uses apps.options.strike_selector's own scoring
-    (delta/OI/volume/theta), same as the standalone best_strike JARVIS
+    (delta/OI/volume/theta), same as the standalone best_strike Drishti
     command -- not a new options-selection method.
     """
     if bias == "Neutral":
@@ -208,7 +208,7 @@ def _recent_engine_veto_note(underlying: str, direction: str) -> str:
     at this exact underlying+side and declined to trade it (most often
     its own historical-success-rate veto: a backtest showing this side
     isn't currently profitable enough, see that module's success_rate_
-    for_side). Without this cross-check, JARVIS could recommend a
+    for_side). Without this cross-check, Drishti could recommend a
     strike a trader reasonably expects the platform to also be willing
     to trade, when the platform already said no to that exact side
     minutes earlier -- confusing, inconsistent-looking advice from what
@@ -250,7 +250,7 @@ def _top_stock_idea() -> dict | None:
     """
     Top current StockRecommendation (strong_hold first) -- reads
     apps.investing's own weekly-generated output, same as the
-    stock_suggestions JARVIS command. Long-term, deliberately
+    stock_suggestions Drishti command. Long-term, deliberately
     independent of the intraday index bias above (a good 5-year
     compounder doesn't stop being one because today's index signal is
     bearish).

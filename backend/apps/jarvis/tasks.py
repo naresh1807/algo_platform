@@ -1,5 +1,5 @@
 """
-Scheduled JARVIS announcements (manual 14.16: "Market Open" / "Market
+Scheduled Drishti announcements (manual 14.16: "Market Open" / "Market
 Close") that aren't triggered by another app's model save -- there's no
 MarketSession model to hook a post_save signal onto, so these are
 plain Celery beat tasks instead, scheduled directly in config/celery.py
@@ -38,11 +38,11 @@ def generate_market_outlook() -> dict:
     """
     apps.jarvis.market_intelligence.market_outlook(), run periodically
     during market hours and stored as a MarketOutlookSnapshot -- the
-    "ML/JARVIS continuously observes everything" the trader asked for.
-    Only fires a JARVIS announcement when the overall bias CHANGES from
+    "ML/Drishti continuously observes everything" the trader asked for.
+    Only fires a Drishti announcement when the overall bias CHANGES from
     the previous snapshot (Neutral -> Bullish, etc.), not on every run
     -- announcing "Market bias: Neutral" every 15 minutes all day would
-    train a trader to ignore JARVIS announcements entirely, defeating
+    train a trader to ignore Drishti announcements entirely, defeating
     the point of manual 14.16's proactive-notification design this
     whole announce() pipeline is built around.
     """

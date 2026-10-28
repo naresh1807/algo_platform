@@ -11,6 +11,8 @@ from .views import (
     TradeReviewViewSet,
 )
 
+from .feedback_views import TradeFeedbackView
+
 app_name = "learning"
 
 router = DefaultRouter()
@@ -22,5 +24,6 @@ router.register("trade-reviews", TradeReviewViewSet, basename="trade-review")
 router.register("hypothetical-trades", HypotheticalTradeViewSet, basename="hypothetical-trade")
 
 urlpatterns = [
+    path("trade-feedback/", TradeFeedbackView.as_view()),
     path("technical-direction/", TechnicalDirectionView.as_view(), name="technical-direction"),
 ] + router.urls

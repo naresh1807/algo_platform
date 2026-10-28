@@ -35,7 +35,7 @@ function riskReward(signal) {
 }
 
 /**
- * The main "JARVIS AI SIGNAL" card -- takes an apps.signals.models.
+ * The main "Drishti AI SIGNAL" card -- takes an apps.signals.models.
  * TradingSignal object (as returned by TradingSignalSerializer, or the
  * leaner apps.signals.signals.py WebSocket broadcast payload merged
  * with it) and renders it as an actionable trade card: WHAT to trade,
@@ -58,7 +58,7 @@ export default function SignalCard({ signal }) {
     return (
       <div className="panel">
         <h3 style={{ color: "var(--jarvis)", display: "flex", alignItems: "center", gap: 6 }}>
-          <Bot size={14} /> JARVIS AI Signal
+          <Bot size={14} /> Drishti AI Signal
         </h3>
         <p style={{ color: "var(--muted)", fontSize: 13 }}>No signal generated yet for this underlying.</p>
       </div>
@@ -95,7 +95,7 @@ export default function SignalCard({ signal }) {
     <div className="panel" style={{ borderTop: "2px solid var(--jarvis)" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <h3 style={{ margin: 0, color: "var(--jarvis)", display: "flex", alignItems: "center", gap: 6 }}>
-          <Bot size={14} /> JARVIS AI Signal
+          <Bot size={14} /> Drishti AI Signal
         </h3>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {signal.risk_score != null && (

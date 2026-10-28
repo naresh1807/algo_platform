@@ -12,7 +12,7 @@ const selectStyle = {
  * apps.monitoring.PriceAlert -- a trader watching a symbol cross a
  * target price, checked every 2 minutes (apps.monitoring.tasks.
  * check_price_alerts) against real candle data and announced through
- * JARVIS when triggered. Not a manual-specified feature (see the
+ * Drishti when triggered. Not a manual-specified feature (see the
  * model's own docstring) -- a standard trading-platform capability
  * this codebase didn't have at all until now.
  */

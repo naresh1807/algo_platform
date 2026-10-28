@@ -50,7 +50,7 @@ function findNearestStrike(chainRows, targetStrike, side) {
  * hook retries once against the nearest same-side strike from
  * `chainRows` before giving up with a real error.
  */
-export function useOptionCandles({ underlying, expiry, strike, optionType, timeframe, chainRows = [] }) {
+export function useOptionCandles({ underlying, expiry, strike, optionType, timeframe, chainRows = [], allowFallback = true }) {
   const [contract, setContract] = useState(null);
   const [candles, setCandles] = useState([]);
   const [liveCandle, setLiveCandle] = useState(null);
@@ -96,7 +96,7 @@ export function useOptionCandles({ underlying, expiry, strike, optionType, timef
 
         if (err.response?.status === 404) {
           const nearest = findNearestStrike(chainRowsRef.current, strike, optionType);
-          if (nearest != null && nearest !== strike) {
+          if (allowFallback && nearest != null && nearest !== strike) {
             endpoints
               .optionCandles({ underlying, expiry, strike: nearest, option_type: optionType, timeframe })
               .then(applyResponse)
@@ -123,7 +123,7 @@ export function useOptionCandles({ underlying, expiry, strike, optionType, timef
     // exactly the "don't recreate/refetch on every tick" behavior this
     // hook must avoid.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [underlying, expiry, strike, optionType, timeframe, active]);
+  }, [underlying, expiry, strike, optionType, timeframe, active, allowFallback]);
 
   // WebSocket: one connection per resolved contract+timeframe, torn
   // down and reopened on every change -- never reused across a switch,

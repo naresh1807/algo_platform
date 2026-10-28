@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+    android:usesCleartextTraffic is needed only for the LAN/Tailscale
+    address fallback (a plain http://192.168.x.x:8000 or http://100.x.x.x:8000
+    backend, see src/pages/ServerSettings.jsx and
+    docs/desktop_and_android_apps.md). Android's network security config
+    schema has no way to scope this to "private IP ranges only"
+    (domain-config entries are literal hostnames, not CIDR blocks), so
+    this is app-wide. It has no effect once Server Settings points at an
+    https:// backend (the cloud-hosted one): Android's cleartext
+    restriction only ever applies to http:// destinations in the first
+    place. Never point this app at an untrusted public http:// origin.
+
+    This alone was NOT enough to actually reach an http:// backend (found
+    live: Test Connection kept failing even with the firewall/ALLOWED_HOSTS
+    correctly configured): it only controls whether the app's own
+    networking stack permits cleartext connections at all. The WebView
+    itself, serving the UI from Capacitor's https://localhost, separately
+    blocks it as "mixed content" (an HTTPS page loading HTTP content),
+    which is controlled by capacitor.config.json's server.cleartext
+    instead, not anything in this file. Both are required together.
+    -->
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <!-- Permissions -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

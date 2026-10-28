@@ -123,7 +123,7 @@ class JarvisCommandAPITests(APITestCase):
 
 class AnnouncementCoverageTests(TestCase):
     """
-    manual 14.16 "JARVIS Announces" lists 8 event kinds. This doesn't
+    manual 14.16 "Drishti Announces" lists 8 event kinds. This doesn't
     exercise the actual channel_layer broadcast (that needs a running
     Channels layer) -- it just asserts the wiring exists: a receiver
     or scheduled task for each kind, so a future refactor that quietly

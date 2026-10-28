@@ -214,7 +214,7 @@ def run_trading_cycle(timeframe: str = "5m"):
             status=SignalStatus.APPROVED,
             execution_mode=execution_mode,
             signal_type__in=[SignalType.BUY, SignalType.SELL],
-        ).values_list("pk", flat=True))
+        ).filter(optiontraderequest__isnull=True).values_list("pk", flat=True))
         for signal_id in pending_signal_ids:
             signal = TradingSignal.objects.filter(
                 pk=signal_id, status=SignalStatus.APPROVED,

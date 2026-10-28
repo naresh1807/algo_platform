@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
@@ -68,7 +69,14 @@ def consecutive_losses(account, lookback: int = 20) -> int:
 
 
 def consecutive_losses_cooldown_active(account) -> bool:
-    return consecutive_losses(account) >= settings.AI_PAPER_MAX_CONSECUTIVE_LOSSES
+    if consecutive_losses(account) < settings.AI_PAPER_MAX_CONSECUTIVE_LOSSES:
+        return False
+    latest = PaperTrade.objects.filter(position__account=account).order_by("-closed_at").first()
+    # A cooldown pauses entries for a fixed period; it must not require a
+    # winning trade to clear a gate that prevents any new trade.
+    return latest is not None and timezone.now() < latest.closed_at + timedelta(
+        minutes=settings.AI_PAPER_COOLDOWN_MINUTES)
+
 
 
 def cap_to_available_cash(account, reference_price: Decimal, lot_size: int, requested_lots: int) -> tuple[int, str]:

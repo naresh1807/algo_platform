@@ -357,3 +357,29 @@ class TrainingSample(models.Model):
 
     def __str__(self):
         return f"{self.model_name}/{self.source_environment} {self.symbol} @ {self.timestamp} label={self.label}"
+
+
+class RealizedTradeFeedback(models.Model):
+    source = models.CharField(max_length=32)
+    source_id = models.PositiveBigIntegerField()
+    environment = models.CharField(max_length=8)
+    symbol = models.CharField(max_length=64)
+    strategy = models.CharField(max_length=100)
+    entry_at = models.DateTimeField()
+    exit_at = models.DateTimeField()
+    feature_snapshot = models.JSONField(default=dict)
+    net_pnl = models.DecimalField(max_digits=16, decimal_places=2)
+    costs = models.DecimalField(max_digits=16, decimal_places=2)
+    initial_risk = models.DecimalField(max_digits=16, decimal_places=2)
+    net_r = models.FloatField()
+    profitable = models.BooleanField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["source", "source_id"], name="unique_realized_feedback")]
+
+
+class TradeFeedbackRun(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    kind = models.CharField(max_length=16)
+    report = models.JSONField(default=dict)

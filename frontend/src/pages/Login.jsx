@@ -1,96 +1,61 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-
+import { useLocation, useNavigate } from "react-router-dom";
+import { ArrowUpRight, BarChart3, Eye, EyeOff, LineChart, ShieldCheck, Wallet } from "lucide-react";
+import { isWrappedApp } from "../config/backendOrigin.js";
+import { ChangeServerLink } from "./ServerSettings.jsx";
 import { api } from "../services/api.js";
 import { storeAuthenticationToken } from "../utils/websocket.js";
 
-/**
- * This page didn't exist until now -- apps.auth_app.urls already
- * exposed /api/auth/token/ (DRF's built-in obtain_auth_token) since
- * Phase 1, but nothing in the frontend ever called it. Every REST
- * request went out with no Authorization header, and
- * settings.REST_FRAMEWORK's DEFAULT_PERMISSION_CLASSES=[IsAuthenticated]
- * rejected all of them with 403 -- which is exactly the error the
- * screenshots showed. This page is the missing other half of that.
- *
- * Use the superuser you created with `python manage.py createsuperuser`.
- */
 export default function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [visible, setVisible] = useState(false);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const location = useLocation();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setError(null);
     setLoading(true);
     try {
       const res = await api.post("/auth/token/", { username, password });
       storeAuthenticationToken(res.data.token);
-      navigate("/");
+      const destination = location.state?.from?.pathname;
+      navigate(destination?.startsWith("/") && !destination.startsWith("//") ? destination : "/", { replace: true });
     } catch (err) {
-      setError(
-        err.response?.status === 400
-          ? "Invalid username or password."
-          : "Could not reach the backend -- is Django running on 127.0.0.1:8000?"
-      );
-    } finally {
-      setLoading(false);
-    }
+      const status = err.response?.status;
+      setError(status === 400 || status === 401
+        ? "Your username or password is incorrect."
+        : !status || status >= 500
+          ? "The sign-in server is unavailable. Please try again shortly."
+          : status === 429
+            ? "Too many sign-in attempts. Please wait and try again."
+            : "Sign-in could not be completed. Please try again.");
+    } finally { setLoading(false); }
   };
-
-  return (
-    <div
-      style={{
-        display: "flex", alignItems: "center", justifyContent: "center",
-        height: "100vh", background: "var(--bg)",
-      }}
-    >
-      <form
-        onSubmit={handleSubmit}
-        className="panel"
-        style={{ width: 320, display: "flex", flexDirection: "column", gap: 12 }}
-      >
-        <h3 style={{ marginBottom: 4 }}>Algo Trading Platform</h3>
-        <input
-          type="text"
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoFocus
-          style={{
-            padding: 8, borderRadius: 6, border: "1px solid var(--border)",
-            background: "var(--bg)", color: "var(--text)",
-          }}
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={{
-            padding: 8, borderRadius: 6, border: "1px solid var(--border)",
-            background: "var(--bg)", color: "var(--text)",
-          }}
-        />
-        {error && <p style={{ color: "var(--red)", fontSize: 13, margin: 0 }}>{error}</p>}
-        <button
-          type="submit"
-          disabled={loading}
-          style={{
-            padding: 10, borderRadius: 6, border: "none",
-            background: "var(--accent)", color: "#fff", cursor: "pointer",
-            fontWeight: 600,
-          }}
-        >
-          {loading ? "Signing in…" : "Sign in"}
-        </button>
-        <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
-          Use the superuser account from `python manage.py createsuperuser`.
-        </p>
+  return <div className="login-page">
+    <aside className="login-intro">
+      <div className="brand"><span className="brand-mark"><LineChart size={24} /></span><span className="brand-text">Algo<span>Trade</span></span></div>
+      <div className="login-intro-copy"><span className="page-eyebrow">Your trading workspace</span><h1>A clearer view<br />of your next trade.</h1><p>Charts, options, and your portfolio.<br />Together in one focused workspace.</p>
+        <div className="login-feature-list"><span><BarChart3 size={20} />Market charts & option analytics</span><span><Wallet size={20} />Orders & portfolio tracking</span><span><ShieldCheck size={20} />Risk controls at every step</span></div>
+      </div>
+      <span className="login-intro-footer">Built for thoughtful trading.</span>
+    </aside>
+    <main className="login-form-area">
+      <form className="login-form" onSubmit={handleSubmit}>
+        <span className="page-eyebrow">Welcome back</span><h2>Sign in to your workspace</h2><p>Continue with your platform account.</p>
+        <label htmlFor="login-username">Username</label>
+        <input className="input" id="login-username" name="username" autoComplete="username" required autoFocus value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Enter your username" disabled={loading} />
+        <label htmlFor="login-password">Password</label>
+        <div className="password-input"><input className="input" id="login-password" name="password" autoComplete="current-password" type={visible ? "text" : "password"} required value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Enter your password" disabled={loading} />
+          <button type="button" aria-label={visible ? "Hide password" : "Show password"} onClick={() => setVisible((value) => !value)}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</button>
+        </div>
+        {error && <p role="alert" className="login-error">{error}</p>}
+        <button type="submit" className="btn btn-primary login-submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}<ArrowUpRight size={18} /></button>
+        <div className="login-account-note"><ShieldCheck size={16} /><span>Use your existing platform account to continue.</span></div>
+        {isWrappedApp() && <ChangeServerLink />}
       </form>
-    </div>
-  );
+    </main>
+  </div>;
 }

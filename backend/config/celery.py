@@ -94,6 +94,14 @@ app.conf.task_routes = {
 # picked up next cycle), but if this ever needs a strict ordering,
 # use a Celery chain/chord here instead of two separate beat entries.
 app.conf.beat_schedule = {
+    "collect-closed-trade-feedback": {"task": "apps.learning.trade_feedback.collect_trade_feedback", "schedule": 300.0, "options": {"expires": 300}},
+    "learn-from-taken-trades-eod": {"task": "apps.learning.trade_feedback.retrain_from_taken_trades", "schedule": crontab(hour=18, minute=15, day_of_week="1-5"), "options": {"expires": 3600}},
+    "generate-btst-1430-ist": {"task": "apps.investing.btst.generate_btst_signals", "schedule": crontab(hour=14, minute=30, day_of_week="1-5"), "options": {"queue": "priority", "expires": 600}},
+    "monitor-manual-option-positions": {
+        "task": "apps.execution.option_tasks.monitor_manual_option_positions",
+        "schedule": 10.0,
+        "options": {"queue": "priority", "expires": 10},
+    },
     "ingest-watchlist-candles-every-5-minutes": {
         "task": "apps.market_data.tasks.ingest_watchlist_candles",
         "schedule": 300.0,
@@ -433,3 +441,5 @@ app.conf.beat_schedule = {
         ),  # IPO windows open/close on their own daily cadence, unlike quarterly results
     },
 }
+
+app.conf.imports = tuple(app.conf.imports or ()) + ("apps.execution.option_tasks", "apps.investing.btst", "apps.learning.trade_feedback")

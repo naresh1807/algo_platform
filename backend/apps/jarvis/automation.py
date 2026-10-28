@@ -77,7 +77,7 @@ def market_open_routine() -> str:
     steps.append(f"5. Signal engine: {'has run recently' if strategies_ready else 'no recent signal -- generate_signals_for_watchlist may not be scheduled'}")
 
     ready = feed_ok and bool(watchlist) and indicators_ready
-    steps.append("READY" if ready else "NOT READY -- see [!] items above; this requires Celery worker + beat running, which JARVIS cannot start for you")
+    steps.append("READY" if ready else "NOT READY -- see [!] items above; this requires Celery worker + beat running, which Drishti cannot start for you")
 
     return "Market-open routine check:\n" + "\n".join(steps)
 

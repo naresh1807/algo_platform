@@ -1,0 +1,15 @@
+[Unit]
+Description=Algo Trading Platform - live Angel One tick feed (manage.py run_live_feed)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_ROOT__/backend
+ExecStart=__REPO_ROOT__/backend/.venv/bin/python __REPO_ROOT__/backend/manage.py run_live_feed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -14,7 +14,8 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from . import tasks, test_support
-from .models import PaperAccount, PaperAIDecision, PaperOrder, PaperPosition
+from .models import PaperAccount, PaperAIDecision, PaperOrder, PaperPosition, PaperSessionState
+from .services import state_machine
 
 
 class PaperTradingSmokeTest(TestCase):
@@ -58,3 +59,48 @@ class PaperTradingSmokeTest(TestCase):
 
             mock_place.assert_not_called()
             mock_cancel.assert_not_called()
+
+
+class MarketReopenStateTransitionTests(TestCase):
+    """
+    Real bug, found via a live dashboard report: PaperSessionState.
+    MARKET_CLOSED's only allowed outgoing transition is "flat"
+    (state_machine._ALLOWED_TRANSITIONS), but _run_cycle used to jump
+    straight from a market-closed check to state_machine.transition(
+    ANALYZING, ...) with no bridge through FLAT in between. The FIRST
+    time this ever ran past a market close, every subsequent cycle
+    raised an uncaught "Illegal paper-trading state transition:
+    market_closed -> analyzing" ValueError, forever -- nothing ever
+    transitioned the row back out of MARKET_CLOSED, so the dashboard
+    stayed stuck showing "Market Closed" even during regular trading
+    hours on any day after the first.
+    """
+
+    def setUp(self):
+        test_support.seed_charge_rules()
+        test_support.seed_underlying_candles(n=90, trend_per_bar=3.0)
+        test_support.seed_option_chain()
+        # Simulate yesterday's market-close transition already having
+        # happened -- the exact stuck state a real overnight/weekend gap
+        # leaves behind.
+        state_machine.transition(PaperSessionState.State.MARKET_CLOSED, reason="test setup: simulate market close")
+
+    @patch("apps.market_data.broker_client.BrokerClient.place_order")
+    @patch("apps.market_data.broker_client.BrokerClient.cancel_order")
+    @patch("apps.market_data.market_hours.is_market_open", return_value=(True, ""))
+    def test_cycle_does_not_crash_when_market_reopens_after_being_closed(self, mock_is_open, mock_cancel, mock_place):
+        result = tasks.run_paper_trading_cycle(underlying=test_support.UNDERLYING, timeframe=test_support.TIMEFRAME)
+
+        self.assertNotIn("error", result)
+        self.assertIn(result["action"], ("entered", "hold", "skip", "order_rejected"))
+
+        session = PaperSessionState.objects.get(pk=1)
+        self.assertNotEqual(session.state, PaperSessionState.State.MARKET_CLOSED)
+
+    @patch("apps.market_data.market_hours.is_market_open", return_value=(True, ""))
+    def test_scalp_cycle_does_not_crash_when_market_reopens_after_being_closed(self, mock_is_open):
+        result = tasks.run_paper_trading_scalp_cycle(underlying=test_support.UNDERLYING)
+
+        self.assertNotIn("error", result)
+        session = PaperSessionState.objects.get(pk=1)
+        self.assertNotEqual(session.state, PaperSessionState.State.MARKET_CLOSED)

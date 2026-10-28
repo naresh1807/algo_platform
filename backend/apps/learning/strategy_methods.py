@@ -160,89 +160,43 @@ def generate_breakout_idea(symbol: str, timeframe: str = "5m") -> dict | None:
     return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 2.5 * risk}
 
 
-def generate_ema_momentum_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
-    """
-    Fast-timing momentum scalp: EMA9 already above EMA21 (structural
-    uptrend, same check trend_following uses) but entered on the exact
-    bar momentum visibly KICKS IN (MACD histogram just turned positive
-    AND is rising) rather than trend_following's "already confirmed by
-    ADX>=25" bar -- scalping cares about catching the move AS it starts,
-    not waiting for a slower confirmation that would mean entering late
-    on a 1-minute chart. relative_volume confirms real participation,
-    not just noise. 0.6x ATR stop / 1R target -- small and fast.
-    """
-    ind = compute_indicators(symbol, timeframe)
+def scalp_idea_from_indicators(method: str, ind: dict | None) -> dict | None:
+    """Shared causal rules for the runtime generators and historical training."""
     if ind is None:
         return None
-
-    is_uptrend = ind["ema9"] > ind["ema21"]
-    is_momentum_turning = ind["macd_hist"] > 0 and ind["macd_hist"] > ind["macd_hist_prev"]
-    # None-means-unavailable-skip: see generate_breakout_idea's note.
-    is_volume_confirmed = ind["relative_volume"] is None or ind["relative_volume"] >= 1.2
-    if not (is_uptrend and is_momentum_turning and is_volume_confirmed):
-        return None
-
     entry = ind["close"]
-    stop = entry - 0.6 * ind["atr"]
+    volume = ind.get("relative_volume")
+    if method == "ema_momentum_scalp":
+        if not (ind["ema9"] > ind["ema21"] and ind["macd_hist"] > 0 and
+                ind["macd_hist"] > ind["macd_hist_prev"] and (volume is None or volume >= 1.2)):
+            return None
+        stop, target_r = entry - .6 * ind["atr"], 1.0
+    elif method == "rsi_extreme_scalp":
+        if classify_regime(ind) == "high_volatility" or ind["rsi"] > SCALPING_RSI_EXTREME_OVERSOLD:
+            return None
+        stop, target_r = entry - .5 * ind["atr"], 1.2
+    elif method == "sar_volume_burst_scalp":
+        if not (ind["sar"] < entry and (volume is None or volume >= SCALPING_VOLUME_SPIKE_RATIO)):
+            return None
+        stop, target_r = ind["sar"], 1.5
+    else:
+        raise ValueError(f"Unknown scalping method: {method}")
     risk = entry - stop
     if risk <= 0:
         return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.0 * risk, "ind": ind}
+    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + target_r * risk, "ind": ind}
+
+
+def generate_ema_momentum_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
+    return scalp_idea_from_indicators("ema_momentum_scalp", compute_indicators(symbol, timeframe))
 
 
 def generate_rsi_extreme_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
-    """
-    Sharper, faster mean-reversion than generate_mean_reversion_idea:
-    RSI<=SCALPING_RSI_EXTREME_OVERSOLD (20, vs. that method's 30) --
-    scalping wants a genuinely stretched, snap-back-prone reading, not
-    just "leaning oversold," since the target is a quick 1.2R bounce,
-    not a sustained reversal. Same HIGH_VOLATILITY skip as
-    generate_mean_reversion_idea and for the same reason (an extreme
-    reading during a volatility shock is more likely to keep falling).
-    """
-    ind = compute_indicators(symbol, timeframe)
-    if ind is None:
-        return None
-    regime = classify_regime(ind)
-    if regime == "high_volatility" or ind["rsi"] > SCALPING_RSI_EXTREME_OVERSOLD:
-        return None
-
-    entry = ind["close"]
-    stop = entry - 0.5 * ind["atr"]
-    risk = entry - stop
-    if risk <= 0:
-        return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.2 * risk, "ind": ind}
+    return scalp_idea_from_indicators("rsi_extreme_scalp", compute_indicators(symbol, timeframe))
 
 
 def generate_sar_volume_burst_scalp_idea(symbol: str, timeframe: str = "1m") -> dict | None:
-    """
-    Catches a fresh directional burst right as it starts: Parabolic SAR
-    just below price (a bullish flip/continuation) combined with a real
-    volume spike (relative_volume >= 1.5, tighter bar than the other two
-    scalp methods' 1.2 -- a burst needs a genuine spike, not just
-    "slightly above average"). Stop is placed AT the SAR value itself
-    (not an ATR multiple) -- SAR's own point IS the level that
-    invalidates the setup, the tightest, most precise stop of the three
-    scalp methods, matching how SAR is actually used for stop placement
-    in practice.
-    """
-    ind = compute_indicators(symbol, timeframe)
-    if ind is None:
-        return None
-
-    is_sar_bullish = ind["sar"] < ind["close"]
-    # None-means-unavailable-skip: see generate_breakout_idea's note.
-    is_volume_burst = ind["relative_volume"] is None or ind["relative_volume"] >= SCALPING_VOLUME_SPIKE_RATIO
-    if not (is_sar_bullish and is_volume_burst):
-        return None
-
-    entry = ind["close"]
-    stop = ind["sar"]
-    risk = entry - stop
-    if risk <= 0:
-        return None
-    return {"entry_price": entry, "stop_loss": stop, "target_price": entry + 1.5 * risk, "ind": ind}
+    return scalp_idea_from_indicators("sar_volume_burst_scalp", compute_indicators(symbol, timeframe))
 
 
 METHOD_FUNCS = {

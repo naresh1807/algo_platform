@@ -1,14 +1,14 @@
 """
 Navigation Module (manual 14.23 priority #3).
 
-JARVIS runs on the Django backend; the frontend router (React Router,
+Drishti runs on the Django backend; the frontend router (React Router,
 see frontend/src/App.jsx) is what actually changes what's on screen.
 So "navigation" here means one thing: mapping a navigation action to
 the frontend route it corresponds to, and returning that route in the
 command response. JarvisPanel.jsx is responsible for calling
 navigate(route) when it sees one -- this module never touches the DOM
 or holds any UI state itself, matching the manual's "AI must explain
-every signal" -> here, "JARVIS must explain every navigation" pattern:
+every signal" -> here, "Drishti must explain every navigation" pattern:
 the response always says which page it opened, not just silently
 returns a path.
 """

@@ -4,7 +4,7 @@ from django.db import models
 
 class JarvisMemory(models.Model):
     """
-    manual section 15.17: jarvis_memory. Per-user context JARVIS carries
+    manual section 15.17: jarvis_memory. Per-user context Drishti carries
     between commands within (and briefly across) a session -- current
     page, active strategy, last command, user preferences.
 
@@ -40,11 +40,11 @@ class JarvisMemory(models.Model):
 
 class JarvisCommandHistory(models.Model):
     """
-    manual section 15.18: jarvis_command_history. Every command JARVIS
+    manual section 15.18: jarvis_command_history. Every command Drishti
     receives is logged here -- voice or typed text, the intent that was
     detected, which module actually handled it, the result, and how
     long it took. This is what apps.admin_tools.audit.AuditLog is for
-    governance-relevant actions in general; this table is JARVIS-
+    governance-relevant actions in general; this table is Drishti-
     specific and always written (even for a plain "show portfolio"
     read), since manual 14.25 principle #5 is "Explain Every Action" --
     that requires a full record of every action, not just the
@@ -71,7 +71,7 @@ class JarvisCommandHistory(models.Model):
     needs_confirmation = models.BooleanField(
         default=False,
         help_text="True when this command was a restricted action (manual 14.21) "
-                  "and JARVIS asked for confirmation instead of executing it.",
+                  "and Drishti asked for confirmation instead of executing it.",
     )
     execution_ms = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -88,11 +88,11 @@ class JarvisCommandHistory(models.Model):
 class MarketOutlookSnapshot(models.Model):
     """
     apps.jarvis.market_intelligence's own output, kept as history
-    rather than only computed on demand -- lets the frontend/JARVIS
+    rather than only computed on demand -- lets the frontend/Drishti
     show "how has the outlook been trending today" instead of only the
     latest read, and lets apps.jarvis.tasks.generate_market_outlook
     (periodic, market-hours-only) compare the new outlook against the
-    previous one to decide whether a bias CHANGE is worth a JARVIS
+    previous one to decide whether a bias CHANGE is worth a Drishti
     announcement (manual 14.16-style), rather than announcing the same
     "Neutral" read every 15 minutes all day.
 
@@ -107,7 +107,7 @@ class MarketOutlookSnapshot(models.Model):
     generated_at = models.DateTimeField(auto_now_add=True, db_index=True)
     bias = models.CharField(max_length=16, help_text="Bullish / Bearish / Neutral")
     bias_confidence = models.FloatField(null=True, blank=True, help_text="0.0-1.0, when derivable.")
-    summary = models.TextField(help_text="The full explained narrative -- what JARVIS actually says.")
+    summary = models.TextField(help_text="The full explained narrative -- what Drishti actually says.")
     best_options_idea = models.CharField(max_length=255, blank=True)
     best_stock_idea = models.CharField(max_length=255, blank=True)
 

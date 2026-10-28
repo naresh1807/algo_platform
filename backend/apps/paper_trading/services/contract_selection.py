@@ -21,7 +21,7 @@ class ContractCandidate:
     expiry_days: int
 
 
-def select_contract(underlying: str, option_type: str) -> tuple[ContractCandidate | None, str]:
+def select_contract(underlying: str, option_type: str, account=None) -> tuple[ContractCandidate | None, str]:
     """`option_type`: "CE" or "PE" -- mapped to suggest_best_strike's own
     "bullish"/"bearish" direction vocabulary here so this module's
     callers can think in the same CE/PE terms as the rest of this app's
@@ -29,7 +29,7 @@ def select_contract(underlying: str, option_type: str) -> tuple[ContractCandidat
     from django.utils import timezone
 
     from apps.options.expiry_service import is_expiry_eligible, resolve_current_expiry
-    from apps.options.models import OptionContract
+    from apps.options.models import OptionContract, get_options_strategy_settings
     from apps.options.strike_selector import suggest_best_strike
 
     expiry = resolve_current_expiry(underlying)
@@ -44,19 +44,31 @@ def select_contract(underlying: str, option_type: str) -> tuple[ContractCandidat
     if suggested is None:
         return None, result["reason"]
 
-    try:
-        contract = OptionContract.objects.get(pk=suggested["contract_id"])
-    except OptionContract.DoesNotExist:
-        return None, "suggested contract no longer exists in the contract master"
-
-    if not contract.is_active:
-        return None, f"contract {contract} is not active (expired or rolled over)"
-    if not contract.symbol_token or not contract.lot_size:
-        return None, f"contract {contract} has no valid token or lot size"
-
-    quote = market_data_reader.latest_contract_quote(contract)
-    if quote is None or quote.ltp is None:
-        return None, f"no live quote available for {contract}"
-
-    expiry_days = (expiry - timezone.localdate()).days
-    return ContractCandidate(contract=contract, quote=quote, expiry_days=expiry_days), result["reason"]
+    # Keep the preferred strike first, then only ranked delta-qualified
+    # alternatives. Every alternative must pass the same hard entry gates.
+    choices = [suggested]
+    if account is not None and get_options_strategy_settings().strike_mode.lower() == "ai":
+        choices += sorted([c for c in result.get("candidates", [])
+                           if c.get("in_sweet_spot") and c["contract_id"] != suggested["contract_id"]],
+                          key=lambda c: c.get("score", 0), reverse=True)[:9]
+    last_reason = "no eligible contract"
+    for choice in choices:
+        try:
+            contract = OptionContract.objects.get(pk=choice["contract_id"])
+        except OptionContract.DoesNotExist:
+            last_reason = "suggested contract no longer exists"; continue
+        if not contract.is_active or not contract.symbol_token or not contract.lot_size:
+            last_reason = "inactive contract or invalid token/lot size"; continue
+        quote = market_data_reader.latest_contract_quote(contract)
+        if quote is None or quote.ltp is None:
+            last_reason = "no live quote available"; continue
+        if account is not None:
+            from .paper_risk_engine import check_pre_entry
+            check = check_pre_entry(account, contract, ltp=quote.ltp, bid=quote.bid, ask=quote.ask,
+                open_interest=quote.open_interest, volume=quote.volume, feed_age_seconds=quote.age_seconds)
+            if not check.approved:
+                last_reason = check.reason_text; continue
+        detail = result["reason"] if choice is suggested else "Alternative delta-qualified strike passed cash, freshness and liquidity checks"
+        return ContractCandidate(contract=contract, quote=quote,
+            expiry_days=(expiry-timezone.localdate()).days), detail
+    return None, last_reason

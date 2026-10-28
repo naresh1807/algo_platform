@@ -69,7 +69,11 @@ def _classify_trade_relevance(entities: dict) -> str:
     if entities["stocks"]:
         return NewsImpactAnalysis.TradeRelevance.DIRECT
     if entities["sectors"]:
-        if "macro" in entities["sectors"]:
+        # "geopolitical" (war/conflict headlines, see entities.py's own
+        # SECTOR_KEYWORDS comment) is index-wide/no-named-stock exactly
+        # like "macro" -- kept as a separate sector label for the News
+        # page's own badge, but the same trade_relevance bucket.
+        if "macro" in entities["sectors"] or "geopolitical" in entities["sectors"]:
             return NewsImpactAnalysis.TradeRelevance.MACRO
         return NewsImpactAnalysis.TradeRelevance.SECTOR
     return NewsImpactAnalysis.TradeRelevance.NONE
@@ -85,7 +89,7 @@ def _estimate_index_impact(entities: dict, sentiment_score: float) -> str:
     """
     if abs(sentiment_score) < SENTIMENT_RELEVANCE_THRESHOLD:
         return ""
-    if "macro" in entities["sectors"]:
+    if "macro" in entities["sectors"] or "geopolitical" in entities["sectors"]:
         return "NIFTY_UP" if sentiment_score > 0 else "NIFTY_DOWN"
     if "banking" in entities["sectors"]:
         return "BANKNIFTY_UP" if sentiment_score > 0 else "BANKNIFTY_DOWN"

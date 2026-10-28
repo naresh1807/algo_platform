@@ -12,6 +12,10 @@ from .views import (
     StockWatchlistViewSet,
 )
 
+from .delivery_views import DeliveryStocksView, DeliveryAccountView, DeliveryOrdersView
+
+from .btst_views import BTSTView
+
 app_name = "investing"
 
 router = DefaultRouter()
@@ -24,5 +28,9 @@ router.register("indices", IndexViewSet, basename="index")
 router.register("index-constituents", IndexConstituentViewSet, basename="index-constituent")
 
 urlpatterns = router.urls + [
+    path("btst/", BTSTView.as_view()),
+    path("delivery/stocks/", DeliveryStocksView.as_view()),
+    path("delivery/account/", DeliveryAccountView.as_view()),
+    path("delivery/orders/", DeliveryOrdersView.as_view()),
     path("sector-breakdown/", SectorBreakdownView.as_view(), name="sector-breakdown"),
 ]

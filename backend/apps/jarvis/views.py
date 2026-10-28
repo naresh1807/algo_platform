@@ -42,7 +42,7 @@ class JarvisHistoryListView(generics.ListAPIView):
     """
     GET /api/jarvis/history/ -- manual 14.19's Conversation History panel.
     DELETE /api/jarvis/history/ -- clears the requesting user's own
-    JARVIS chat history (and only theirs -- scoped by request.user the
+    Drishti chat history (and only theirs -- scoped by request.user the
     same way get_queryset already is, never another user's rows).
     """
 
@@ -89,7 +89,7 @@ class MarketOutlookView(APIView):
     manual-specified. Returns the latest stored snapshot
     (apps.jarvis.tasks.generate_market_outlook's periodic output);
     computes one on the spot if nothing has been generated yet, same
-    fallback the market_outlook JARVIS command itself uses.
+    fallback the market_outlook Drishti command itself uses.
     """
     permission_classes = [IsTraderOrAdmin]
 

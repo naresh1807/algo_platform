@@ -1,0 +1,11 @@
+__HOSTNAME__ {
+	# Automatic HTTPS via Let's Encrypt (Caddy's default) -- this is what
+	# lets the Android app reach the backend over a real https:// origin
+	# instead of the cleartext-HTTP LAN fallback (see AndroidManifest.xml's
+	# usesCleartextTraffic comment and docs/desktop_and_android_apps.md).
+	reverse_proxy 127.0.0.1:8000
+
+	# WebSocket upgrades (Django Channels -- /ws/*) pass through the same
+	# reverse_proxy directive unmodified; Caddy detects the Upgrade header
+	# automatically, no separate config needed.
+}

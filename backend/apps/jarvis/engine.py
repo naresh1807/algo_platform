@@ -79,7 +79,7 @@ def process(raw_text: str, user, *, input_mode: str = "text", confirm: bool = Fa
 
     if intent.action in FORBIDDEN_ACTIONS:
         response = JarvisResponse(
-            text="I can't do that -- it's outside JARVIS's permissions in Version 1.0 (manual 14.21).",
+            text="I can't do that -- it's outside Drishti's permissions in Version 1.0 (manual 14.21).",
             action=intent.action, category=intent.category, success=False,
         )
         _log(raw_text, user, input_mode, intent, response, started)
@@ -132,7 +132,7 @@ def process(raw_text: str, user, *, input_mode: str = "text", confirm: bool = Fa
             )
         route = navigation.route_for(intent.action)
         response = JarvisResponse(text=text, action=intent.action, category=intent.category, route=route)
-    except Exception as exc:  # noqa: BLE001 -- JARVIS must always answer, never 500 the chat
+    except Exception as exc:  # noqa: BLE001 -- Drishti must always answer, never 500 the chat
         response = JarvisResponse(
             text=f"That command matched \"{intent.action}\" but hit an error running it: {exc}",
             action=intent.action, category=intent.category, success=False,
@@ -146,7 +146,7 @@ def process(raw_text: str, user, *, input_mode: str = "text", confirm: bool = Fa
             # Same defensive principle as _log() just above: context
             # memory failing (a DB hiccup, a not-yet-migrated fresh
             # install, a locked row) must never turn into a 500 for the
-            # whole command -- JARVIS should still answer even if it
+            # whole command -- Drishti should still answer even if it
             # can't remember the interaction afterward.
             pass
     return response
@@ -203,5 +203,5 @@ def _log(raw_text, user, input_mode, intent, response, started, needs_confirmati
         )
     except Exception:
         # Same principle as apps.admin_tools.audit.log_action: a history
-        # write failing must never block JARVIS from actually answering.
+        # write failing must never block Drishti from actually answering.
         pass

@@ -6,6 +6,8 @@ from .views import (
     PaperOrderViewSet, PaperPositionViewSet, PaperTradeViewSet,
 )
 
+from .monitoring import DrishtiMonitoringView, JournalChartView
+
 app_name = "paper_trading"
 
 router = DefaultRouter()
@@ -16,5 +18,7 @@ router.register("daily-summaries", PaperDailySummaryViewSet, basename="paper-dai
 router.register("decisions", PaperAIDecisionViewSet, basename="paper-decision")
 
 urlpatterns = router.urls + [
+    path("journal/<int:trade_id>/chart/", JournalChartView.as_view(), name="paper-journal-chart"),
+    path("drishti-monitoring/", DrishtiMonitoringView.as_view(), name="drishti-monitoring"),
     path("account/", PaperAccountStatusView.as_view(), name="paper-account-status"),
 ]

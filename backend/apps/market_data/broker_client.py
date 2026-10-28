@@ -210,6 +210,31 @@ def _is_smartapi_rate_limit_response(response: object) -> bool:
     )
 
 
+def _is_invalid_token_response(response: object) -> bool:
+    """
+    Real bug found live (2026-09-02): _connect() caches self._smart_connect
+    forever once established (see its own docstring) with no way to
+    detect that the cached session has gone stale -- but Angel One
+    invalidates a client's PREVIOUS session tokens the moment ANY
+    process logs in fresh for that same client_id (documented in
+    _connect()'s own comment). With multiple long-lived processes now
+    sharing one Angel One account (run_live_feed, celery worker
+    default, celery worker priority -- each its own OS process with its
+    own BrokerClient singleton, see get_broker_client()'s docstring),
+    one process logging in silently kills every other process's
+    session, and none of them ever noticed or recovered -- FeedHealthCheck
+    just kept recording "LTP fetch failed: Invalid Token" forever until
+    that process was manually restarted, which is exactly what the
+    dashboard's "Broker Degraded" badge was showing. See
+    BrokerClient._force_reconnect(), used by get_ltp()/get_quote_by_token()
+    to self-heal instead of staying stuck.
+    """
+    if not isinstance(response, dict) or response.get("status"):
+        return False
+    message = str(response.get("message", "") or response.get("error", "")).lower()
+    return "invalid token" in message or "token expired" in message or "token is invalid" in message
+
+
 logger = logging.getLogger(__name__)
 
 # Angel One's historical-data API only accepts these interval strings.
@@ -564,6 +589,21 @@ class BrokerClient:
             logger.info("Angel One session established for client %s", client_id)
             return connection
 
+    def _force_reconnect(self) -> None:
+        """
+        Drops the cached session so the next _connect() call performs a
+        fresh generateSession() login. See _is_invalid_token_response()'s
+        docstring for the real incident this exists to recover from --
+        without this, a process whose session got silently invalidated
+        by another process logging in would keep handing out the same
+        dead cached connection forever (_connect() only checks "is it
+        set", never "is it still valid").
+        """
+        with self._connect_lock:
+            self._smart_connect = None
+            self._jwt_token = None
+            self._feed_token = None
+
     def get_feed_credentials(self) -> dict:
         """
         Returns what apps.market_data.broker_ws_client.LiveFeedClient needs
@@ -768,6 +808,30 @@ class BrokerClient:
             logger.exception("Feed health check failed")
             return {"is_healthy": False, "latency_ms": None, "detail": str(exc)}
 
+    def _fetch_ltp_data(self, exchange: str, tradingsymbol: str, token: str) -> dict:
+        """
+        Shared by get_ltp()/get_quote_by_token() below -- both call
+        SmartConnect's ltpData() with this same signature, just shaping
+        the result differently. Retries once, after forcing a fresh
+        login, if the response says this process's cached session token
+        has gone stale -- see _is_invalid_token_response()'s docstring
+        for the real "Broker Degraded" incident this recovers from.
+        """
+        for attempt in (1, 2):
+            connection = self._connect()
+            response = self._smartapi_request(connection.ltpData, exchange, tradingsymbol, token)
+            if response.get("status"):
+                return response["data"]
+            if attempt == 1 and _is_invalid_token_response(response):
+                logger.warning(
+                    "Angel One session token invalid fetching %s -- forcing a fresh login and retrying once.",
+                    tradingsymbol,
+                )
+                self._force_reconnect()
+                continue
+            raise RuntimeError(f"LTP fetch failed for {tradingsymbol}: {response.get('message')}")
+        raise RuntimeError(f"LTP fetch failed for {tradingsymbol}: exhausted retries")  # pragma: no cover -- unreachable
+
     def get_ltp(self, symbol: str) -> float:
         """
         Last traded price -- used by the live executor to mark
@@ -777,18 +841,8 @@ class BrokerClient:
         if symbol not in SYMBOL_TOKENS:
             raise ValueError(f"No symboltoken configured for {symbol}.")
         token_info = SYMBOL_TOKENS[symbol]
-        connection = self._connect()
-        response = self._smartapi_request(
-            connection.ltpData,
-            token_info["exchange"],
-            symbol,
-            token_info["token"],
-        )
-        if not response.get("status"):
-            raise RuntimeError(
-                f"LTP fetch failed for {symbol}: {response.get('message')}"
-            )
-        return float(response["data"]["ltp"])
+        data = self._fetch_ltp_data(token_info["exchange"], symbol, token_info["token"])
+        return float(data["ltp"])
 
     def get_quote_by_token(self, exchange: str, tradingsymbol: str, token: str) -> dict:
         """
@@ -807,18 +861,7 @@ class BrokerClient:
         not the current bar's close; callers computing day-change should
         use ltp - close, not treat "close" as today's close.
         """
-        connection = self._connect()
-        response = self._smartapi_request(
-            connection.ltpData,
-            exchange,
-            tradingsymbol,
-            token,
-        )
-        if not response.get("status"):
-            raise RuntimeError(
-                f"Quote fetch failed for {tradingsymbol}: {response.get('message')}"
-            )
-        data = response["data"]
+        data = self._fetch_ltp_data(exchange, tradingsymbol, token)
         return {
             "ltp": float(data["ltp"]),
             "close": float(data["close"]),

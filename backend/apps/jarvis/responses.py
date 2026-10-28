@@ -214,7 +214,7 @@ def list_price_alerts(entities: dict) -> str:
 def stock_suggestions(entities: dict) -> str:
     """
     apps.investing -- long-term equity suggestions, a completely
-    different question from every other JARVIS command in this file
+    different question from every other Drishti command in this file
     ("is this worth owning for years" vs "what's the intraday signal
     right now"). Reports the strongest current StockRecommendation
     rows (apps.investing.tasks.generate_stock_recommendations' own
@@ -336,8 +336,8 @@ def market_outlook(entities: dict) -> str:
     సరైన సమాధానం చెప్పి" -- the single synthesized report. Reports the
     latest stored MarketOutlookSnapshot (apps.jarvis.tasks.
     generate_market_outlook's own periodic output) rather than
-    recomputing live on every JARVIS question -- same "report the
-    system's actual last output" pattern every other JARVIS command in
+    recomputing live on every Drishti question -- same "report the
+    system's actual last output" pattern every other Drishti command in
     this file uses (best_strategy, sector_analysis, etc.). If nothing
     has been generated yet (fresh install, or outside the periodic
     task's market-hours schedule), computes one on the spot instead of
@@ -430,7 +430,7 @@ def _pct(value) -> str:
 
 def start_paper_trading(entities: dict) -> str:
     return (
-        "Paper trading runs on the Celery beat schedule (run_trading_cycle), not a switch JARVIS "
+        "Paper trading runs on the Celery beat schedule (run_trading_cycle), not a switch Drishti "
         "flips. If Celery worker + beat aren't running, start them: "
         "`celery -A config worker -l info` and `celery -A config beat -l info`."
     )
@@ -438,7 +438,7 @@ def start_paper_trading(entities: dict) -> str:
 
 def stop_paper_trading(entities: dict) -> str:
     return (
-        "JARVIS can't stop the Celery beat schedule from here (manual 14.21 -- JARVIS doesn't control "
+        "Drishti can't stop the Celery beat schedule from here (manual 14.21 -- Drishti doesn't control "
         "process lifecycle). Stop the celery beat process directly, or set BROKER_MODE appropriately."
     )
 
@@ -556,7 +556,7 @@ def kill_switch_status(entities: dict) -> str:
         return "Kill switch is inactive. Trading is allowed (subject to the other risk checks)."
     return (
         "Kill switch is ACTIVE -- no new trades will be approved. It can only be re-armed manually "
-        "via `python manage.py rearm_kill_switch --by \"you\" --confirm` -- JARVIS cannot do this "
+        "via `python manage.py rearm_kill_switch --by \"you\" --confirm` -- Drishti cannot do this "
         "(manual 14.21)."
     )
 
@@ -661,7 +661,7 @@ def backup_database(entities: dict) -> str:
 
     # Runs via Celery, not inline -- mysqldump on a real database can
     # take a while, and this command is called from a request/response
-    # cycle. JARVIS will announce completion separately (manual 14.16)
+    # cycle. Drishti will announce completion separately (manual 14.16)
     # once the task finishes, over the same /ws/jarvis/live/ feed as
     # every other announcement -- see apps/jarvis/signals.py and
     # apps/admin_tools/management/commands/backup_database.py.
@@ -672,7 +672,7 @@ def backup_database(entities: dict) -> str:
             f"Couldn't queue the backup task: {exc}. Celery worker may not be running -- "
             f"you can also run `python manage.py backup_database` directly."
         )
-    return "Database backup started. JARVIS will announce here when it's done."
+    return "Database backup started. Drishti will announce here when it's done."
 
 
 def delete_history(entities: dict) -> str:

@@ -1,5 +1,5 @@
 """
-The one function that pushes a JARVIS announcement (manual 14.16) to
+The one function that pushes a Drishti announcement (manual 14.16) to
 every connected dashboard. Delegates entirely to common.websockets.
 broadcast_group -- same best-effort, log-only, single-persistent-
 connection broadcast every other Channels group_send in this codebase

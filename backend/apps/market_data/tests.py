@@ -1,6 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -578,3 +578,71 @@ class EventRiskTests(TestCase):
 
         result = detect_event_risk("BANKNIFTY")
         self.assertFalse(result["is_options_expiry_day"])
+
+
+class BrokerClientSessionRecoveryTests(TestCase):
+    """
+    Real bug found live (2026-09-02): the dashboard's "Broker Degraded"
+    badge stayed stuck even though the live WebSocket tick feed was
+    healthy -- FeedHealthCheck's REST-based get_ltp("NIFTY") kept
+    failing with "Invalid Token" because ANOTHER long-lived process
+    sharing the same Angel One account (this platform now runs
+    run_live_feed + two separate Celery worker processes continuously
+    as Windows Services) had logged in more recently, silently
+    invalidating this process's cached session -- see _connect()'s own
+    comment on why Angel One does that. _connect() only ever checked
+    "is a session cached", never "is it still valid", so a process that
+    lost the token race stayed broken until manually restarted. Fixed
+    via _force_reconnect() + _is_invalid_token_response(), used by
+    _fetch_ltp_data() (shared by get_ltp()/get_quote_by_token()).
+    """
+
+    def _client_with_fake_connection(self, ltp_side_effect):
+        from apps.market_data.broker_client import BrokerClient
+
+        client = BrokerClient()
+        fake_connection = Mock()
+        fake_connection.ltpData.side_effect = ltp_side_effect
+        patcher = patch.object(client, "_connect", return_value=fake_connection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return client, fake_connection
+
+    def test_invalid_token_response_triggers_one_reconnect_and_retry(self):
+        client, fake_connection = self._client_with_fake_connection(
+            [
+                {"status": False, "message": "Invalid Token"},
+                {"status": True, "data": {"ltp": "123.45"}},
+            ]
+        )
+        with patch.object(client, "_force_reconnect") as force_reconnect:
+            result = client.get_ltp("NIFTY")
+
+        force_reconnect.assert_called_once()
+        self.assertEqual(fake_connection.ltpData.call_count, 2)
+        self.assertEqual(result, 123.45)
+
+    def test_non_token_failure_does_not_retry(self):
+        client, fake_connection = self._client_with_fake_connection(
+            [{"status": False, "message": "Symbol not found"}]
+        )
+        with patch.object(client, "_force_reconnect") as force_reconnect:
+            with self.assertRaisesRegex(RuntimeError, "Symbol not found"):
+                client.get_ltp("NIFTY")
+
+        force_reconnect.assert_not_called()
+        self.assertEqual(fake_connection.ltpData.call_count, 1)
+
+    def test_two_consecutive_invalid_token_responses_gives_up_after_one_retry(self):
+        client, fake_connection = self._client_with_fake_connection(
+            [
+                {"status": False, "message": "Invalid Token"},
+                {"status": False, "message": "Invalid Token"},
+            ]
+        )
+        with patch.object(client, "_force_reconnect") as force_reconnect:
+            with self.assertRaisesRegex(RuntimeError, "Invalid Token"):
+                client.get_ltp("NIFTY")
+
+        force_reconnect.assert_called_once()
+        self.assertEqual(fake_connection.ltpData.call_count, 2)

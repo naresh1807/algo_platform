@@ -26,7 +26,7 @@ function OiCell({ value, max, side, highlight }) {
 
 /**
  * Extracted from frontend/src/pages/OptionsAnalytics.jsx (previously
- * inline in that 538-line page) so a second page (the JARVIS signal
+ * inline in that 538-line page) so a second page (the Drishti signal
  * terminal) can reuse the exact same chain rendering -- sticky-ish
  * scrollable table, ATM highlight, OI depth bars, live-flash-on-LTP-
  * change -- without duplicating it. OptionsAnalytics.jsx now imports
@@ -37,7 +37,7 @@ function OiCell({ value, max, side, highlight }) {
  * each leg's `greeks` object -- only `delta` was ever rendered before),
  * highest-OI highlighting, and an AI-selected-strike / executing-
  * contract highlight (for the signal terminal's "which contract did
- * JARVIS pick" use case, via the aiSelectedStrike/selectedContractStrike
+ * Drishti pick" use case, via the aiSelectedStrike/selectedContractStrike
  * props -- OptionsAnalytics.jsx simply doesn't pass those, so they're
  * always inert there). The extra greeks columns and OI highlighting
  * are NOT prop-gated -- they benefit OptionsAnalytics.jsx too, since
@@ -175,7 +175,7 @@ export default function OptionChainTable({
                     <span
                       className={`badge ${isSelectedCall ? "badge-accent" : "badge-green"}`}
                       style={{ marginLeft: 6, fontSize: 9 }}
-                      title={isSelectedCall ? "Contract JARVIS selected for this signal" : "AI-selected strike"}
+                      title={isSelectedCall ? "Contract Drishti selected for this signal" : "AI-selected strike"}
                     >
                       {isSelectedCall ? "SELECTED" : "AI"}
                     </span>
@@ -196,7 +196,7 @@ export default function OptionChainTable({
                     <span
                       className={`badge ${isSelectedPut ? "badge-accent" : "badge-green"}`}
                       style={{ marginLeft: 6, fontSize: 9 }}
-                      title={isSelectedPut ? "Contract JARVIS selected for this signal" : "AI-selected strike"}
+                      title={isSelectedPut ? "Contract Drishti selected for this signal" : "AI-selected strike"}
                     >
                       {isSelectedPut ? "SELECTED" : "AI"}
                     </span>

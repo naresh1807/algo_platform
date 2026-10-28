@@ -1,0 +1,9 @@
+import { useEffect, useState } from "react";
+import { endpoints } from "../services/api.js";
+export default function TradeLearning(){
+  const [data,setData]=useState(null);const [error,setError]=useState("");
+  useEffect(()=>{let active=true;const load=()=>endpoints.tradeFeedback().then(res=>{if(active){setData(res.data);setError("");}}).catch(()=>{if(active)setError("Could not load trade learning status.");});load();const timer=setInterval(load,30000);return()=>{active=false;clearInterval(timer);};},[]);
+  const money=value=>Number(value||0).toLocaleString("en-IN",{maximumFractionDigits:2});
+  const report=data?.last_training?.report;
+  return <div className="panel"><h3>{data?.model_display_name ?? "Drishti"} ? Learning from taken trades</h3><p>Completed paper option trades, labeled by realized profit or loss after recorded modeled costs. Entry features are preserved; each trade is counted once.</p>{error&&<p role="alert">{error}</p>}{data&&<><div className="delivery-summary">{[["Recorded trades",data.samples],["Profitable",data.wins],["Loss or flat",data.losses_or_flat],["Net P&L",`INR ${money(data.net_pnl)}`]].map(([label,value])=><div key={label}><small>{label}</small><strong>{value}</strong></div>)}</div><p>Recorded costs: INR {money(data.costs)}. {data.schedule}.</p>{report&&<p role="status">{report.trained ? "A candidate model was trained; it remains inactive pending review and forward evaluation." : `Waiting for sufficient taken-trade history: ${report.sample_count ?? data.samples} samples across ${report.days ?? "available"} days. Minimum 100 samples and 30 days, plus complete entry features and split checks.`}</p>}<p>Candidate evaluation compares selected returns on later days. Learning does not change hard risk limits or automatically place orders.</p></>}</div>;
+}

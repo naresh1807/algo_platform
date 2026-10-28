@@ -219,3 +219,24 @@ def fetch_headlines(symbol: str, since: datetime | None = None, page_size: int =
 
     deduped.sort(key=lambda i: i["published_at"], reverse=True)
     return deduped[:page_size]
+
+
+def fetch_war_headlines(page_size=30):
+    """Dedicated 24-hour feed; raw sourced headlines, not trade recommendations."""
+    from .rss_sources import GEOPOLITICAL_QUERY_TERMS
+    from .entities import extract_entities
+    now = django_timezone.now()
+    raw = _fetch_google_news_search(f"({GEOPOLITICAL_QUERY_TERMS} OR Hormuz OR Houthi OR airstrike) when:1d", "War and geopolitical news")
+    seen, items = set(), []
+    for item in raw:
+        published = datetime.fromisoformat(item["published_at"])
+        key = (item["headline"], item["source"])
+        if key in seen or not now - timedelta(hours=24) <= published <= now:
+            continue
+        if "geopolitical" not in extract_entities(item["headline"])["sectors"]:
+            continue
+        if not item.get("url", "").startswith(("https://", "http://")):
+            continue
+        seen.add(key); items.append(item)
+    items.sort(key=lambda item: item["published_at"], reverse=True)
+    return items[:page_size]
